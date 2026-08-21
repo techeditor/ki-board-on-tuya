@@ -1,7 +1,8 @@
 # 引脚映射与硬件连接清单（Task 2）
 
 路线：**T5AI-Core 成品开发板** 插到**自制扩展底板 PCB**（44P 排针）。
-扩展底板只承载 5键 + 5向摇杆 + LCD FPC 座 + 保护/去耦；电源/USB/音频/MIC 由开发板负担。
+扩展底板承载 5键 + 5向摇杆 + LCD FPC 座 + Type-C(CH340C,可烧录+通信) + 锂电池并联座(带总开关)
++ 3×WS2812(经电平转换) + 保护/去耦；充电管理(ETA6003)/音频/MIC 由开发板负担。
 
 ## 文件索引
 
@@ -12,6 +13,7 @@
 | [check_pins.py](check_pins.py) | 引脚冲突校验脚本（已通过，无冲突） |
 | [netlist.md](netlist.md) | 功能级网表（供 jlceda-mcp / 人工绘图） |
 | [bom.md](bom.md) | 元器件清单，对照库存标记采购项 |
+| [component-notes.md](component-notes.md) | **器件使用要点与注意事项（硬件审核快速参考）** |
 
 ## 运行校验
 
