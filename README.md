@@ -67,9 +67,11 @@ cd src-tauri && cargo test   # run protocol/transport unit tests
 
 | Doc | Content |
 |-----|---------|
+| [prd.md](docs/prd.md) | **Product requirements (for circuit review & code dev)** |
 | [implementation-plan.md](docs/implementation-plan.md) | Requirements, decisions, 16-task plan |
 | [protocol.md](docs/protocol.md) | Protocol reader's guide (points to the source) |
 | [shared/protocol/protocol.md](shared/protocol/protocol.md) | Authoritative protocol spec |
+| [hardware/pinmap/](hardware/pinmap/) | Pin map, netlist, BOM, conflict checker |
 
 ## Conventions
 

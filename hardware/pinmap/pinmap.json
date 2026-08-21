@@ -1,0 +1,76 @@
+{
+  "board": "T5AI-Core",
+  "mcu": "T5-E1",
+  "description": "Pin assignment for the agentic keyboard expansion baseboard. The dev board plugs into the baseboard via a 44P header. Verified against Tuya official pinmux + tuya_t5ai_core.c board driver.",
+  "board_occupied": [
+    { "pin": "P5",  "use": "LCD_BL",        "active": "high" },
+    { "pin": "P6",  "use": "LCD_RST" },
+    { "pin": "P7",  "use": "LCD_PWR",       "active": "high" },
+    { "pin": "P9",  "use": "USER_LED",      "active": "high" },
+    { "pin": "P10", "use": "UART0_RX" },
+    { "pin": "P11", "use": "UART0_TX" },
+    { "pin": "P14", "use": "LCD_SPI0_SCK" },
+    { "pin": "P15", "use": "LCD_SPI0_CS" },
+    { "pin": "P16", "use": "LCD_SPI0_MOSI" },
+    { "pin": "P17", "use": "LCD_DC" },
+    { "pin": "P29", "use": "USER_BUTTON",   "active": "low" },
+    { "pin": "P39", "use": "SPEAKER_EN",    "active": "low" }
+  ],
+  "assigned": [
+    { "pin": "P24", "net": "KEY1",       "header": "J2.13", "mode": "input_pullup", "active": "low" },
+    { "pin": "P25", "net": "KEY2",       "header": "J2.8",  "mode": "input_pullup", "active": "low" },
+    { "pin": "P26", "net": "KEY3",       "header": "J2.9",  "mode": "input_pullup", "active": "low" },
+    { "pin": "P27", "net": "KEY4",       "header": "J2.12", "mode": "input_pullup", "active": "low" },
+    { "pin": "P23", "net": "KEY5",       "header": "J2.7",  "mode": "input_pullup", "active": "low" },
+    { "pin": "P32", "net": "NAV_UP",     "header": "J2.14", "joystick_pin": 1, "mode": "input_pullup", "active": "low" },
+    { "pin": "P20", "net": "NAV_DOWN",   "header": "J2.4",  "joystick_pin": 3, "mode": "input_pullup", "active": "low" },
+    { "pin": "P21", "net": "NAV_LEFT",   "header": "J2.5",  "joystick_pin": 6, "mode": "input_pullup", "active": "low" },
+    { "pin": "P22", "net": "NAV_RIGHT",  "header": "J2.6",  "joystick_pin": 4, "mode": "input_pullup", "active": "low" },
+    { "pin": "P30", "net": "NAV_CENTER", "header": "J2.11", "joystick_pin": 2, "mode": "input_pullup", "active": "low" },
+    { "pin": "P13", "net": "WS2812_DIN", "header": "J1.16", "mode": "output", "note": "3x WS2812 daisy-chain via SN74LV1T34 level shifter (3.3V->5V)" }
+  ],
+  "lcd_spi": {
+    "note": "Reuses the board's official ST7789 wiring; firmware only changes resolution to 320x240.",
+    "sck": "P14", "mosi": "P16", "cs": "P15", "dc": "P17", "rst": "P6", "bl": "P5", "pwr": "P7",
+    "spi_port": "SPI0", "spi_clk_hz": 48000000, "pixel_fmt": "RGB565"
+  },
+  "header_44p": {
+    "note": "44P = two 1x22 headers J1 + J2, from T5AI-Core_V101-SCH.pdf. Only pins listed here are broken out; P28/P33/P35 are NOT on the header (do not use).",
+    "row_spacing_mm": 25.502,
+    "row_spacing_note": "Center-to-center distance between J1 and J2 rows, caliper-measured 2026-08-21. Use this for the two 1x22 socket footprints on the baseboard.",
+    "pitch_mm": 2.54,
+    "verified": true
+  },
+  "expansion_usb": {
+    "note": "Expansion-board Type-C for firmware flash + comms. T5 has NO USB device; a CH340C USB-to-UART bridge provides the CDC. Shares UART0 (P10/P11) with the dev board's onboard CH342F (plug only ONE Type-C at a time). Auto-reset/download via CH340C DTR/RTS -> S8050 -> T5_RST, mirroring the dev board's circuit.",
+    "bridge": "CH340C (SOP-16, stock)",
+    "uart": "UART0",
+    "uart_rx_t5": "P10", "uart_tx_t5": "P11",
+    "tx_isolation": "series 2k resistor (stock C60488) on CH340C TX -> T5 RX to reduce bus contention with onboard CH342F. 2k chosen (stock, RC effect negligible at 460800 baud).",
+    "auto_reset": "Mirrors dev board SCH (U2 CH342F, single S8050 transistor Q2): RTS0 -> Q2 base (direct); DTR0 -> R22(4.7k) -> Q2 base; Q2 collector -> R14(100R) -> T5_RST (J2.2); Q2 emitter -> GND. T5_RST pull-up R47(10k) + C51(0.1uF) already on dev board.",
+    "auto_reset_values": { "Q": "S8050", "R_DTR": "4.7k", "R_RST": "100R", "R_RST_pullup": "10k (on dev board)" },
+    "reset_net": "T5_RST", "reset_header": "J2.2",
+    "vbus": "Type-C VBUS(5V) powers ONLY the CH340C locally via a small 3.3V LDO (HE9073A33M5R, SOT-23-5, stock). DOES NOT feed the system (NOT connected to header 5V). This lets flashing/comms work even with a dead battery / unpowered system.",
+    "ch340c_supply": "Type-C VBUS 5V -> LDO 3.3V -> CH340C VCC. CH340C IO = 3.3V, directly matches T5 UART (no over-voltage). Independent of battery.",
+    "ldo": "HE9073A33M5R (SOT-23-5, 3.3V, stock C723789)"
+  },
+  "battery": {
+    "note": "Expansion battery connector in PARALLEL with the dev board's JST on the SAME BAT net. Only ONE cell plugged at a time. NO charge management on the expansion board (uses dev board ETA6003).",
+    "connector": "JST PH 1.25mm 2P",
+    "power_switch": "Battery main switch (SK12D07VG5, C431548, slide/toggle, stock) in series on BAT+ of the expansion cell. Gates ONLY the battery path. Type-C stays powered/charging regardless.",
+    "net_positive": "BAT+", "net_negative": "GND",
+    "ties_to": "dev board JST (CN1) BAT net"
+  },
+  "ws2812": {
+    "note": "3x WS2812 RGB LED daisy-chain, single data line, 5V powered. T5 3.3V GPIO -> SN74LV1T34 level shifter -> 5V DIN.",
+    "count": 3,
+    "data_gpio": "P13", "data_header": "J1.16",
+    "level_shifter": "SN74LV1T34 (SOT-23-5, stock C100024)",
+    "power": "5V from header J1", "series_resistor_ohm": "100-330 on DIN", "decoupling": "100nF per LED"
+  },
+  "resolved": [
+    "44P header per-pin positions: from T5AI-Core_V101-SCH.pdf (J1/J2, 1x22 each)",
+    "CL28CK230-18A 18P FPC: 1=RST 2=SCL 3=RS/DC 4=CS 5=SDA 6=SDO 7=GND 8=VCC 9=LEDA 10-13=LEDK1-4 14-18=touch(XL/YU/XR/YD)",
+    "WS-1002 joystick 6-pin: 1=A 2=Center 3=B 4=D 5=Com(GND) 6=C"
+  ]
+}

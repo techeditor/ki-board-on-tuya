@@ -1,6 +1,9 @@
 # ===== Reference project (not part of this repo) =====
 ki-board/
 
+# ===== Knowledge base (cloned for reference, not part of this repo) =====
+tuya-kb/
+
 # ===== Component datasheets / vendor reference material (large binaries, not committed) =====
 datasheets/
 
@@ -56,3 +59,6 @@ $RECYCLE.BIN/
 *.tmp
 *.bak
 *.swp
+
+
+.playwright-mcp/
