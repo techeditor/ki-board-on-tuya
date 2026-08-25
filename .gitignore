@@ -1,6 +1,3 @@
-# ===== Reference project (not part of this repo) =====
-ki-board/
-
 # ===== Knowledge base (cloned for reference, not part of this repo) =====
 tuya-kb/
 
@@ -97,5 +94,6 @@ companion/src-tauri/target/release/bundle/
 **/*authkey*
 **/*auth_key*
 uuid_authkey*.txt
-# ===== References =====
-signal_light_demo
+
+# ===== Reference Projects =====
+ref_projects/
