@@ -19,7 +19,7 @@
 | `shared/protocol/protocol.md` | 通信协议权威定义 |
 | `docs/implementation-plan.md` | 16 任务 4 阶段实施计划 |
 | `tuya-kb/` | TuyaOpen/T5 知识库（参考，不入库） |
-| `ki-board/` | 参考项目（ESP32-S3 版，不入库） |
+| `ref_projects/ki-board/` | 参考项目（ESP32-S3 版，不入库） |
 
 ---
 
@@ -664,7 +664,7 @@ Windows 走**云编译 + 本地烧录**（见 `tuya-kb/03-toolchain-setup/01-clo
 | 机械键手册 | `datasheets/CPG151101D06_茶轴开关.pdf` |
 | 库存 BOM | `datasheets/BOM_Stocks_20260810.xlsx` |
 | 官方 ST7789 接线与板级代码 | developer.tuya.com/cn/docs/developer/t5-chatbot |
-| 参考项目 ki-board | `ki-board/`（ESP32-S3 版，USB HID + 5 屏） |
+| 参考项目 ki-board | `ref_projects/ki-board/`（ESP32-S3 版，USB HID + 5 屏） |
 
 ### 11.3 变更记录
 

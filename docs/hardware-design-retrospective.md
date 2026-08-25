@@ -247,7 +247,7 @@
 - CH340C / SN74LV1T34 / S8050 / WS2812 / HE9073A33 / SK12D07VG5
 
 ### 8.3 参考项目
-- `ki-board/`（ESP32-S3 版，USB HID + 5 屏）— transport/protocol/ASR 结构可对照复用
+- `ref_projects/ki-board/`（ESP32-S3 版，USB HID + 5 屏）— transport/protocol/ASR 结构可对照复用
 
 ### 8.4 知识库（tuya-kb/，源码级核实）
 - 连接模式最终设计（4 模式对比）、系统级功能可行性矩阵、语音听写与事件、

@@ -14,7 +14,9 @@ pub struct UsbSerialTransport {
 
 impl UsbSerialTransport {
     pub fn new(port_name: impl Into<String>) -> Self {
-        Self { port_name: port_name.into() }
+        Self {
+            port_name: port_name.into(),
+        }
     }
 }
 

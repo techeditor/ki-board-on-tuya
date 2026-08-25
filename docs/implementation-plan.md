@@ -16,8 +16,8 @@
 - 固件框架：原生 TuyaOpen SDK + `tos.py`，**原生 Windows 编译**（Git Bash，无需 WSL；本机实测当前仓库路径可正常构建，无需规避 C 盘 / 中文 / 空格）
 - 连接分阶段：阶段1 有线（UART/USB-CDC + Companion）→ 阶段2 BLE GATT + Companion → 阶段3 BLE HID 直连
 - 语音分阶段：阶段1 Windows 系统 ASR（PC 端，笔记本麦克风）→ 阶段2 板端唤醒词 + 在线 ASR → 阶段3（可选）板端本地 ASR
-- Companion：Windows 优先，**Tauri (Rust + React/TypeScript)**，对照 ki-board 的 `transport`/`protocol`/ASR 结构复用
-- 从 ki-board 借鉴纳入：Kiro CLI hook → Agent 状态上屏、`powershell_shim` 消弹窗、串口 VID/PID 自动发现、可替换传输层、`ble_probe`/`asr_probe`/`ota_flash` 探针工具
+- Companion：Windows 优先，**Tauri (Rust + React/TypeScript)**，对照 `ref_projects/ki-board/` 的 `transport`/`protocol`/ASR 结构复用
+- 从 `ref_projects/ki-board/` 借鉴纳入：Kiro CLI hook → Agent 状态上屏、`powershell_shim` 消弹窗、串口 VID/PID 自动发现、可替换传输层、`ble_probe`/`asr_probe`/`ota_flash` 探针工具
 
 ## 技术结论（已核实）
 - T5：M33F@480MHz，8MB Flash/16MB PSRAM，Wi-Fi6 + BLE 5.4，48× GPIO，2×SPI+2×QSPI，3×UART，2×I2C，3×I2S，2×音频ADC+1×DAC，1× HS USB2.0。
@@ -67,7 +67,7 @@ Companion（Tauri: Rust + React/TS）：传输后端+协议解析 → 事件路�
 ## 执行注意
 - 每个 Task 完成后运行对应构建/测试（Rust `cargo test`、前端 `tsc`、固件构建），验证通过再进入下一个。
 - 传输层与协议层跨阶段复用，务必保持接口稳定。
-- 优先对照已克隆的 ki-board 项目结构复用，减少重复设计。
+- 优先对照已克隆的 `ref_projects/ki-board/` 项目结构复用，减少重复设计。
 
 ## 待确认事项
 > 执行前需与开发者确认（占位，待补充）。

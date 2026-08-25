@@ -4,9 +4,9 @@ A portable AI macro-keyboard built on the **Tuya T5AI-Core** board, designed to
 improve the Kiro CLI / IDE development experience. Its differentiators are
 **voice input straight into Kiro** and **on-screen Agent status**.
 
-> Status: **Phase 0 — scaffolding**. This repo currently holds the project
-> skeleton, protocol draft, and a cloned reference project (`ki-board/`). T5
-> firmware and the companion app are built out in later phases.
+> Status: **Phase 0 complete; Phase 0.5 hardware bring-up next**. The expansion
+> baseboard v1.0 design and review are complete. Firmware and the companion app
+> remain skeletons; external reference projects live under `ref_projects/`.
 
 *(中文版见 [README.zh-CN.md](README.zh-CN.md))*
 
@@ -49,7 +49,9 @@ Full task breakdown: [docs/implementation-plan.md](docs/implementation-plan.md).
 ├── enclosure/           # 3D-printed enclosure design (independent sub-project)
 ├── shared/protocol/     # Authoritative wire-protocol spec
 ├── docs/                # Design / spec docs (Chinese-first)
-└── ki-board/            # Reference project (git-ignored, not part of this repo)
+└── ref_projects/        # External references (git-ignored, not part of this repo)
+    ├── ki-board/
+    └── signal_light_demo/
 ```
 
 ## Build (skeleton)
@@ -58,7 +60,7 @@ Prerequisites: Node 22+, Rust 1.96+.
 
 ```bash
 cd companion
-npm install
+npm ci
 npm run tauri dev        # launch the skeleton window
 cd src-tauri && cargo test   # run protocol/transport unit tests
 ```
@@ -77,7 +79,7 @@ cd src-tauri && cargo test   # run protocol/transport unit tests
 
 - Interaction & design docs: Chinese-first. README: bilingual (English primary).
 - Code comments: English. Commit messages: English.
-- `ki-board/` is a **reference only** and is excluded from version control.
+- `ref_projects/` contains **references only** and is excluded from version control.
 
 ## License
 

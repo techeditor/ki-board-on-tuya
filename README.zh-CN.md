@@ -3,8 +3,8 @@
 一款基于 **Tuya T5AI-Core** 开发板的便携 AI 小键盘，用于提升 Kiro CLI / IDE 的
 开发体验。核心差异化功能是**语音输入直达 Kiro**与 **Agent 状态上屏显示**。
 
-> 状态：**阶段 0 — 脚手架**。当前仓库仅包含项目骨架、协议草案，以及一个克隆的
-> 参考项目（`ki-board/`）。T5 固件与上位机在后续阶段实现。
+> 状态：**阶段 0 已完成，下一步进入阶段 0.5 硬件 Bring-up**。扩展底板 v1.0
+> 已完成设计与审核；T5 固件和上位机仍为骨架，外部参考项目统一放在 `ref_projects/`。
 
 *(English version: [README.md](README.md))*
 
@@ -46,7 +46,9 @@
 ├── enclosure/           # 3D 打印外壳设计（独立子项目）
 ├── shared/protocol/     # 权威协议规范
 ├── docs/                # 设计/规格文档（中文优先）
-└── ki-board/            # 参考项目（已 git-ignore，不属于本仓库）
+└── ref_projects/        # 外部参考项目（已 git-ignore，不属于本仓库）
+    ├── ki-board/
+    └── signal_light_demo/
 ```
 
 ## 构建（骨架）
@@ -55,7 +57,7 @@
 
 ```bash
 cd companion
-npm install
+npm ci
 npm run tauri dev        # 启动骨架窗口
 cd src-tauri && cargo test   # 运行协议/传输层单元测试
 ```
@@ -74,7 +76,7 @@ cd src-tauri && cargo test   # 运行协议/传输层单元测试
 
 - 交互与设计文档：中文优先。README：中英双版（英文为主版）。
 - 代码注释：英文。Commit message：英文。
-- `ki-board/` 仅作**参考**，不纳入版本管理。
+- `ref_projects/` 仅存放**参考项目**，不纳入版本管理。
 
 ## 许可
 

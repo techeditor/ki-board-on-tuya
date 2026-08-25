@@ -13,7 +13,9 @@ pub struct BleGattTransport {
 
 impl BleGattTransport {
     pub fn new(device_id: impl Into<String>) -> Self {
-        Self { device_id: device_id.into() }
+        Self {
+            device_id: device_id.into(),
+        }
     }
 }
 
