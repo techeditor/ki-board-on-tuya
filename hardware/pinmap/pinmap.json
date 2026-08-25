@@ -27,7 +27,7 @@
     { "pin": "P21", "net": "NAV_LEFT",   "header": "J2.5",  "joystick_pin": 6, "mode": "input_pullup", "active": "low" },
     { "pin": "P22", "net": "NAV_RIGHT",  "header": "J2.6",  "joystick_pin": 4, "mode": "input_pullup", "active": "low" },
     { "pin": "P30", "net": "NAV_CENTER", "header": "J2.11", "joystick_pin": 2, "mode": "input_pullup", "active": "low" },
-    { "pin": "P13", "net": "WS2812_DIN", "header": "J1.16", "mode": "output", "note": "3x WS2812 daisy-chain via SN74LV1T34 level shifter (3.3V->5V)" }
+    { "pin": "P13", "net": "WS2812_DIN", "header": "J1.16", "mode": "output", "note": "3x WS2812 daisy-chain via SN74LV1T34 level shifter (3.3V->5V). P13 is also the UART0_CTS mux pin, but UART0 hardware flow control is NOT used in phase 1, so P13 is free for this." }
   ],
   "lcd_spi": {
     "note": "Reuses the board's official ST7789 wiring; firmware only changes resolution to 320x240.",
@@ -42,7 +42,7 @@
     "verified": true
   },
   "expansion_usb": {
-    "note": "Expansion-board Type-C for firmware flash + comms. T5 has NO USB device; a CH340C USB-to-UART bridge provides the CDC. Shares UART0 (P10/P11) with the dev board's onboard CH342F (plug only ONE Type-C at a time). Auto-reset/download via CH340C DTR/RTS -> S8050 -> T5_RST, mirroring the dev board's circuit.",
+    "note": "Expansion-board Type-C for firmware flash + comms. T5 has NO USB device; a CH340C USB-to-UART bridge provides the CDC. Shares UART0 (P10/P11) with the dev board's onboard CH342F (plug only ONE Type-C at a time). Auto-reset/download via CH340C DTR/RTS -> S8050 -> T5_RST, mirroring the dev board's circuit. USB isolation: the Type-C D+/D- connect ONLY to the CH340C; they are NOT wired to the header DP/DN pins (which are the dev board T5's USB Host signals, a separate USB). The expansion board does not use/route header DP/DN.",
     "bridge": "CH340C (SOP-16, stock)",
     "uart": "UART0",
     "uart_rx_t5": "P10", "uart_tx_t5": "P11",

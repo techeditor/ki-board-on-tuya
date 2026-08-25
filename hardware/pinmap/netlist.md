@@ -2,43 +2,54 @@
 
 > 供 jlceda-mcp 或人工绘制原理图的连接清单。
 > 44P 排针（开发板 J1/J2 两排）与 18P FPC、摇杆脚序**逐脚已确认**（见 pinmap.md §3/§4/§8）。
-> 本网表元件位号：**H1/H2** = 扩展板上插开发板的两个 1×22 母排座（对应开发板 J1/J2）。
+> **位号说明（2026-08-24 对齐 EDA v1.0）**：本表左列为**功能位号**（设计意图命名）；
+> 「EDA 实际位号」列为 **EasyEDA 工程 Expansion Baseboard_v1.0** 中的真实位号（以 EDA 为准）。
+> 二者可能不同：例如两个 1×22 母排在 EDA 中合并为单个 44 脚封装 **U1（TUYA_T5_CORE）**；摇杆在 EDA 中为 **SW2**。
+> ⚠️ 电阻/电容**阻容实际值以 EDA 原理图为准**（本表数值为设计目标值，EDA 属性未在此逐一解析）。
 
 ## 元件清单（Designator）
 
-| 位号 | 元件 | 说明 |
-|------|------|------|
-| H1 | 1×22 2.54mm 母排座 | 插开发板 **J1 排**（3V3/5V/GND + LCD SPI + P13 等） |
-| H2 | 1×22 2.54mm 母排座 | 插开发板 **J2 排**（输入 GPIO + UART0 + T5_RST + DP/DN 等） |
-| J_LCD | 18P 0.5mm FPC 座（国连 C51901319） | 接 CL28CK230-18A LCD |
-| SW1..SW5 | 机械键 CPG151101D06 茶轴（直焊） | 5× 机械按键 |
-| SW6 | 5向摇杆 WS-1002 | 4向+中心 |
-| J_USBC | Type-C 母座（16P） | 扩展板 USB 口（烧录+通信） |
-| U_USB | CH340C（SOP-16） | USB-转-UART 桥 |
-| U_LDO | HE9073A33M5R（SOT-23-5,3.3V,库存） | Type-C VBUS 5V → 3.3V 给 CH340C |
-| Q_RST | S8050（SOT-23，NPN） | 自动复位三极管 |
-| U_LS | SN74LV1T34（SOT-23-5） | WS2812 电平转换 3.3→5V |
-| LED1..LED3 | WS2812 RGB LED | 菊花链 |
-| J_BAT | JST PH 1.25mm 2P 座 | 锂电池并联座 |
-| SW_BAT | 拨动开关 SK12D07VG5（C431548，库存） | 电池总开关，串于 BAT+ |
-| R1..R2 | 22Ω 0402（可选） | LCD SPI SCK/MOSI 阻尼 |
-| R_TX | 2kΩ 0402（库存 C60488） | CH340C TX→T5 RX 隔离 |
-| R_CC1/R_CC2 | 5.1kΩ 0402 | Type-C CC 下拉（UFP/设备角色） |
-| R_DTR | 4.7kΩ 0402（=开发板 R22） | CH340C DTR → Q_RST 基极 串阻 |
-| R_RST | 100Ω 0402（=开发板 R14） | Q_RST 集电极 → T5_RST 串阻 |
-| R_RST_PU | 10kΩ 0402（=开发板 R47，可选） | T5_RST 上拉到 3V3（开发板已有，扩展板可不重复） |
-| R_LED | 100-330Ω 0402 | WS2812 DIN 串阻 |
-| C_USB1 | 100nF | CH340C VCC 去耦 |
-| C_USB2 | 1µF | CH340C VCC 储能 |
-| C_LED1..3 | 100nF | 每颗 WS2812 去耦 |
-| C1..C2 | 1µF | LCD FPC 电源去耦 |
-| C3..C4 | 100nF | LCD FPC 电源去耦 |
-| D_ESD* | LESD5D5.0 / ESD 阵列 | USB D+/D-、可触摸接口 ESD |
+| 功能位号 | EDA 实际位号(v1.0) | 元件 | 说明 |
+|------|------|------|------|
+| H1/H2（母排） | **U1**（封装 TUYA_T5_CORE，44脚=22×2） | 2× 1×22 2.54mm 母排（合并为一个 44 脚封装） | 插开发板 J1+J2 两排（3V3/5V/GND/LCD SPI/输入 GPIO/UART0/T5_RST 等） |
+| J_LCD | **FPC1**（底层） | 18P 0.5mm FPC 座（国连 C51901319） | 接 CL28CK230-18A LCD |
+| SW1..SW5 | **K1..K5** | 机械键 CPG151101D06 茶轴（直焊） | 5× 机械按键 |
+| SW6（摇杆） | **SW2**（8脚）+ **U4**（2x4 扩展焊盘） | 5向摇杆 WS-1002 | 4向+中心；U4 为摇杆扩展/备用焊盘 |
+| J_USBC | **USBC1** | Type-C 母座（16P） | 扩展板 USB 口（烧录+通信） |
+| U_USB | **U3**（SOP-16） | CH340C | USB-转-UART 桥 |
+| U_LDO | **U5**（SOT-23-5） | HE9073A33M5R（3.3V,库存） | Type-C VBUS 5V → 3.3V 给 CH340C |
+| Q_RST | **Q2**（SOT-23） | S8050（NPN） | 自动复位三极管（RTS/DTR→基极，集电极→R_RST→T5_RST） |
+| Q_BL | **Q1**（SOT-23） | S8050（NPN） | LCD 背光低边开关（LCD_BL→R_BL→基极，集电极→R_LEDK→LCD_LEDK） |
+| U_LS | **U2**（SOT-23-5） | SN74LV1T34 | WS2812 电平转换 3.3→5V |
+| LED1..LED3 | **LED1..LED3** | WS2812 RGB LED | 菊花链（3 颗） |
+| **LED_VBUS** | **LED4** | 普通红色 0603 LED | **VBUS(Type-C 5V) 供电指示**（VBUS→R6→LED4→GND） |
+| **LED_BAT** | **LED5** | 普通红色 0603 LED | **电池(BAT_P) 供电指示**（BAT_P→R10→LED5→GND） |
+| J_BAT | **BT1** | JST PH 1.25mm 2P 座 | 锂电池并联座 |
+| （2P 插针） | **H1** | HDR 2P 2.54mm 插针 | 电池相关 2P 插针（网络 GND / BAT_P） |
+| SW_BAT | **SW1** | 拨动开关 SK12D07VG5（C431548，库存） | 电池总开关，串于 BAT+ |
+| TP_VBUS | **TP1** | 测试点 | VBUS 测试点 |
+| SCREW1..6 | **SCREW1..6** | M2.5 安装孔 | 外壳固定（非贴装） |
+| R_SPI（阻尼） | **R11**(SCK)/**R12**(MOSI) | 22Ω 0402（可选，阻值以 EDA 为准） | LCD SPI SCK/MOSI 阻尼 |
+| R_TX | **R5** | CH340C TX→T5 RX 隔离（阻值以 EDA 为准，设计目标 2kΩ） | UART0_RX 串阻（$3N37↔UART0_RX） |
+| R_CC1/R_CC2 | （Type-C 区 R） | 5.1kΩ 0402 | Type-C CC 下拉（UFP/设备角色） |
+| R_DTR | （复位区 R） | 4.7kΩ 0402（=开发板 R22） | CH340C DTR → Q_RST 基极 串阻 |
+| R_RST | **R9** | 100Ω 0402（=开发板 R14，阻值以 EDA 为准） | Q_RST 集电极 → T5_RST 串阻 |
+| R_WS_DIN | **R3** | WS2812 DIN 串阻（阻值以 EDA 为准，设计目标 100–330Ω） | U2.Y→R3→LED1.DIN（**EDA 已具备此串阻**） |
+| R_BL / R_LEDK | **R2**(BL→基极)/**R1**(LEDK 限流) | 背光管基极电阻 / LEDK 限流（阻值以 EDA 为准） | 背光低边开关 Q1 外围 |
+| R_LED_VBUS | **R6** | VBUS 指示灯限流（阻值以 EDA 为准） | 串 LED4 |
+| R_LED_BAT | **R10** | BAT 指示灯限流（阻值以 EDA 为准） | 串 LED5 |
+| （其他 R） | **R4 / R7 / R8** | 复位/去耦网络相关（用途见原理图） | R7 连复位($3N35/$3N36) |
+| C_USB1/2 | （CH340 区 C） | 100nF + 1µF | CH340C VCC 去耦/储能 |
+| C_LED1..3 | （LED 区 C） | 100nF ×3 | 每颗 WS2812 去耦 |
+| C_FPC | （FPC 区 C） | 1µF + 100nF | LCD FPC 电源去耦 |
+| D_ESD | **D1**(VBUS,SOD-123) / **D2·D3**(USB D+/D-,D0402-BI) | ESD/TVS | VBUS 与 USB D+/D- 静电防护 |
+
+> 说明：C 类电容位号（C1..C13）在 EDA 中按布局编号，具体归属见原理图；本表按功能分组，阻容实际值以 EDA 原理图为准。
 
 ## 网络（Net）连接
 
-### LCD SPI（信号来自 J1 上开发板对应引脚；J2:FPC 为 18P FPC 脚号）
-| Net | 从（T5引脚/排针） | 到（J2 FPC 脚） | 备注 |
+### LCD SPI（SPI 信号 SCK/MOSI/CS/DC 走排针 J1；RST/BL/PWR 走 J2；右列为 18P FPC 屏排线脚号）
+| Net | 从（T5引脚/排针） | 到（18P FPC 脚） | 备注 |
 |-----|------------------|----------------|------|
 | `LCD_SCK`  | P14 / J1.14 | FPC.2 (SCL)（经 R1 22Ω）  | 48MHz |
 | `LCD_MOSI` | P16 / J1.13 | FPC.5 (SDA)（经 R2 22Ω） | |
@@ -51,7 +62,7 @@
 | （预留触摸） | — | FPC.14-18 (XL/YU/XR/YD) | 一期不接 |
 
 ### 输入（低有效，公共端 GND；上拉用 T5 内部上拉）
-| Net | 从（J1 / T5引脚） | 到 |
+| Net | 从（J2 / T5引脚） | 到 |
 |-----|------------------|-----|
 | `KEY1` | J2.13 (P24) | SW1 一端（另一端 GND） |
 | `KEY2` | J2.8 (P25) | SW2 |
@@ -95,6 +106,9 @@
 > RTS0→Q2基极(直连)、DTR0→R22(4.7k)→Q2基极、Q2集电极→R14(100Ω)→T5_RST、发射极→GND。
 > T5_RST 上拉 R47(10k)+去耦 C51(0.1µF) 开发板已有（在 J2.2 引出），扩展板可不重复。
 > ⚠️ CH340C 与开发板 CH342F 共用 UART0，**同时只插一个 Type-C**。
+> ⚠️ **USB 隔离**：扩展板 Type-C 的 D+/D- **只接 CH340C 的 UD+/UD-**，是一条独立的 USB-转-UART 链路；
+> **不连**排针 J2 上引出的 **DP/DN**（那是开发板 T5 的 **USB Host** 信号，属另一套 USB）。二者互不相连，
+> 扩展板不使用/不引出排针 DP/DN。
 
 ### 3× WS2812 + 电平转换
 | Net | 从 | 到 | 备注 |
@@ -103,6 +117,14 @@
 | `WS2812_DIN_5V` | U_LS 输出Y → R_LED 100-330Ω | LED1.DIN | 5V 侧 |
 | chain | LED1.DOUT → LED2.DIN → LED3.DIN | | 菊花链 |
 | `5V`/`GND` | H1 5V/GND | LED1-3 VDD/VSS、U_LS VCC | 每颗 C_LED 100nF 去耦 |
+
+### 2× 电源指示灯（普通红色 LED，EDA v1.0 新增，2026-08-24 补录）
+| Net | 从 | 到 | 备注 |
+|-----|----|----|------|
+| `VBUS` | VBUS | R6(LED_VBUS 限流) → **LED4** 阳极；LED4 阴极 → GND | **Type-C VBUS(5V) 供电指示**（插 Type-C 亮） |
+| `BAT_P` | BAT_P | R10(LED_BAT 限流) → **LED5** 阳极；LED5 阴极 → GND | **电池供电指示**（电池供电亮） |
+
+> LED4/LED5 为普通红色 0603 LED（非 WS2812），仅作电源状态指示。限流电阻 R6/R10 阻值以 EDA 原理图为准。
 
 ### 锂电池并联座 + 电池总开关
 | Net | 从 | 到 | 备注 |
@@ -121,9 +143,10 @@
 - ✅ SW6 6 脚 ↔ 方向/中心/公共：WS-1002 规格书电路图（①A ②Center ③B ④D ⑤Com ⑥C）
 
 ## 仍需实机确认
-- R1/R2（SPI 阻尼 22Ω）是否需要：48MHz 走线短可省，打样时可先 0Ω 跳线
-- 背光 LEDK1-4 的限流电阻阻值：按屏实际亮度调（接线图注 R1 可调）
+- SPI 阻尼电阻（EDA 位号 **R11**=SCK / **R12**=MOSI）是否需要：48MHz 走线短可省，打样时可先 0Ω 跳线
+- 背光限流电阻（EDA 位号 **R1**，LCD_LEDK 侧）阻值：按屏实际亮度调
 - 方向 A/B/C/D ↔ 上/下/左/右 的最终对应：装配后按外壳朝向在固件标定
+- ⚠️ 各电阻/电容**实际阻容值以 EDA 原理图（Expansion Baseboard_v1.0）为准**；本网表数值为设计目标值
 
 ## 机器可读源
 结构化数据见 `pinmap.json`；冲突校验见 `check_pins.py`（已通过，无冲突）。
