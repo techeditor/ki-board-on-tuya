@@ -97,3 +97,5 @@ companion/src-tauri/target/release/bundle/
 **/*authkey*
 **/*auth_key*
 uuid_authkey*.txt
+# ===== References =====
+signal_light_demo
