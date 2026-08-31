@@ -19,6 +19,13 @@ target/
 **/target/
 **/gen/schemas/
 
+# ===== Flashing tools (vendor binary, downloaded locally, not committed) =====
+# tyutool CLI lives next to scripts\flash.ps1; download from https://tuyaopen.ai/tyutool
+scripts/tyutool_cli.exe
+tyutool_cli*.exe
+# Local firmware pull cache (fingerprint of the last downloaded fw.bin)
+scripts/fw.bin.meta
+
 # ===== Firmware: TuyaOpen build artifacts =====
 firmware/.build/
 firmware/build/
