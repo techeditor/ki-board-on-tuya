@@ -12,7 +12,7 @@
 | 功能位号 | EDA 实际位号(v1.0) | 元件 | 说明 |
 |------|------|------|------|
 | H1/H2（母排） | **U1**（封装 TUYA_T5_CORE，44脚=22×2） | 2× 1×22 2.54mm 母排（合并为一个 44 脚封装） | 插开发板 J1+J2 两排（3V3/5V/GND/LCD SPI/输入 GPIO/UART0/T5_RST 等） |
-| J_LCD | **FPC1**（底层） | 18P 0.5mm FPC 座（国连 C51901319） | 接 CL28CK230-18A LCD |
+| J_LCD | **FPC1**（底层） | 18P 0.5mm FPC 座（国连 C51901319） | 接 CL28CK230-18A LCD。⚠️ **v1.0 缺陷：脚序镜像（Pin1↔Pin18 反）**，底层放置未做脚序镜像。下方逻辑映射正确；本版实物须**反向插入排线**才正常（2026-08-31 实机确认，见 TEST_RESULTS.md Step 4）。下一版改板修正 footprint。💡 **固件适配点**：此屏需 ST7789 **INVOFF**（默认序列结尾是 INVON，会导致全屏色彩取反）；正式固件 LCD 模块须沿用 no-inversion 初始化序列 |
 | SW1..SW5 | **K1..K5** | 机械键 CPG151101D06 茶轴（直焊） | 5× 机械按键 |
 | SW6（摇杆） | **SW2**（8脚）+ **U4**（2x4 扩展焊盘） | 5向摇杆 WS-1002 | 4向+中心；U4 为摇杆扩展/备用焊盘 |
 | J_USBC | **USBC1** | Type-C 母座（16P） | 扩展板 USB 口（烧录+通信） |
@@ -51,15 +51,15 @@
 ### LCD SPI（SPI 信号 SCK/MOSI/CS/DC 走排针 J1；RST/BL/PWR 走 J2；右列为 18P FPC 屏排线脚号）
 | Net | 从（T5引脚/排针） | 到（18P FPC 脚） | 备注 |
 |-----|------------------|----------------|------|
-| `LCD_SCK`  | P14 / J1.14 | FPC.2 (SCL)（经 R1 22Ω）  | 48MHz |
-| `LCD_MOSI` | P16 / J1.13 | FPC.5 (SDA)（经 R2 22Ω） | |
-| `LCD_CS`   | P15 / J1.15 | FPC.4 (CS) | |
-| `LCD_DC`   | P17 / J1.12 | FPC.3 (RS) | |
-| `LCD_RST`  | P6  / J2.18 | FPC.1 (RST) | |
-| `LCD_BL`   | P5  / J2.19 | FPC.9-13 (LEDA + LEDK1-4 经限流 R) | 高有效 |
-| `LCD_PWR`  | P7  / J2.17 | FPC.8 (VCC) | 高有效，屏 3.3V 使能 |
-| `GND`      | GND | FPC.7 | |
-| （预留触摸） | — | FPC.14-18 (XL/YU/XR/YD) | 一期不接 |
+| `LCD_SCK`  | P14 / J1.14 | FPC.3 (SCL)（经 R11 22Ω） | 48MHz |
+| `LCD_MOSI` | P16 / J1.13 | FPC.6 (SDA)（经 R12 22Ω） | |
+| `LCD_CS`   | P15 / J1.15 | FPC.5 (CS) | |
+| `LCD_DC`   | P17 / J1.12 | FPC.4 (RS) | |
+| `LCD_RST`  | P6  / J2.18 | FPC.2 (RST) | |
+| `LCD_BL`   | P5  / J2.19 | FPC.10-14 (LEDA + LEDK1-4 经限流 R) | 高有效 |
+| `LCD_PWR`  | P7  / J2.17 | FPC.9 (VCC) | 高有效，屏 3.3V 使能 |
+| `GND`      | GND | FPC.1 / FPC.8 | |
+| （预留触摸） | — | FPC.15-18 (XL/YU/XR/YD) | 一期不接 |
 
 ### 输入（低有效，公共端 GND；上拉用 T5 内部上拉）
 | Net | 从（J2 / T5引脚） | 到 |

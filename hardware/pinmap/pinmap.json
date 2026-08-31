@@ -70,7 +70,7 @@
   },
   "resolved": [
     "44P header per-pin positions: from T5AI-Core_V101-SCH.pdf (J1/J2, 1x22 each)",
-    "CL28CK230-18A 18P FPC: 1=RST 2=SCL 3=RS/DC 4=CS 5=SDA 6=SDO 7=GND 8=VCC 9=LEDA 10-13=LEDK1-4 14-18=touch(XL/YU/XR/YD)",
+    "CL28CK230-18A 18P FPC: 1=GND 2=RST 3=SCL 4=RS/DC 5=CS 6=SDA 7=SDO 8=GND 9=VCC 10=LEDA 11-14=LEDK1-4 15-18=touch(XL/YU/XR/YD)",
     "WS-1002 joystick 6-pin: 1=A 2=Center 3=B 4=D 5=Com(GND) 6=C"
   ]
 }

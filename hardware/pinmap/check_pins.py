@@ -6,6 +6,7 @@ Reads pinmap.json and verifies:
   2. No `assigned` pin collides with a `board_occupied` pin.
   3. LCD SPI pins are all within board_occupied (they are reused, not re-driven).
   4. All pins have valid P0-P55 form.
+  5. Firmware bring-up IO macros match pinmap.json.
 
 Exit code 0 = OK, 1 = conflict found. Prints a summary either way.
 """
@@ -15,6 +16,10 @@ import sys
 from pathlib import Path
 
 PIN_RE = re.compile(r"^P([0-9]|[1-4][0-9]|5[0-5])$")  # P0..P55
+HEADER_PIN_RE = re.compile(
+    r"^#define\s+(AK_[A-Z0-9_]+_PIN)\s+TUYA_(?:GPIO_NUM|IO_PIN)_([0-9]+)\b",
+    re.MULTILINE,
+)
 
 
 def load(path: Path) -> dict:
@@ -58,10 +63,70 @@ def check(data: dict) -> list[str]:
     return errors
 
 
+def pin_number(pin: str) -> int:
+    return int(pin.removeprefix("P"))
+
+
+def check_firmware_header(data: dict, header_path: Path) -> list[str]:
+    errors: list[str] = []
+    if not header_path.exists():
+        return [f"firmware IO header not found: {header_path}"]
+
+    macros = {
+        name: int(number)
+        for name, number in HEADER_PIN_RE.findall(header_path.read_text(encoding="utf-8"))
+    }
+    assigned = {entry["net"]: entry["pin"] for entry in data.get("assigned", [])}
+    lcd = data.get("lcd_spi", {})
+    usb = data.get("expansion_usb", {})
+
+    expected = {
+        "AK_UART_RX_PIN": usb.get("uart_rx_t5"),
+        "AK_UART_TX_PIN": usb.get("uart_tx_t5"),
+        "AK_KEY1_PIN": assigned.get("KEY1"),
+        "AK_KEY2_PIN": assigned.get("KEY2"),
+        "AK_KEY3_PIN": assigned.get("KEY3"),
+        "AK_KEY4_PIN": assigned.get("KEY4"),
+        "AK_KEY5_PIN": assigned.get("KEY5"),
+        "AK_NAV_UP_PIN": assigned.get("NAV_UP"),
+        "AK_NAV_DOWN_PIN": assigned.get("NAV_DOWN"),
+        "AK_NAV_LEFT_PIN": assigned.get("NAV_LEFT"),
+        "AK_NAV_RIGHT_PIN": assigned.get("NAV_RIGHT"),
+        "AK_NAV_CENTER_PIN": assigned.get("NAV_CENTER"),
+        "AK_LCD_SPI_SCK_PIN": lcd.get("sck"),
+        "AK_LCD_SPI_MOSI_PIN": lcd.get("mosi"),
+        "AK_LCD_SPI_CS_PIN": lcd.get("cs"),
+        "AK_LCD_DC_PIN": lcd.get("dc"),
+        "AK_LCD_RST_PIN": lcd.get("rst"),
+        "AK_LCD_BACKLIGHT_PIN": lcd.get("bl"),
+        "AK_LCD_POWER_PIN": lcd.get("pwr"),
+        "AK_WS2812_DATA_PIN": assigned.get("WS2812_DIN"),
+    }
+
+    for macro, expected_pin in expected.items():
+        if expected_pin is None:
+            errors.append(f"pinmap.json has no source value for {macro}")
+            continue
+        actual = macros.get(macro)
+        if actual is None:
+            errors.append(f"firmware IO header is missing {macro}")
+        elif actual != pin_number(expected_pin):
+            errors.append(
+                f"{macro}=P{actual} differs from pinmap.json {expected_pin}"
+            )
+
+    return errors
+
+
 def main() -> int:
     path = Path(__file__).parent / "pinmap.json"
+    repo_root = Path(__file__).resolve().parents[2]
+    header_path = (
+        repo_root / "firmware" / "bringup" / "common" / "include" / "agentic_board_io.h"
+    )
     data = load(path)
     errors = check(data)
+    errors.extend(check_firmware_header(data, header_path))
 
     n_assigned = len(data.get("assigned", []))
     n_occupied = len(data.get("board_occupied", []))
@@ -73,7 +138,7 @@ def main() -> int:
             print(f"  - {e}")
         return 1
 
-    print("OK: no pin conflicts.")
+    print("OK: no pin conflicts; firmware bring-up IO matches pinmap.json.")
     for a in data.get("assigned", []):
         print(f"  {a['pin']:>4} -> {a['net']}")
     return 0
