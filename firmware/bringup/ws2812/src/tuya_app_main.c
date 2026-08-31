@@ -14,11 +14,14 @@
 
 #define APP_TASK_STACK_SIZE (4U * 1024U)
 #define PATTERN_DELAY_MS    1000U
-#define T5_WS_CPU_HZ        120000000U
 #define T5_PM_DEV_ID_CPU1   38
 #define T5_PM_CPU_FRQ_120M  3
-#define WS2812_DRIVER_REV   "gpio-dwt-direct-v4"
+#define T5_WS_CPU_VOTE_HZ   120000000U
+#define WS2812_DRIVER_REV   "gpio-dwt-autoclock-v5"
 #define WS2812_RESET_MS     4U
+#define CPU_MEASURE_US      10000U
+#define CPU_FREQ_MIN_HZ     20000000U
+#define CPU_FREQ_MAX_HZ     400000000U
 
 /*
  * TuyaOpen's official WS2812 driver encodes each data bit into eight SPI bits
@@ -27,14 +30,14 @@
 #define WS2812_BIT_NS 1231U
 #define WS2812_T0H_NS 308U
 #define WS2812_T1H_NS 615U
-#define NS_TO_CPU_CYCLES(ns) ((((T5_WS_CPU_HZ / 1000000U) * (ns)) + 500U) / 1000U)
 
 /*
  * modules/pm.h pulls in a platform-generated sdkconfig.h that is unavailable
  * while TuyaOpen compiles the application library. Keep this platform-specific
  * declaration local; the values match pm_dev_id_e and pm_cpu_freq_e on T5AI.
  */
-extern int bk_pm_module_vote_cpu_freq(int module, int cpu_freq);
+extern int      bk_pm_module_vote_cpu_freq(int module, int cpu_freq);
+extern uint64_t bk_aon_rtc_get_us(void);
 
 /*
  * T5AI (bk7258) AON GPIO: one 32-bit config register per pin, matching the SDK
@@ -57,14 +60,15 @@ typedef struct {
 
 static THREAD_HANDLE      s_app_thread = NULL;
 static volatile uint32_t *s_gpio_reg;
+static uint32_t           s_cpu_hz;
 static uint32_t           s_bit_cycles;
 static uint32_t           s_t0h_cycles;
 static uint32_t           s_t1h_cycles;
 
 static const WS_PATTERN_T s_patterns[] = {
-    {"led1_red", {{16, 0, 0}, {0, 0, 0}, {0, 0, 0}}},  {"led2_green", {{0, 0, 0}, {0, 16, 0}, {0, 0, 0}}},
-    {"led3_blue", {{0, 0, 0}, {0, 0, 0}, {0, 0, 16}}}, {"all_white", {{8, 8, 8}, {8, 8, 8}, {8, 8, 8}}},
-    {"all_off", {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}},
+    {"all_off", {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}},     {"led1_red", {{16, 0, 0}, {0, 0, 0}, {0, 0, 0}}},
+    {"led2_green", {{0, 0, 0}, {0, 16, 0}, {0, 0, 0}}}, {"led3_blue", {{0, 0, 0}, {0, 0, 0}, {0, 0, 16}}},
+    {"all_white", {{8, 8, 8}, {8, 8, 8}, {8, 8, 8}}},
 };
 
 static inline __attribute__((always_inline)) void wait_cycles(uint32_t start, uint32_t cycles)
@@ -83,7 +87,7 @@ static inline __attribute__((always_inline)) void send_bit(bool one)
      * store gives deterministic edges. gpio_output_en is active-low, so values
      * 2 and 0 both keep the pin in output mode.
      */
-    *s_gpio_reg = T5_GPIO_LEVEL_HIGH;
+    *s_gpio_reg         = T5_GPIO_LEVEL_HIGH;
     uint32_t high_start = DWT->CYCCNT;
     wait_cycles(high_start, one ? s_t1h_cycles : s_t0h_cycles);
     *s_gpio_reg = T5_GPIO_LEVEL_LOW;
@@ -111,6 +115,39 @@ static OPERATE_RET ws2812_start_cycle_counter(void)
         return OPRT_COM_ERROR;
     }
     return OPRT_OK;
+}
+
+static OPERATE_RET ws2812_measure_cpu_clock(void)
+{
+    OPERATE_RET rt = ws2812_start_cycle_counter();
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+
+    uint64_t start_us = bk_aon_rtc_get_us();
+    uint64_t end_us;
+    uint32_t start_cycles = DWT->CYCCNT;
+
+    do {
+        end_us = bk_aon_rtc_get_us();
+    } while ((end_us - start_us) < CPU_MEASURE_US);
+
+    uint32_t elapsed_cycles = DWT->CYCCNT - start_cycles;
+    uint64_t elapsed_us     = end_us - start_us;
+    uint64_t measured_hz    = ((uint64_t)elapsed_cycles * 1000000ULL + (elapsed_us / 2ULL)) / elapsed_us;
+
+    if (measured_hz < CPU_FREQ_MIN_HZ || measured_hz > CPU_FREQ_MAX_HZ) {
+        PR_ERR("WS2812 invalid measured CPU frequency: %lluHz", measured_hz);
+        return OPRT_COM_ERROR;
+    }
+
+    s_cpu_hz = (uint32_t)measured_hz;
+    return OPRT_OK;
+}
+
+static uint32_t ns_to_cpu_cycles(uint32_t ns)
+{
+    return (uint32_t)(((uint64_t)s_cpu_hz * ns + 500000000ULL) / 1000000000ULL);
 }
 
 static OPERATE_RET ws2812_send(const uint8_t rgb[AK_WS2812_COUNT][3])
@@ -165,17 +202,22 @@ static OPERATE_RET ws2812_init(void)
      * and 0 low, matching the SDK GPIO_UP/GPIO_DOWN macros. Direct stores are
      * required because an 800 kHz WS2812 waveform cannot tolerate the TAL
      * function-call overhead.
-    */
-    s_gpio_reg = (volatile uint32_t *)(T5_AON_GPIO_BASE + ((uint32_t)AK_WS2812_DATA_PIN * T5_GPIO_REG_STRIDE));
+     */
+    s_gpio_reg  = (volatile uint32_t *)(T5_AON_GPIO_BASE + ((uint32_t)AK_WS2812_DATA_PIN * T5_GPIO_REG_STRIDE));
     *s_gpio_reg = T5_GPIO_LEVEL_LOW;
     tal_system_sleep(WS2812_RESET_MS);
 
-    s_bit_cycles = NS_TO_CPU_CYCLES(WS2812_BIT_NS);
-    s_t0h_cycles = NS_TO_CPU_CYCLES(WS2812_T0H_NS);
-    s_t1h_cycles = NS_TO_CPU_CYCLES(WS2812_T1H_NS);
+    rt = ws2812_measure_cpu_clock();
+    if (rt != OPRT_OK) {
+        return rt;
+    }
 
-    PR_NOTICE("WS2812 driver=%s cpu_vote=%uHz cycles(bit/t0h/t1h)=%u/%u/%u", WS2812_DRIVER_REV, T5_WS_CPU_HZ,
-              s_bit_cycles, s_t0h_cycles, s_t1h_cycles);
+    s_bit_cycles = ns_to_cpu_cycles(WS2812_BIT_NS);
+    s_t0h_cycles = ns_to_cpu_cycles(WS2812_T0H_NS);
+    s_t1h_cycles = ns_to_cpu_cycles(WS2812_T1H_NS);
+
+    PR_NOTICE("WS2812 driver=%s cpu_vote=%uHz cpu_measured=%uHz cycles(bit/t0h/t1h)=%u/%u/%u", WS2812_DRIVER_REV,
+              T5_WS_CPU_VOTE_HZ, s_cpu_hz, s_bit_cycles, s_t0h_cycles, s_t1h_cycles);
     return OPRT_OK;
 }
 

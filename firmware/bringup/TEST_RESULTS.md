@@ -51,7 +51,7 @@ a second UART0 application port, identical to COM6. The debug port is COM7.)
 | 2 | `key1_uart` | 2026-08-31 | COM6 | PASS | See log below |
 | 3 | `input_scan` | 2026-08-31 | COM6 | PASS | All 10 inputs OK, incl. concurrent presses |
 | 4 | `lcd_st7789` | 2026-08-31 | COM8 | PASS | Solid-white was a reversed FPC; after reseating the flex correctly the color bars/patterns display |
-| 5 | `ws2812` | | | TODO | |
+| 5 | `ws2812` | 2026-08-31 | COM6 | FAIL (hw) | GPIO bit-bang on P13 cannot hit WS2812 timing reliably; needs a HW rev to move DIN onto an SPI MOSI pin |
 | 6 | LED4/LED5 manual check | 2026-08-31 | — | PASS | LED4 follows Type-C VBUS, LED5 follows battery BAT_P; verified independent |
 | 7 | Battery/switch manual check | 2026-08-31 | — | PASS | Switch controls battery path (via LED5); Type-C independent; single cell |
 | 8 | `wireless_selftest` | 2026-08-31 | COM6 | PASS | Wi-Fi scan finds 13-28 APs; BLE `AK-Bringup` connect/disconnect events, adv restarts |
@@ -396,3 +396,115 @@ activate cloud. Connected networking is validated later in provisioning / BLE HI
 
 Confirmed blocks: T5 2.4 GHz Wi-Fi RX/scan path, BLE peripheral advertising,
 connect/disconnect lifecycle, advertising auto-restart.
+
+## Step 5 - ws2812 (2026-08-31, COM6, FAIL - hardware)
+
+Validates the three daisy-chained WS2812B (LED1-3):
+`P13 -> SN74LV1T34 (U2) -> R3 -> LED1 -> LED2 -> LED3`.
+
+### What was tried
+
+WS2812 needs a single-wire NRZ waveform with ~1.25 us per bit and ~150 ns
+timing tolerance (T0H ~0.31 us, T1H ~0.62 us). On this PCB the data net is P13,
+which is NOT a T5 SPI MOSI pin, so TuyaOpen's SPI-based WS2812 driver cannot be
+used. The bring-up firmware therefore drives P13 by GPIO bit-banging with cycle
+counting:
+
+- Direct AON GPIO register stores (secure base 0x44000400, value 2/0 = high/low),
+  because TAL function-call overhead is too slow for an 800 kHz waveform.
+- DWT cycle counter for the sub-microsecond high/low delays, with interrupts
+  disabled during each transfer.
+- A CPU1 PM vote at 120 MHz (the platform otherwise drops the shared clock to
+  60 MHz after boot), plus a runtime CPU-clock measurement against the AON RTC
+  so the cycle counts track the real frequency.
+
+Several iterations (driver rev up to `gpio-dwt-autoclock-v5`) fixed a bus-fault
+crash (wrong non-secure GPIO alias) and the clock-scaling problem, so the app now
+runs and emits its pattern frames cleanly on UART0.
+
+### Result
+
+Firmware runs and reports each pattern, but the LEDs do NOT reproduce the
+expected sequence reliably (wrong colors / flicker / fail to latch). This is the
+classic bit-bang failure mode: even with interrupts disabled and cycle counting,
+the T5 dual-core + PM environment cannot guarantee the ns-level timing window
+consistently. Conclusion: **not fixable in software on this PCB revision** - the
+data pin must move to a hardware SPI MOSI so the peripheral generates the
+waveform. Marked FAIL (hardware), not a firmware defect.
+
+### Hardware fix for the next PCB revision
+
+Root cause: WS2812 DIN (`WS_DIN_5V`, via U2/SN74LV1T34 and R3) is fed from P13,
+which has no SPI MOSI route on T5. Fix = route the WS2812 data source from an
+SPI MOSI-capable pin and drive it with TuyaOpen's SPI WS2812 driver (8 SPI bits
+per WS2812 bit at 6.5 MHz: 0=0xC0, 1=0xF0). The SPI peripheral then clocks out
+the waveform in hardware, immune to CPU/interrupt jitter.
+
+Pin choice on T5 (from `hardware/pinmap/pinmap.md`), given LCD already owns
+SPI0's main group:
+
+- SPI0 main group P14/P15/P16/P17 = LCD (SCK/CS/MOSI/DC) - taken.
+- SPI1 group P2/P3/P4/P5: P5 is LCD_BL - SPI1 is incomplete, avoid.
+- QSPI1 P2-P7: P5/P6/P7 are LCD - unavailable.
+- **SPI0 alternate group P44-P47** is free and broken out on J1 (P44=J1.6,
+  P45=J1.7, P46=J1.8). This is the recommended route.
+
+Recommended change:
+
+1. Move the WS2812 data source from P13 to the **SPI0-alt MOSI pin in the
+   P44-P47 group** (confirm exact MOSI pin against the T5 datasheet pin-mux table
+   before layout).
+2. Keep the rest of the chain unchanged: MOSI -> SN74LV1T34 (U2, 3.3->5 V level
+   shift) -> R3 series resistor -> LED1 DIN -> LED2 -> LED3. Keep the per-LED
+   100 nF decoupling (already close-placed, 2.1-2.3 mm).
+3. Free P13 (becomes a spare GPIO) or leave a 0-ohm option to P13 as a fallback.
+4. Route the new MOSI trace short and away from the LCD SPI lines to limit
+   crosstalk; the 5 V side after U2 already has R3 for edge damping.
+5. Firmware: drop the bit-bang driver and switch to the standard SPI WS2812
+   driver on SPI0-alt. This removes the CPU PM vote, the DWT timing, and the
+   interrupt-disable window entirely.
+
+Note this is a v1.0 board design limitation (data pin choice), separate from the
+FPC1 mirror defect found in Step 4. Both should be corrected in the next spin.
+
+---
+
+## Bring-up summary (2026-08-31)
+
+Board rev v1.0, flashed from Windows (tyutool v3.2.9 @ 460800), UART0 monitored
+at 115200. Sequence per `TEST_PLAN.md`.
+
+| Step | Check | Result |
+|------|-------|--------|
+| 0 | Power-off visual inspection | PASS |
+| 1 | uart_loopback | PASS |
+| 2 | key1_uart | PASS |
+| 3 | input_scan | PASS |
+| 4 | lcd_st7789 | PASS (after FPC fix) |
+| 5 | ws2812 | FAIL (hardware - needs SPI pin) |
+| 6 | LED4/LED5 | PASS |
+| 7 | battery/switch | PASS |
+| 8 | wireless_selftest | PASS |
+
+7 of 8 pass. Two hardware issues found, both design defects to fix in the next
+PCB revision:
+
+1. **FPC1 pin-order mirror (Step 4)** - the bottom-layer FPC1 footprint pin order
+   is mirrored (Pin1<->Pin18) and was not re-mirrored for bottom placement, while
+   the netlist is logically correct. Workaround on v1.0: insert the flex
+   reversed, so the two mirrorings cancel; the panel then displays correctly.
+   Also confirmed the panel needs ST7789 INVOFF in the shipping init sequence.
+   Next rev: fix the FPC1 footprint pin order.
+
+2. **WS2812 data on P13 (Step 5)** - P13 has no SPI MOSI route, forcing an
+   unreliable GPIO bit-bang. Next rev: move the WS2812 data source to the SPI0
+   alternate MOSI pin (P44-P47 group, free on J1) and use the SPI WS2812 driver.
+
+Non-blocking follow-ups already noted in the schematic/PCB review:
+- Battery switch SK12D07VG5 is rated 0.3 A; full-white WS2812 + system peak may
+  approach it. Mitigation: keep WS2812 brightness limited (already done in
+  firmware) or fit a 0.5-1 A switch.
+- Only one battery cell connected at a time (parallel cells back-feed).
+
+Firmware side: all six bring-up apps build; the bit-bang ws2812 driver is the
+only one blocked by hardware. Everything else is validated on the bench.
