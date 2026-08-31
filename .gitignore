@@ -28,6 +28,8 @@ scripts/fw.bin.meta
 
 # ===== Firmware: TuyaOpen build artifacts =====
 firmware/.build/
+firmware/**/.build/
+firmware/**/dist/
 firmware/build/
 firmware/output/
 *.bin
