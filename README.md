@@ -4,9 +4,11 @@ A portable AI macro-keyboard built on the **Tuya T5AI-Core** board, designed to
 improve the Kiro CLI / IDE development experience. Its differentiators are
 **voice input straight into Kiro** and **on-screen Agent status**.
 
-> Status: **Phase 0 complete; Phase 0.5 hardware bring-up next**. The expansion
-> baseboard v1.0 design and review are complete. Firmware and the companion app
-> remain skeletons; external reference projects live under `ref_projects/`.
+> Status: **Phase 0 complete; Phase 0.5 hardware bring-up in progress**. The
+> expansion baseboard v1.0 design and review are complete. Six standalone
+> bring-up applications build successfully for the project IO and await
+> sequential testing on the physical board. Product firmware and the companion
+> app remain skeletons.
 
 *(中文版见 [README.zh-CN.md](README.zh-CN.md))*
 
@@ -42,7 +44,7 @@ Full task breakdown: [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ```text
 .
-├── firmware/            # T5AI-Core TuyaOpen C firmware (skeleton)
+├── firmware/            # TuyaOpen product skeleton + standalone bring-up apps
 ├── companion/           # Tauri (Rust + React/TS) companion app
 ├── hardware/
 │   └── pinmap/          # GPIO assignment + netlist (Task 2)

@@ -3,8 +3,9 @@
 一款基于 **Tuya T5AI-Core** 开发板的便携 AI 小键盘，用于提升 Kiro CLI / IDE 的
 开发体验。核心差异化功能是**语音输入直达 Kiro**与 **Agent 状态上屏显示**。
 
-> 状态：**阶段 0 已完成，下一步进入阶段 0.5 硬件 Bring-up**。扩展底板 v1.0
-> 已完成设计与审核；T5 固件和上位机仍为骨架，外部参考项目统一放在 `ref_projects/`。
+> 状态：**阶段 0 已完成，阶段 0.5 硬件 Bring-up 进行中**。扩展底板 v1.0
+> 已完成设计与审核；6 个使用本项目 IO 的独立 Bring-up 固件均已构建，等待在实板上
+> 依次验收。产品固件和上位机仍为骨架。
 
 *(English version: [README.md](README.md))*
 
@@ -39,7 +40,7 @@
 
 ```text
 .
-├── firmware/            # T5AI-Core TuyaOpen C 固件（骨架）
+├── firmware/            # TuyaOpen 产品骨架 + 独立 bring-up 程序
 ├── companion/           # Tauri（Rust + React/TS）上位机
 ├── hardware/
 │   └── pinmap/          # GPIO 分配 + 网表（Task 2）
