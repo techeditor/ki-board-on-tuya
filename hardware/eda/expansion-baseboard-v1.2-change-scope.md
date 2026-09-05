@@ -146,7 +146,7 @@ P5 / J2.19 -> SPI1_MISO 保留
 - [x] SPI1 的 P2/P3/P4/P5 无其它功能冲突。（P4 唯一负载为 WS_DIN_3V3）
 - [x] FPC1 正常插线方向与 Pin1 标记一致。（脚序 1=GND/2=RST/3=SCK/4=DC/5=CS/6=MOSI/7=NC/8=GND/9=3V3，与第 1.3 节表一致）
 - [x] 更新 PCB 后重新铺铜并执行 ERC/DRC。（DRC 无物理违规；铺铜 2 块 GND；余 1 条 netlist stale 告警需刷新导入变更后清零）
-- [ ] 更新 `pinmap.json`、`pinmap.md`、公共固件引脚宏和冲突检查。（待办：固件/文档侧同步，未在本次 EDA 核查范围）
+- [x] 更新 `pinmap.json`、`pinmap.md`、公共固件引脚宏和冲突检查。（2026-08-31 完成：pinmap.json / pinmap.md / PRD §3.2·§7.1 已同步 v1.2；产品固件头 `firmware/app/common/include/ak_board_io.h` 落 P4/P8；`check_pins.py` 改为校验产品头并通过；bringup 头保持 v1.0 历史记录）
 - [ ] 单独验证 LCD：复位、背光、彩条与正常方向插线。（待办：需实物板 bring-up）
 - [ ] 单独验证 WS2812：全灭、单灯三色、全白和菊花链顺序。（待办：需实物板 bring-up）
 
