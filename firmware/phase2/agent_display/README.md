@@ -15,13 +15,14 @@ Spec:`.kiro/specs/phase2-agent-display/`(requirements / design / tasks)。
 关键:`ak_event_t` 意图层是稳定边界。P2-3 用「串口 JSONL 解析器」替换 `input_map` 产出相同意图,
 即可用真实 Kiro 事件驱动同一套显示,无需改显示层。**不接 Wi-Fi/TCP/云**。
 
-## 状态:T1–T5 完成(T6 跳过)
+## 状态:T1–T6 完成
 
 - T1 LVGL 上板(自研 ST7789 INVOFF 路径,rotation 90)· T2 精灵 runtime · T3 全 19 动画场景引擎
   (looping + one-shot 回落)· T4 通知 store + 轻量 LVGL 通知条 · T5 按键→意图→状态消费。
 - **BUILD SUCCESS**;host 单测(通知 store + input_map)**ALL PASSED**;clang-format clean。
 - flash:AP 分区用 **2.27MB / 3.5MB 上限**(全动画),余 ~1.2MB。
-- 真机观感(帧率/透明边缘/背光)待上板逐条核对。
+- **T6 真机观感已通过**:实物板(CL28CK230-18A / ST7789 320×240)上运行显示正常——帧率、
+  精灵透明边缘、背光(P8)均无问题,按键切换 Agent 状态/通知符合预期。
 
 ## 按键映射(模拟事件源)
 

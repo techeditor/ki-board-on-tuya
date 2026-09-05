@@ -23,7 +23,7 @@ firmware/phase2/<test_name>/
 
 | ID | 名称 | 验证的功能链路 | 状态 | Spec |
 |---|---|---|---|---|
-| **P2-1** | **agent-display** | LVGL 场景 + 吉祥物动画 + 通知 UI,**按键模拟切换 Agent 状态/通知**(移植自 CodeTank);为氛围显示打基础 | ✅ T1–T5 完成(T6跳过) | `.kiro/specs/phase2-agent-display/` |
+| **P2-1** | **agent-display** | LVGL 场景 + 吉祥物动画 + 通知 UI,**按键模拟切换 Agent 状态/通知**(移植自 CodeTank);为氛围显示打基础 | ✅ T1–T6 完成(含真机观感) | `.kiro/specs/phase2-agent-display/` |
 | P2-2 | voice-dictation | 板载 Mic → 云 ASR → `AI_USER_EVT_ASR_OK` 取文字(分句流式验证) | ⏳ 规划 | — |
 | P2-3 | companion-link | USB 串口 JSONL v1 ↔ Tauri Companion:真实 Kiro 事件驱动显示 | ⏳ 规划 | — |
 | P2-4 | ble-gatt | BLE 自定义 GATT 传输(按键/文字/状态)验证 | ⏳ 规划 | — |
