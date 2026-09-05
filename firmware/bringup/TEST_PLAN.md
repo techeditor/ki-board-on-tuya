@@ -1,8 +1,11 @@
 # Unified hardware bring-up test plan
 
-Run the applications sequentially. Keeping each firmware focused makes a
-failure attributable to one hardware block; this is the unified acceptance
-sequence, not one monolithic diagnostic image.
+> **v1.2 follow-up (2026-09):** This plan was written for the v1.0 board. On
+> v1.2 the WS2812 data pin moved P13 -> P4 (SPI1_MOSI) and is now driven by the
+> official SPI WS2812 driver, and the LCD backlight moved P5 -> P8. Where the
+> text below still says "WS2812 DIN is P13 / GPIO bit-bang" it describes the
+> v1.0 setup; the v1.2 wiring is authoritative in `hardware/pinmap/` and the
+> per-app READMEs. Historical text is kept as-is for traceability.
 
 ## Safety prerequisites
 

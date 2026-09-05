@@ -22,7 +22,8 @@ firmware/
 │   ├── key1_uart/  # KEY1=P24 -> JSONL over UART0=P10/P11
 │   ├── input_scan/ # five keys + five navigation directions
 │   ├── lcd_st7789/ # project-specific 240x320 SPI display test
-│   ├── ws2812/     # three LEDs on the designed P13 data net
+│   ├── ws2812/     # three LEDs on SPI1_MOSI=P4 (v1.2; official SPI driver)
+│   ├── full_selftest/ # combined input/LCD/WS2812/UART/radio self-test
 │   └── ...         # UART loopback and Wi-Fi/BLE self-test
 ├── app/            # planned TuyaOpen product application
 ├── src/            # planned input/state/transport/UI implementation

@@ -80,7 +80,7 @@
 │  Type-C → CH340C(USB-UART,可烧录+通信,UART0; │
 │    VBUS经LDO仅供CH340C,不供系统)             │
 │  锂电池并联座(JST,同BAT网,带电池总开关) ·      │
-│  3× WS2812(P13,经 SN74LV1T34 电平转换)        │
+│  3× WS2812(P4/SPI1,经 SN74LV1T34 电平转换)    │
 │    · CH340C自动复位                          │
 │  上拉/限流/去耦/ESD · 2× 1×22 母排座           │
 └─────────────────────────────────────────────┘
@@ -152,7 +152,7 @@
 | Type-C 母座 | 16P 卧贴（含 CC） | 扩展板 USB 口 | ✅ 库存多款 |
 | 电平转换 | SN74LV1T34（SOT-23-5） | WS2812 3.3→5V | ✅ 库存 C100024 ×5 |
 | 复位三极管 | S8050（SOT-23,NPN） | CH340C DTR/RTS 自动复位 | ✅ 库存 ×50 |
-| RGB LED | WS2812（XL-3528RGBW） | 3× 菊花链，P13 | ✅ 库存多款 / 自营现货 244K+ |
+| RGB LED | WS2812（XL-3528RGBW） | 3× 菊花链，P4/SPI1（v1.2：P13→P4） | ✅ 库存多款 / 自营现货 244K+ |
 | 电源指示 LED | 普通红色 0603 LED | 2×（EDA 位号 LED4/LED5）：LED4=Type-C(VBUS)供电指示、LED5=电池(BAT_P)供电指示；各串限流电阻 | ✅ 库存/易采 |
 | 电池座 | JST PH 1.25mm 2P | 与开发板并联同 BAT 网 | ✅ 库存 ×100 |
 | 电池总开关 | 拨动开关 SK12D07VG5 | 串于电池 BAT+ | ✅ 库存 C431548 ×20 |
@@ -164,9 +164,10 @@
 
 | 引脚 | 用途 | 有效电平 |
 |------|------|---------|
-| P5 | LCD 背光 BL | 高 |
+| P5 | SPI1_MISO（v1.2 保留给 WS2812 的 SPI1 组；原 LCD_BL 已移走） | — |
 | P6 | LCD 复位 RST | — |
 | P7 | LCD 电源使能 PWR | 高 |
+| P8 | LCD 背光 BL（v1.2：P5→P8, J2.16/PWM2） | 高 |
 | P9 | 用户 LED | 高 |
 | P10 / P11 | UART0 RX/TX（串口桥共用，烧录+日志+一期通信） | — |
 | P14 / P16 | LCD SPI0 SCK / MOSI | — |
@@ -189,7 +190,7 @@
 | NAV_RIGHT | P22 | J2.6 | 摇杆④ (D) |
 | NAV_CENTER | P30 | J2.11 | 摇杆② |
 | GND | — | J1/J2 GND | 摇杆⑤ (Com) |
-| WS2812_DIN | P13 | J1.16 | 3× WS2812 菊花链，经 SN74LV1T34 电平转换 |
+| WS2812_DIN | P4 | J2.20 | 3× WS2812 菊花链，经 SN74LV1T34 电平转换（v1.2：P13→P4=SPI1_MOSI，官方 SPI 驱动） |
 
 > ⚠️ **审核要点**：P28 / P33 / P35 **未从 44P 排针引出**，禁止使用。
 > 引脚冲突已用 `hardware/pinmap/check_pins.py` 校验通过（12 板载占用 + 11 新增，无重叠；11 = 5 键 + 5 摇杆方向 + WS2812_DIN）。
@@ -208,7 +209,7 @@
 | 8 | GND | GND |
 | 9 | VCC | 3.3V（受 P7 使能控制），就近 1µF + 100nF 去耦 |
 | 10 | LEDA | 背光阳极 → 3.3V |
-| 11–14 | LEDK1–4 | 背光阴极 4 路 → 限流电阻 → GND；P5 做开关 |
+| 11–14 | LEDK1–4 | 背光阴极 4 路 → 限流电阻 → GND；P8 做开关（v1.2：P5→P8） |
 | 15–18 | XL/YU/XR/YD | 电阻触摸，一期**不接**，PCB 预留焊盘 |
 
 > **审核要点**：背光限流电阻阻值需按实测亮度确定（接线图注明 R1 可调）；
@@ -261,7 +262,7 @@
 - **电池总开关**：串在扩展板电池 BAT+ 路径，关断=切断电池供电（关机）；**Type-C 插入时系统仍照常通电/充电**（开关只管电池路径）。
 
 **3× WS2812 RGB LED**
-- 单线菊花链，数据脚 **P13（J1.16）**，1 个 GPIO 控 3 颗。
+- 单线菊花链，数据脚 **P4（J2.20，SPI1_MOSI；v1.2 由 P13 迁入）**，由官方 SPI WS2812 驱动，1 根数据线控 3 颗。
 - 3.3V GPIO → **SN74LV1T34** 电平转换 → 5V DIN；DIN 串 100-330Ω；每颗 100nF 去耦；5V 供电（来自排针，非 Type-C）。
 
 **2× 电源指示灯（普通红色 LED，EDA v1.0 实现，2026-08-24 补录）**
@@ -287,7 +288,7 @@
 | H11 | CH340C TX→T5 RX(P10) 串隔离电阻；DTR/RTS→S8050→T5_RST(J2.2) 复位电路 | 照抄开发板 SCH |
 | H12 | Type-C CC1/CC2 各 5.1kΩ 下拉；D+/D- 串 ESD | UFP 角色 |
 | H13 | 扩展板电池座 BAT+/- 与开发板 JST 同网；丝印标注"只插一节" | 防倒灌 |
-| H14 | WS2812 经 SN74LV1T34 电平转换；5V 供电；DIN 串阻 + 每颗去耦 | P13 |
+| H14 | WS2812 经 SN74LV1T34 电平转换；5V 供电；DIN 串阻 + 每颗去耦 | P4/SPI1（v1.2：P13→P4） |
 | H15 | 两个 Type-C 共用 UART0 — 丝印/文档标注"只插一个" | 防总线争用 |
 | H16 | CH340C 供电 = Type-C VBUS→LDO(3.3V)，**不接系统电**；V3 与 VCC 短接 | 独立供电、IO 3.3V |
 | H17 | 电池总开关串于扩展板 BAT+；Type-C 插入不受开关影响 | 电池路径通断 |
@@ -520,7 +521,7 @@
 #define BOARD_LCD_SPI_CS_PIN   TUYA_GPIO_NUM_15
 #define BOARD_LCD_SPI_DC_PIN   TUYA_GPIO_NUM_17
 #define BOARD_LCD_SPI_RST_PIN  TUYA_GPIO_NUM_6
-#define BOARD_LCD_BL_PIN       TUYA_GPIO_NUM_5   // 高有效
+#define BOARD_LCD_BL_PIN       TUYA_GPIO_NUM_8   // v1.2: P5->P8 (J2.16, PWM2), 高有效
 #define BOARD_LCD_POWER_PIN    TUYA_GPIO_NUM_7   // 高有效
 // 新增输入
 #define BOARD_KEY1_PIN  TUYA_GPIO_NUM_24

@@ -17,9 +17,10 @@ Do not copy pin definitions from reference projects.
 | `uart_loopback` | Validate bidirectional CH340C/UART0 communication | UART0 RX=P10, TX=P11 |
 | `key1_uart` | Validate flashing, UART0 communication, and KEY1 input/debounce | KEY1=P24; UART0 RX=P10, TX=P11 |
 | `input_scan` | Validate all five keys and five navigation inputs | P20-P27, P30, P32 |
-| `lcd_st7789` | Validate panel power, backlight, SPI, reset, and RGB565 output | P5-P7, P14-P17 |
-| `ws2812` | Validate three addressable RGB LEDs and level shifter | P13 |
+| `lcd_st7789` | Validate panel power, backlight, SPI, reset, and RGB565 output | RST=P6, PWR=P7, BL=P8 (v1.2), P14-P17 |
+| `ws2812` | Validate three addressable RGB LEDs and level shifter | P4=SPI1_MOSI (v1.2) |
 | `wireless_selftest` | Validate Wi-Fi scanning and BLE advertising | T5 radio |
+| `full_selftest` | Combined input/LCD/WS2812/UART/radio self-test in one image | all of the above |
 
 ## Build
 

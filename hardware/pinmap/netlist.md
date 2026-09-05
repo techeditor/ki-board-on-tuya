@@ -56,7 +56,7 @@
 | `LCD_CS`   | P15 / J1.15 | FPC.5 (CS) | |
 | `LCD_DC`   | P17 / J1.12 | FPC.4 (RS) | |
 | `LCD_RST`  | P6  / J2.18 | FPC.2 (RST) | |
-| `LCD_BL`   | P5  / J2.19 | FPC.10-14 (LEDA + LEDK1-4 经限流 R) | 高有效 |
+| `LCD_BL`   | P8  / J2.16 | FPC.10-14 (LEDA + LEDK1-4 经限流 R) | 高有效（v1.2：P5→P8） |
 | `LCD_PWR`  | P7  / J2.17 | FPC.9 (VCC) | 高有效，屏 3.3V 使能 |
 | `GND`      | GND | FPC.1 / FPC.8 | |
 | （预留触摸） | — | FPC.15-18 (XL/YU/XR/YD) | 一期不接 |
@@ -113,7 +113,7 @@
 ### 3× WS2812 + 电平转换
 | Net | 从 | 到 | 备注 |
 |-----|----|----|------|
-| `WS2812_DIN_3V3` | H1(P13 / J1.16) | U_LS(SN74LV1T34) 输入A | 3.3V 侧 |
+| `WS2812_DIN_3V3` | H1(P4 / J2.20, SPI1_MOSI；v1.2 由 P13 迁入) | U_LS(SN74LV1T34) 输入A | 3.3V 侧 |
 | `WS2812_DIN_5V` | U_LS 输出Y → R_LED 100-330Ω | LED1.DIN | 5V 侧 |
 | chain | LED1.DOUT → LED2.DIN → LED3.DIN | | 菊花链 |
 | `5V`/`GND` | H1 5V/GND | LED1-3 VDD/VSS、U_LS VCC | 每颗 C_LED 100nF 去耦 |

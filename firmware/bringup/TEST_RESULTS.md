@@ -1,5 +1,13 @@
 # Hardware bring-up acceptance results
 
+> **v1.2 follow-up (2026-09):** This log records v1.0 board testing. The Step 5
+> WS2812 FAIL (P13 GPIO bit-bang could not hit the timing) was resolved by the
+> v1.2 board rev: WS2812 data moved P13 -> P4 (SPI1_MOSI) with the official SPI
+> WS2812 driver, and LCD backlight moved P5 -> P8. The v1.0 P13/bit-bang text
+> below is retained as the historical record; current wiring lives in
+> `hardware/pinmap/` and the per-app READMEs. v1.2 needs a re-test on real
+> hardware.
+
 Physical acceptance log for the expansion baseboard, following the sequence in
 `TEST_PLAN.md`. One row per attempt. Record the COM port, board revision,
 observed result, and any scope/logic-analyzer measurements.

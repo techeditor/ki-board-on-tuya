@@ -52,7 +52,7 @@
 
 ## 2. SN74LV1T34 — 单门电平转换（3.3V → 5V）
 
-**用途**：把 T5 的 3.3V GPIO(P13) 抬到 5V，驱动 WS2812 的 DIN。
+**用途**：把 T5 的 3.3V GPIO(P4，SPI1_MOSI；v1.2 由 P13 迁入) 抬到 5V，驱动 WS2812 的 DIN。
 
 **关键参数**（datasheet 实读）：
 - **单 buffer 门，有方向**（A 输入 → Y 输出，**单向**，不能反接）
@@ -64,13 +64,13 @@
 
 **接法要点**：
 - **VCC 接 5V**（不是 3.3V！VCC 决定输出高电平）
-- 输入 A ← T5 P13（3.3V）；输出 Y → WS2812 DIN（5V）
+- 输入 A ← T5 P4（3.3V，SPI1_MOSI）；输出 Y → WS2812 DIN（5V）
 - VCC 去耦 100nF
 - ⚠️ **方向别接反**：这是 buffer 不是双向 translator，A→Y 单向
 
 **审核 checklist**：
 - [ ] VCC = 5V（决定输出 5V 电平）？
-- [ ] A=输入(接P13)、Y=输出(接LED)，方向正确？
+- [ ] A=输入(接P4)、Y=输出(接LED)，方向正确？
 - [ ] VCC 去耦 100nF 就近？
 
 ---
@@ -192,7 +192,7 @@ Type-C VBUS(5V) ──→ HE9073A33 LDO ──→ 3.3V ──→ CH340C VCC (独
 电池 ──→ SK12D07VG5(总开关) ──→ BAT+ (并入开发板同 BAT 网, ETA6003 充电)
 
 排针 J1 VCC_5V(开发板LN2220升压) ──→ WS2812 VDD(×3) + SN74LV1T34 VCC-B
-T5 P13(3.3V) ──→ SN74LV1T34(A→Y,VCC=5V) ──→ 5V DIN ─100~330Ω─→ WS2812链
+T5 P4(3.3V,SPI1_MOSI) ──→ SN74LV1T34(A→Y,VCC=5V) ──→ 5V DIN ─100~330Ω─→ WS2812链
 ```
 
 **三个最易错/高风险点**（审核重点）：
