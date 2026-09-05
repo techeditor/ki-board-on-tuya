@@ -1,11 +1,14 @@
 {
   "board": "T5AI-Core",
   "mcu": "T5-E1",
-  "description": "Pin assignment for the agentic keyboard expansion baseboard. The dev board plugs into the baseboard via a 44P header. Verified against Tuya official pinmux + tuya_t5ai_core.c board driver.",
+  "description": "Pin assignment for the agentic keyboard expansion baseboard. The dev board plugs into the baseboard via a 44P header. Verified against Tuya official pinmux + tuya_t5ai_core.c board driver. Board revision v1.2 (WS2812 P13->P4/SPI1_MOSI, LCD_BL P5->P8, FPC1 pad order fixed; net-verified 2026-09-01).",
   "board_occupied": [
-    { "pin": "P5",  "use": "LCD_BL",        "active": "high" },
+    { "pin": "P2",  "use": "SPI1_SCK (reserved for WS2812 SPI1 group, no external load)" },
+    { "pin": "P3",  "use": "SPI1_CS (reserved for WS2812 SPI1 group, no external load)" },
+    { "pin": "P5",  "use": "SPI1_MISO (reserved for WS2812 SPI1 group; freed from LCD_BL in v1.2)" },
     { "pin": "P6",  "use": "LCD_RST" },
     { "pin": "P7",  "use": "LCD_PWR",       "active": "high" },
+    { "pin": "P8",  "use": "LCD_BL",        "active": "high" },
     { "pin": "P9",  "use": "USER_LED",      "active": "high" },
     { "pin": "P10", "use": "UART0_RX" },
     { "pin": "P11", "use": "UART0_TX" },
@@ -27,11 +30,11 @@
     { "pin": "P21", "net": "NAV_LEFT",   "header": "J2.5",  "joystick_pin": 6, "mode": "input_pullup", "active": "low" },
     { "pin": "P22", "net": "NAV_RIGHT",  "header": "J2.6",  "joystick_pin": 4, "mode": "input_pullup", "active": "low" },
     { "pin": "P30", "net": "NAV_CENTER", "header": "J2.11", "joystick_pin": 2, "mode": "input_pullup", "active": "low" },
-    { "pin": "P13", "net": "WS2812_DIN", "header": "J1.16", "mode": "output", "note": "3x WS2812 daisy-chain via SN74LV1T34 level shifter (3.3V->5V). P13 is also the UART0_CTS mux pin, but UART0 hardware flow control is NOT used in phase 1, so P13 is free for this." }
+    { "pin": "P4", "net": "WS2812_DIN", "header": "J2.20", "mode": "spi1_mosi", "note": "v1.2: 3x WS2812 daisy-chain driven by the official SPI WS2812 driver over SPI1 (MOSI=P4), level-shifted 3.3V->5V via SN74LV1T34. TKL initialises the whole SPI1 group P2/P3/P4/P5; only MOSI carries data. P13 (v1.0 GPIO bit-bang pin, failed timing) released to NC." }
   ],
   "lcd_spi": {
     "note": "Reuses the board's official ST7789 wiring; firmware only changes resolution to 320x240.",
-    "sck": "P14", "mosi": "P16", "cs": "P15", "dc": "P17", "rst": "P6", "bl": "P5", "pwr": "P7",
+    "sck": "P14", "mosi": "P16", "cs": "P15", "dc": "P17", "rst": "P6", "bl": "P8", "pwr": "P7",
     "spi_port": "SPI0", "spi_clk_hz": 48000000, "pixel_fmt": "RGB565"
   },
   "header_44p": {
@@ -64,7 +67,8 @@
   "ws2812": {
     "note": "3x WS2812 RGB LED daisy-chain, single data line, 5V powered. T5 3.3V GPIO -> SN74LV1T34 level shifter -> 5V DIN.",
     "count": 3,
-    "data_gpio": "P13", "data_header": "J1.16",
+    "data_gpio": "P4", "data_header": "J2.20", "spi_port": "SPI1", "spi_mosi": "P4",
+    "note_v12": "v1.2: moved from P13 (GPIO bit-bang, failed nanosecond timing on dual-core + PM) to P4=SPI1_MOSI with the official SPI WS2812 driver (waveform from SPI peripheral). SPI1 group P2/P3/P4/P5 reserved.",
     "level_shifter": "SN74LV1T34 (SOT-23-5, stock C100024)",
     "power": "5V from header J1", "series_resistor_ohm": "100-330 on DIN", "decoupling": "100nF per LED"
   },
