@@ -12,6 +12,7 @@ apps=(
     lcd_st7789
     ws2812
     wireless_selftest
+    full_selftest
 )
 
 if (($# > 0)); then

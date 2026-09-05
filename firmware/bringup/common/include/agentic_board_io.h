@@ -39,15 +39,22 @@
 #define AK_LCD_SPI_MOSI_PIN   TUYA_GPIO_NUM_16
 #define AK_LCD_DC_PIN         TUYA_GPIO_NUM_17
 #define AK_LCD_RST_PIN        TUYA_GPIO_NUM_6
-#define AK_LCD_BACKLIGHT_PIN  TUYA_GPIO_NUM_5
+#define AK_LCD_BACKLIGHT_PIN  TUYA_GPIO_NUM_8
 #define AK_LCD_POWER_PIN      TUYA_GPIO_NUM_7
 #define AK_LCD_NATIVE_WIDTH   240U
 #define AK_LCD_NATIVE_HEIGHT  320U
 #define AK_LCD_SPI_CLOCK_HZ   48000000U
 #define AK_LCD_CONTROL_ACTIVE TUYA_GPIO_LEVEL_HIGH
 
-/* Three WS2812 LEDs through the SN74LV1T34 level shifter. */
-#define AK_WS2812_DATA_PIN TUYA_GPIO_NUM_13
+/*
+ * Three WS2812 LEDs through the SN74LV1T34 level shifter.
+ * v1.2: driven by the official SPI WS2812 driver over SPI1. The data line is
+ * SPI1_MOSI = P4 (fixed by the SDK pinmux, TKL_SPI1_MOSI_PIN = GPIO_4); the
+ * whole SPI1 group P2/P3/P4/P5 is claimed by tkl_spi_init but only MOSI carries
+ * data. Was P13 GPIO bit-bang in v1.0 (failed nanosecond timing).
+ */
+#define AK_WS2812_SPI_PORT TUYA_SPI_NUM_1
+#define AK_WS2812_DATA_PIN TUYA_GPIO_NUM_4
 #define AK_WS2812_COUNT    3U
 
 #endif /* AGENTIC_BOARD_IO_H */

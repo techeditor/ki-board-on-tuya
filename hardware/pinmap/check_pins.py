@@ -6,7 +6,7 @@ Reads pinmap.json and verifies:
   2. No `assigned` pin collides with a `board_occupied` pin.
   3. LCD SPI pins are all within board_occupied (they are reused, not re-driven).
   4. All pins have valid P0-P55 form.
-  5. Firmware bring-up IO macros match pinmap.json.
+  5. Product firmware IO macros (firmware/app) match pinmap.json.
 
 Exit code 0 = OK, 1 = conflict found. Prints a summary either way.
 """
@@ -121,8 +121,12 @@ def check_firmware_header(data: dict, header_path: Path) -> list[str]:
 def main() -> int:
     path = Path(__file__).parent / "pinmap.json"
     repo_root = Path(__file__).resolve().parents[2]
+    # Validate against the live PRODUCT firmware header (board revision v1.2).
+    # The bring-up header (firmware/bringup/common/include/agentic_board_io.h) is
+    # also on v1.2 wiring (WS2812=P4/SPI1, LCD_BL=P8) but is not checked here to
+    # keep a single authoritative source for the product firmware macros.
     header_path = (
-        repo_root / "firmware" / "bringup" / "common" / "include" / "agentic_board_io.h"
+        repo_root / "firmware" / "app" / "common" / "include" / "ak_board_io.h"
     )
     data = load(path)
     errors = check(data)

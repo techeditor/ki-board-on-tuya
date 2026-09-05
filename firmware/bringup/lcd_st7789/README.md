@@ -3,7 +3,7 @@
 Validates the project-specific CL28CK230-18A wiring:
 
 - SPI0 SCK=P14, MOSI=P16, CS=P15, DC=P17
-- RST=P6, backlight=P5, power=P7
+- RST=P6, backlight=P8 (v1.2, was P5), power=P7
 - Native resolution 240x320, RGB565, 48 MHz
 
 The screen cycles through RGB565 color bars and full-screen red, green, blue,
