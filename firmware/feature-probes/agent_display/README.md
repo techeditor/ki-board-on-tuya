@@ -1,10 +1,10 @@
-# P2-1 agent_display
+# FP-1 agent_display
 
 二期功能测试:把 CodeTank 的 Agent 状态显示层(LVGL 场景 + 吉祥物动画 + 通知)移植到
 v1.2 硬件(CL28CK230-18A / ST7789 / 320×240 横屏),用 **5 键 + 5 向开关模拟事件源**切换 Agent
 状态和通知,为后期氛围显示打基础。
 
-Spec:`.kiro/specs/phase2-agent-display/`(requirements / design / tasks)。
+Spec:`.kiro/specs/feature-probes-agent-display/`(requirements / design / tasks)。
 
 ## 管线
 
@@ -12,7 +12,7 @@ Spec:`.kiro/specs/phase2-agent-display/`(requirements / design / tasks)。
 5键+5向 --(ak_input)--> input_map(纯映射) --> ak_event_t 意图
    --> app_state --> ak_scene(吉祥物) / ak_notify_ui(通知条) --> LVGL --> ST7789(320×240)
 ```
-关键:`ak_event_t` 意图层是稳定边界。P2-3 用「串口 JSONL 解析器」替换 `input_map` 产出相同意图,
+关键:`ak_event_t` 意图层是稳定边界。FP-3 用「串口 JSONL 解析器」替换 `input_map` 产出相同意图,
 即可用真实 Kiro 事件驱动同一套显示,无需改显示层。**不接 Wi-Fi/TCP/云**。
 
 ## 状态:T1–T6 完成
@@ -43,7 +43,7 @@ Spec:`.kiro/specs/phase2-agent-display/`(requirements / design / tasks)。
 
 ```bash
 cd /data/projects/TuyaOpen && . ./export.sh
-cd /data/projects/tuya-powered-agentic-keyboard-for-kiro/firmware/phase2/agent_display
+cd /data/projects/tuya-powered-agentic-keyboard-for-kiro/firmware/feature-probes/agent_display
 tos.py config choice -c TUYA_T5AI_CORE.config
 tos.py clean -f && tos.py build
 tos.py flash -b 460800 && tos.py monitor -b 460800

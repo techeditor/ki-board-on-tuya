@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile and run host unit tests for the pure P2-1 modules
+# Compile and run host unit tests for the pure FP-1 modules
 # (app_notification + input_map). No SDK or hardware required.
 set -euo pipefail
 
@@ -15,7 +15,7 @@ gcc -std=c11 -Wall -Wextra -Werror \
     "${app}/src/app_notification.c" \
     "${app}/src/input_map.c" \
     "${app_common}/src/ak_input_fsm.c" \
-    "${here}/test_phase2.c" \
-    -o "${out}/test_phase2"
+    "${here}/test_agent_display.c" \
+    -o "${out}/test_agent_display"
 
-"${out}/test_phase2"
+"${out}/test_agent_display"

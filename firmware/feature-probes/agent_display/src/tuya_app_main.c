@@ -1,14 +1,14 @@
 /**
  * @file tuya_app_main.c
- * @brief P2-1 agent_display — key-driven Agent status + notification display.
+ * @brief FP-1 agent_display — key-driven Agent status + notification display.
  *
- * Pipeline (see .kiro/specs/phase2-agent-display/):
+ * Pipeline (see .kiro/specs/feature-probes-agent-display/):
  *   5 keys + 5-way nav --(ak_input)--> input_map (pure) --> ak_event_t intent
  *      --> app_state --> ak_scene (mascot) / ak_notify_ui (notifications)
  *      --> LVGL --> ST7789 (320x240 landscape).
  *
  * No Wi-Fi/TCP/cloud: the keys stand in for a real Agent event source, which
- * P2-3 will replace with serial JSONL from the companion while reusing the same
+ * FP-3 will replace with serial JSONL from the companion while reusing the same
  * app_state. LVGL runs on our own panel (CL28CK230-18A, INVOFF init) via
  * TDD->TDL->LVGL, independent of CodeTank's official-board LCD config.
  */
@@ -85,7 +85,7 @@ static void user_main(void)
     OPERATE_RET rt;
 
     tal_log_init(TAL_LOG_LEVEL_DEBUG, 2048, (TAL_LOG_OUTPUT_CB)tkl_log_output);
-    PR_NOTICE("======== Phase-2 agent_display (T5: key-driven states) ========");
+    PR_NOTICE("======== agent_display FP-1 (key-driven states) ========");
 
     rt = ak_panel_register();
     if (rt != OPRT_OK) {

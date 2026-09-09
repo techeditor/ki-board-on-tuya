@@ -1,6 +1,6 @@
 /**
- * @file test_phase2.c
- * @brief Host unit tests for the pure P2-1 modules: notification store
+ * @file test_agent_display.c
+ * @brief Host unit tests for the pure FP-1 modules: notification store
  *        (app_notification) and the input->intent mapper (input_map).
  *        No SDK or hardware required.
  */
@@ -131,7 +131,7 @@ static void test_input_map(void)
 
 int main(void)
 {
-    printf("== phase2 agent_display host tests ==\n");
+    printf("== agent_display (FP-1) host tests ==\n");
     test_notif_add_dismiss_clear();
     test_notif_full_drops_oldest();
     test_input_map();

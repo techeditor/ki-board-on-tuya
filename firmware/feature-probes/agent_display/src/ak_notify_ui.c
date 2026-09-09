@@ -1,6 +1,6 @@
 /**
  * @file ak_notify_ui.c
- * @brief Lightweight LVGL notification bar (P2-1 T4).
+ * @brief Lightweight LVGL notification bar (FP-1 T4).
  */
 
 #include "ak_notify_ui.h"

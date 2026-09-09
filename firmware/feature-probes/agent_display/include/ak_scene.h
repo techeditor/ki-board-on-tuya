@@ -1,6 +1,6 @@
 /**
  * @file ak_scene.h
- * @brief Single-mascot scene engine (P2-1 T3) — the single-session slice of
+ * @brief Single-mascot scene engine (FP-1 T3) — the single-session slice of
  *        CodeTank's app_scene.c, adapted to our 320x240 landscape panel.
  *
  * Owns one LVGL image, the full mascot animation registry, and a frame-advance

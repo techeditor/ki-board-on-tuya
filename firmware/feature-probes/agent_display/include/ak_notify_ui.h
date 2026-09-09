@@ -1,6 +1,6 @@
 /**
  * @file ak_notify_ui.h
- * @brief Lightweight LVGL notification bar for P2-1 (T4).
+ * @brief Lightweight LVGL notification bar for FP-1 (T4).
  *
  * Renders the newest notification from a notification_store_t as a bottom bar
  * (project + message + a "(N)" count when more than one is queued), and hides

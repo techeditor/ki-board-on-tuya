@@ -1,6 +1,6 @@
 ##
 # @file CMakeLists.txt
-# @brief Phase-2 agent_display test (T1: LVGL bring-up).
+# @brief agent_display feature-probe (FP-1: LVGL bring-up).
 #
 # Reuses the authoritative v1.2 IO map from firmware/app/common/include
 # (ak_board_io.h). LVGL headers (lvgl.h / lv_vendor.h) are exported by the

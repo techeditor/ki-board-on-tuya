@@ -6,7 +6,7 @@
  * toggle / counter state lives in app_state, not here — this only classifies a
  * single input event into an intent.
  *
- * Mapping (see .kiro/specs/phase2-agent-display/design.md §5):
+ * Mapping (see .kiro/specs/feature-probes-agent-display/design.md §5):
  *   short press = UP with held_ms < AK_FSM_LONG_PRESS_MS; long = LONG event.
  *   k1 short  -> STATUS_CYCLE +1        k2 short -> NOTIF_ADD
  *   k3 short  -> NOTIF_DISMISS_LATEST    k3 long  -> NOTIF_CLEAR

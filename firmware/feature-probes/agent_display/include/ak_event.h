@@ -8,7 +8,7 @@
  * state (which concrete animation, which notification). Keeping intents free of
  * any concrete animation id (and of SDK headers) means:
  *   - the mapper is a pure function and host-unit-testable;
- *   - P2-3 can drive the SAME app_state from serial JSONL / real Kiro events by
+ *   - FP-3 can drive the SAME app_state from serial JSONL / real Kiro events by
  *     emitting these intents (or richer ones) instead of key presses.
  */
 

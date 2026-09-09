@@ -1,6 +1,6 @@
 /**
  * @file ak_scene.c
- * @brief Single-mascot scene engine (P2-1 T3).
+ * @brief Single-mascot scene engine (FP-1 T3).
  *
  * Sprite assets, the RLE runtime, and the animation registry are ported
  * verbatim from CodeTank (ref_projects/CodeTank), whose sprite/scene logic is

@@ -1,12 +1,12 @@
 /**
  * @file app_state.h
  * @brief Display state that consumes ak_event_t intents and drives the scene
- *        + notification UI (P2-1 T5).
+ *        + notification UI (FP-1 T5).
  *
  * Holds the notification store, the current Agent status, sleep/connection
  * flags, and the cycling indices. This is the single place that maps intents to
  * concrete animations and notification operations, so a future event source
- * (P2-3 serial JSONL) can reuse it unchanged.
+ * (FP-3 serial JSONL) can reuse it unchanged.
  */
 
 #ifndef APP_STATE_H

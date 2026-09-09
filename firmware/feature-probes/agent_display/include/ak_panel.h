@@ -2,7 +2,7 @@
  * @file ak_panel.h
  * @brief Register the CL28CK230-18A (ST7789) panel for LVGL on v1.2 wiring.
  *
- * Phase-2 agent_display test. Unlike firmware/app/ak_display.c (which opens the
+ * agent_display feature-probe (FP-1). Unlike firmware/app/ak_display.c (which opens the
  * panel and draws directly via TDL), this only REGISTERS the panel with the TDD
  * layer under AK_PANEL_NAME. The LVGL porting layer (lv_vendor_init) then finds
  * it by name and takes ownership of open + double draw buffers + rotation.
