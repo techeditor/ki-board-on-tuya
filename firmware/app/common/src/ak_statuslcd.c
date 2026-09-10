@@ -15,7 +15,7 @@
 
 #define STATUSLCD_NAME "ak_statuslcd"
 #define FRAME_BYTES    (AK_STATUSLCD_W * AK_STATUSLCD_H * 2U)
-#define TITLE_H        30U
+#define TITLE_H        22U
 
 static TDL_DISP_HANDLE_T      s_disp = NULL;
 static TDL_DISP_DEV_INFO_T    s_info;
@@ -210,6 +210,6 @@ void ak_statuslcd_title(const char *title, uint16_t bar_color)
         return;
     }
     ak_gfx_fill_rect(0, 0, AK_STATUSLCD_W, TITLE_H, bar_color);
-    ak_gfx_text(6, 7, title == NULL ? "" : title, AK_COL_WHITE, bar_color, 2);
+    ak_gfx_text(6, 7, title == NULL ? "" : title, AK_COL_WHITE, bar_color, 1);
     ak_gfx_fill_rect(0, TITLE_H, AK_STATUSLCD_W, (uint16_t)(AK_STATUSLCD_H - TITLE_H), AK_COL_BLACK);
 }

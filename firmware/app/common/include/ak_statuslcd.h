@@ -49,6 +49,6 @@ void ak_statuslcd_flush(void);
 void ak_statuslcd_title(const char *title, uint16_t bar_color);
 
 /** @brief Y coordinate where the content area starts (below the title bar). */
-#define AK_STATUSLCD_CONTENT_Y 34U
+#define AK_STATUSLCD_CONTENT_Y 26U
 
 #endif /* AK_STATUSLCD_H_ */

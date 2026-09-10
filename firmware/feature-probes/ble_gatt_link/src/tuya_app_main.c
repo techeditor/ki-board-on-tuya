@@ -118,18 +118,18 @@ static void draw_status(void)
     }
 
     ak_statuslcd_title("FP-2 ble-gatt-link", bar);
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 6, "BLE " BLE_NAME, AK_COL_GRAY, AK_COL_BLACK, 1);
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 22, state, AK_COL_YELLOW, AK_COL_BLACK, 2);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 4, "BLE " BLE_NAME, AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 18, state, AK_COL_YELLOW, AK_COL_BLACK, 2);
 
     (void)snprintf(line, sizeof(line), "sub:%s  MTU:%u", s_subscribed ? "yes" : "no", (unsigned)SERVER_MTU);
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 52, line, AK_COL_CYAN, AK_COL_BLACK, 2);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 44, line, AK_COL_CYAN, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), "TX:%u  RX:%u", (unsigned)s_tx_frames, (unsigned)s_rx_writes);
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 82, line, AK_COL_CYAN, AK_COL_BLACK, 2);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 58, line, AK_COL_CYAN, AK_COL_BLACK, 1);
 
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 118, "Last:", AK_COL_GRAY, AK_COL_BLACK, 1);
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 134, s_last_evt, AK_COL_GREEN, AK_COL_BLACK, 2);
+    (void)snprintf(line, sizeof(line), "Last: %s", s_last_evt);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 76, line, AK_COL_GREEN, AK_COL_BLACK, 1);
 
-    ak_gfx_text(6, AK_STATUSLCD_H - 14, "Press keys/nav; nRF: notify 2B10 / write 2B11", AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text(6, AK_STATUSLCD_H - 12, "keys/nav=notify  write->RX", AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
 }
 
