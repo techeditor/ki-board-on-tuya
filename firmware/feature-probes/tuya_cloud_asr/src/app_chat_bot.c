@@ -15,6 +15,7 @@
 
 /* FP-3: surface ASR text on UART0 as protocol-v1 JSONL (companion/observe). */
 #include <string.h>
+#include "ak_statuslcd.h"
 #include "ak_uart.h"
 
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
@@ -116,6 +117,68 @@ static void __display_status_tm_cb(TIMER_ID timer_id, void *arg)
 
 #endif
 
+/* ------------------------------------------------------------ FP-3 status LCD */
+static char     s_fp3_asr[80] = "(waiting for speech)";
+static uint32_t s_fp3_asr_ms  = 0;
+static uint32_t s_fp3_count   = 0;
+static TIMER_ID s_fp3_lcd_tm  = NULL;
+
+static bool __fp3_net_up(void)
+{
+    netmgr_status_e st = NETMGR_LINK_DOWN;
+    netmgr_conn_get(NETCONN_AUTO, NETCONN_CMD_STATUS, &st);
+    return st == NETMGR_LINK_UP;
+}
+
+static void __fp3_draw_lcd(void)
+{
+    char line[48];
+    bool up;
+
+    if (!ak_statuslcd_ready()) {
+        return;
+    }
+    up = __fp3_net_up();
+    ak_statuslcd_title("FP-3 cloud ASR", up ? AK_COL_GREEN : AK_COL_ORANGE);
+
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 4, "Hold button = talk", AK_COL_CYAN, AK_COL_BLACK, 2);
+    (void)snprintf(line, sizeof(line), "Net: %s", up ? "UP" : "DOWN (pair WiFi)");
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 30, line, up ? AK_COL_GREEN : AK_COL_RED, AK_COL_BLACK, 1);
+
+    (void)snprintf(line, sizeof(line), "ASR #%u  %ums", (unsigned)s_fp3_count, (unsigned)s_fp3_asr_ms);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 48, line, AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 66, s_fp3_asr, AK_COL_YELLOW, AK_COL_BLACK, 2);
+
+    ak_gfx_text(6, AK_STATUSLCD_H - 14, "full UTF-8 text on UART0 JSONL", AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_statuslcd_flush();
+}
+
+/* Copy ASR text into the status buffer, ASCII best-effort: the 8x8 status font
+   is ASCII-only, so CJK bytes render as '.'; the full UTF-8 text still goes out
+   on UART0 JSONL. Enough to judge on-board that ASR fired and (for English) what. */
+static void __fp3_set_asr_text(const AI_NOTIFY_TEXT_T *t)
+{
+    uint32_t i, n = 0;
+
+    if (t == NULL || t->data == NULL) {
+        return;
+    }
+    for (i = 0; i < t->datalen && n < sizeof(s_fp3_asr) - 1; i++) {
+        unsigned char c = (unsigned char)t->data[i];
+        s_fp3_asr[n++]  = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+    }
+    s_fp3_asr[n] = '\0';
+    s_fp3_asr_ms = t->timeindex;
+    s_fp3_count++;
+}
+
+static void __fp3_lcd_tm_cb(TIMER_ID timer_id, void *arg)
+{
+    (void)timer_id;
+    (void)arg;
+    __fp3_draw_lcd();
+}
+
 static void __fp3_emit_asr(const AI_NOTIFY_TEXT_T *t)
 {
     /* {"v":1,"type":"asr","payload":{"text":"<escaped>","ms":<timeindex>}} */
@@ -146,30 +209,35 @@ static void __ai_chat_handle_event(AI_NOTIFY_EVENT_T *event)
 {
     app_lowpower_feed_event(event); // power mgmt: activity / key-mode gate
 
-    switch(event->type) {
-        case AI_USER_EVT_ASR_OK:
-            __fp3_emit_asr((const AI_NOTIFY_TEXT_T *)event->data);
-            break;
-        case AI_USER_EVT_ASR_ERROR: {
-            const char *s = "{\"v\":1,\"type\":\"asr\",\"payload\":{\"error\":\"asr_error\"}}\n";
-            ak_uart_write(s, (uint32_t)strlen(s));
-        } break;
-        case AI_USER_EVT_ASR_EMPTY: {
-            const char *s = "{\"v\":1,\"type\":\"asr\",\"payload\":{\"error\":\"asr_empty\"}}\n";
-            ak_uart_write(s, (uint32_t)strlen(s));
-        } break;
-        #if defined(ENABLE_PRINTER) && (ENABLE_PRINTER == 1)
-        case AI_USER_EVT_GENERATE_PICTURE:
-        case AI_USER_EVT_GET_PICTURE_FROM_APP: {
-            #if defined(ENABLE_COMP_AI_PICTURE) && (ENABLE_COMP_AI_PICTURE == 1)
-            app_print_img_from_album((const char *)event->data);
-            #endif
-        } break;
-        #endif
-        default:
+    switch (event->type) {
+    case AI_USER_EVT_ASR_OK:
+        __fp3_emit_asr((const AI_NOTIFY_TEXT_T *)event->data);
+        __fp3_set_asr_text((const AI_NOTIFY_TEXT_T *)event->data);
+        __fp3_draw_lcd();
+        break;
+    case AI_USER_EVT_ASR_ERROR: {
+        const char *s = "{\"v\":1,\"type\":\"asr\",\"payload\":{\"error\":\"asr_error\"}}\n";
+        ak_uart_write(s, (uint32_t)strlen(s));
+        strncpy(s_fp3_asr, "<asr error>", sizeof(s_fp3_asr) - 1);
+        __fp3_draw_lcd();
+    } break;
+    case AI_USER_EVT_ASR_EMPTY: {
+        const char *s = "{\"v\":1,\"type\":\"asr\",\"payload\":{\"error\":\"asr_empty\"}}\n";
+        ak_uart_write(s, (uint32_t)strlen(s));
+        strncpy(s_fp3_asr, "<empty>", sizeof(s_fp3_asr) - 1);
+        __fp3_draw_lcd();
+    } break;
+#if defined(ENABLE_PRINTER) && (ENABLE_PRINTER == 1)
+    case AI_USER_EVT_GENERATE_PICTURE:
+    case AI_USER_EVT_GET_PICTURE_FROM_APP: {
+#if defined(ENABLE_COMP_AI_PICTURE) && (ENABLE_COMP_AI_PICTURE == 1)
+        app_print_img_from_album((const char *)event->data);
+#endif
+    } break;
+#endif
+    default:
         break;
     }
-
 }
 
 void app_chat_bot_set_online(BOOL_T online)
@@ -182,6 +250,11 @@ OPERATE_RET app_chat_bot_init(void)
     OPERATE_RET rt = OPRT_OK;
 
     (void)ak_uart_init(); /* FP-3: UART0 P10/P11 for ASR JSONL output */
+
+    if (ak_statuslcd_init() != OPRT_OK) {
+        PR_ERR("FP-3 status LCD init failed (continuing headless)");
+    }
+    __fp3_draw_lcd();
 
     AI_CHAT_MODE_CFG_T ai_chat_cfg = {
         .default_mode = AI_CHAT_MODE_HOLD, // push-to-talk; idle low-power gates on this mode
@@ -211,6 +284,10 @@ OPERATE_RET app_chat_bot_init(void)
     // Free heap size
     tal_sw_timer_create(__printf_free_heap_tm_cb, NULL, &sg_printf_heap_tm);
     tal_sw_timer_start(sg_printf_heap_tm, PRINTF_FREE_HEAP_TTIME, TAL_TIMER_CYCLE);
+
+    /* FP-3: refresh the status LCD (net state) every 2s. */
+    tal_sw_timer_create(__fp3_lcd_tm_cb, NULL, &s_fp3_lcd_tm);
+    tal_sw_timer_start(s_fp3_lcd_tm, 2000, TAL_TIMER_CYCLE);
 
 #if defined(ENABLE_COMP_AI_DISPLAY) && (ENABLE_COMP_AI_DISPLAY == 1)
     ai_ui_disp_msg(AI_UI_DISP_NETWORK, (uint8_t *)&sg_wifi_status, sizeof(AI_UI_WIFI_STATUS_E));
