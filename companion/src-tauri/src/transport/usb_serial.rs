@@ -1,22 +1,80 @@
 //! UART / USB-CDC transport backend (Phase 1).
 //!
-//! Skeleton. Real serialport wiring, VID/PID auto-discovery, and a line-reader
-//! thread land in Task 6. For now this only defines the type and the trait impl
-//! shape so the crate compiles and the interface is stable.
+//! Uses the `serialport` crate to enumerate and open the board's CH34x
+//! USB-to-UART bridge (115200 8N1), spawns a background reader thread that
+//! reassembles protocol lines and forwards them over a [`LineSender`], and
+//! writes JSONL frames back to the board.
+//!
+//! The reader thread does not decode frames itself; it hands raw lines to the
+//! app layer, keeping this module free of any Tauri dependency so it builds and
+//! unit-tests on the Linux CI host. On Linux the `serialport` crate is built
+//! without the `libudev` feature, so `available_ports()` returns nothing at
+//! runtime there — enumeration is exercised on the Windows target only, but the
+//! code compiles and the pure matching logic is tested everywhere.
 
-use super::{BoardTransport, TransportKind};
+use super::{BoardTransport, LineSender, TransportKind};
+use crate::protocol::{self, LineAccumulator};
+use serde::Serialize;
 use serde_json::Value;
+use serialport::{SerialPort, SerialPortType};
+use std::io::Write;
+use std::thread;
+use std::time::Duration;
+
+/// WCH vendor id shared by the CH340 / CH342 / CH343 bridges.
+pub const WCH_VID: u16 = 0x1A86;
+/// CH340 product id.
+pub const CH340_PID: u16 = 0x7523;
+/// CH343 / CH342 product id (the CH342F on PCB v1.2 enumerates here).
+pub const CH343_PID: u16 = 0x55D3;
+
+const BAUD_RATE: u32 = 115_200;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SerialPortInfo {
+    pub name: String,
+    pub kind: String,
+}
 
 /// USB-CDC / UART connection to the board.
 pub struct UsbSerialTransport {
-    port_name: String,
+    endpoint: String,
+    port: Box<dyn SerialPort>,
 }
 
 impl UsbSerialTransport {
-    pub fn new(port_name: impl Into<String>) -> Self {
-        Self {
-            port_name: port_name.into(),
-        }
+    /// Open `port_name` (or auto-discover a CH34x board port when `None`),
+    /// configure 115200 8N1, and spawn the background line reader.
+    pub fn connect(port_name: Option<String>, lines: LineSender) -> Result<Self, String> {
+        let selected = port_name
+            .filter(|port| !port.is_empty())
+            .or_else(discover_board_port)
+            .ok_or("board USB serial port not found")?;
+
+        let mut port = serialport::new(&selected, BAUD_RATE)
+            .data_bits(serialport::DataBits::Eight)
+            .parity(serialport::Parity::None)
+            .stop_bits(serialport::StopBits::One)
+            .flow_control(serialport::FlowControl::None)
+            .timeout(Duration::from_millis(100))
+            .open()
+            .map_err(|err| format!("open serial port failed: {err}"))?;
+
+        // The CH34x bridge exposes DTR/RTS; on many boards these are wired to
+        // EN/BOOT. Assert DTR and keep RTS low so simply opening the port does
+        // not trip a reset / download path.
+        let _ = port.write_data_terminal_ready(true);
+        let _ = port.write_request_to_send(false);
+
+        let reader = port
+            .try_clone()
+            .map_err(|err| format!("clone serial port failed: {err}"))?;
+        spawn_reader(reader, lines);
+
+        Ok(Self {
+            endpoint: selected,
+            port,
+        })
     }
 }
 
@@ -26,12 +84,142 @@ impl BoardTransport for UsbSerialTransport {
     }
 
     fn endpoint(&self) -> String {
-        self.port_name.clone()
+        self.endpoint.clone()
     }
 
-    fn write_json(&mut self, _payload: &Value) -> Result<(), String> {
-        Err("usb_serial: not implemented (Task 6)".into())
+    fn write_json(&mut self, payload: &Value) -> Result<(), String> {
+        let line = protocol::encode_json_line(payload)?;
+        self.port
+            .write_all(&line)
+            .and_then(|_| self.port.flush())
+            .map_err(|err| format!("serial write failed: {err}"))
     }
 
-    fn disconnect(&mut self) {}
+    fn disconnect(&mut self) {
+        let _ = self.port.flush();
+    }
+}
+
+/// True when a USB port's identity looks like the board's CH34x bridge.
+pub fn is_board_port(vid: u16, pid: u16, product: &str) -> bool {
+    if vid != WCH_VID {
+        return false;
+    }
+    if pid == CH340_PID || pid == CH343_PID {
+        return true;
+    }
+    let product = product.to_ascii_lowercase();
+    product.contains("ch340") || product.contains("ch343") || product.contains("ch34")
+}
+
+/// Human-readable classification used by [`list_serial_ports`].
+pub fn port_kind(port_type: &SerialPortType) -> &'static str {
+    match port_type {
+        SerialPortType::UsbPort(info) => {
+            let product = info.product.clone().unwrap_or_default();
+            if is_board_port(info.vid, info.pid, &product) {
+                "board-cdc"
+            } else {
+                "usb-serial"
+            }
+        }
+        _ => "serial",
+    }
+}
+
+/// Find the first port that looks like the board's CH34x bridge.
+pub fn discover_board_port() -> Option<String> {
+    serialport::available_ports().ok()?.into_iter().find_map(|port| {
+        if let SerialPortType::UsbPort(info) = &port.port_type {
+            let product = info.product.clone().unwrap_or_default();
+            if is_board_port(info.vid, info.pid, &product) {
+                return Some(port.port_name);
+            }
+        }
+        None
+    })
+}
+
+/// Enumerate all serial ports with a coarse classification for the UI dropdown.
+pub fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
+    let ports =
+        serialport::available_ports().map_err(|err| format!("list serial ports failed: {err}"))?;
+    Ok(ports
+        .into_iter()
+        .map(|port| SerialPortInfo {
+            kind: port_kind(&port.port_type).to_string(),
+            name: port.port_name,
+        })
+        .collect())
+}
+
+/// Read bytes off the port, reassemble complete lines, and forward them.
+fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender) {
+    thread::spawn(move || {
+        let mut acc = LineAccumulator::new();
+        let mut chunk = [0u8; 512];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => thread::sleep(Duration::from_millis(20)),
+                Ok(n) => {
+                    for line in acc.push(&chunk[..n]) {
+                        if lines.send(line).is_err() {
+                            return; // receiver dropped -> connection gone
+                        }
+                    }
+                }
+                Err(ref err) if err.kind() == std::io::ErrorKind::TimedOut => {
+                    // Idle read timeout is normal; keep polling.
+                }
+                Err(_) => thread::sleep(Duration::from_millis(50)),
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_ch340_and_ch343_by_pid() {
+        assert!(is_board_port(WCH_VID, CH340_PID, ""));
+        assert!(is_board_port(WCH_VID, CH343_PID, ""));
+    }
+
+    #[test]
+    fn matches_wch_by_product_name() {
+        assert!(is_board_port(WCH_VID, 0x0001, "USB Serial (CH343)"));
+        assert!(is_board_port(WCH_VID, 0x0001, "ch340 uart"));
+    }
+
+    #[test]
+    fn rejects_other_vendors_and_names() {
+        assert!(!is_board_port(0x0403, CH340_PID, "FTDI")); // right pid, wrong vid
+        assert!(!is_board_port(WCH_VID, 0x9999, "Some Other Device"));
+    }
+
+    #[test]
+    fn port_kind_classifies_usb_variants() {
+        use serialport::UsbPortInfo;
+        let board = SerialPortType::UsbPort(UsbPortInfo {
+            vid: WCH_VID,
+            pid: CH343_PID,
+            serial_number: None,
+            manufacturer: None,
+            product: Some("CH343".into()),
+        });
+        assert_eq!(port_kind(&board), "board-cdc");
+
+        let other = SerialPortType::UsbPort(UsbPortInfo {
+            vid: 0x0403,
+            pid: 0x6001,
+            serial_number: None,
+            manufacturer: None,
+            product: Some("FT232".into()),
+        });
+        assert_eq!(port_kind(&other), "usb-serial");
+
+        assert_eq!(port_kind(&SerialPortType::Unknown), "serial");
+    }
 }
