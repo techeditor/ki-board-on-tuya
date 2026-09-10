@@ -103,6 +103,9 @@ companion/src-tauri/target/release/bundle/
 **/*authkey*
 **/*auth_key*
 uuid_authkey*.txt
+# FP-3 Tuya license header: the real ak_tuya_authkey.h is ignored (matches
+# **/*authkey* above); keep ONLY the placeholder template tracked.
+!**/ak_tuya_authkey.h.example
 
 # ===== Reference Projects =====
 ref_projects/
