@@ -25,6 +25,7 @@
 #include "ak_board_io.h"
 #include "ak_input.h"
 #include "ak_protocol.h"
+#include "ak_statuslcd.h"
 #include "ak_uart.h"
 
 #include "tal_api.h"
@@ -92,6 +93,46 @@ static void start_advertising(void)
     tal_ble_advertising_start(TUYAOS_BLE_DEFAULT_ADV_PARAM);
 }
 
+/* ------------------------------------------------------------ LCD status */
+
+static char s_last_evt[40] = "-";
+
+static void draw_status(void)
+{
+    const char *state;
+    uint16_t    bar;
+    char        line[40];
+
+    if (!ak_statuslcd_ready()) {
+        return;
+    }
+    if (s_connected && s_subscribed) {
+        state = "LIVE";
+        bar   = AK_COL_GREEN;
+    } else if (s_connected) {
+        state = "CONNECTED";
+        bar   = AK_COL_DKBLUE;
+    } else {
+        state = "ADVERTISING";
+        bar   = AK_COL_ORANGE;
+    }
+
+    ak_statuslcd_title("FP-2 ble-gatt-link", bar);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 6, "BLE " BLE_NAME, AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 22, state, AK_COL_YELLOW, AK_COL_BLACK, 2);
+
+    (void)snprintf(line, sizeof(line), "sub:%s  MTU:%u", s_subscribed ? "yes" : "no", (unsigned)SERVER_MTU);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 52, line, AK_COL_CYAN, AK_COL_BLACK, 2);
+    (void)snprintf(line, sizeof(line), "TX:%u  RX:%u", (unsigned)s_tx_frames, (unsigned)s_rx_writes);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 82, line, AK_COL_CYAN, AK_COL_BLACK, 2);
+
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 118, "Last:", AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 134, s_last_evt, AK_COL_GREEN, AK_COL_BLACK, 2);
+
+    ak_gfx_text(6, AK_STATUSLCD_H - 14, "Press keys/nav; nRF: notify 2B10 / write 2B11", AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_statuslcd_flush();
+}
+
 /* ------------------------------------------------------------ input */
 
 static void on_input(ak_input_kind_t kind, const char *id, ak_input_event_t event, uint32_t held_ms)
@@ -110,6 +151,9 @@ static void on_input(ak_input_kind_t kind, const char *id, ak_input_event_t even
         len = ak_proto_nav(buf, sizeof(buf), s_seq, id, action, held_ms);
     }
     emit_frame(buf, len);
+
+    (void)snprintf(s_last_evt, sizeof(s_last_evt), "%s %s", id, action);
+    draw_status();
 }
 
 /* ------------------------------------------------------------ BLE events */
@@ -127,6 +171,7 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
             PR_NOTICE("BLE ready, advertising as %s", BLE_NAME);
             uart_line("{\"v\":1,\"type\":\"link\",\"payload\":{\"ble\":\"advertising\",\"name\":\"" BLE_NAME "\"}}\n",
                       -1); /* len computed below */
+            draw_status();
         } else {
             PR_ERR("BLE init failed: %d", event->ble_event.init);
         }
@@ -140,6 +185,7 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
                             "{\"v\":1,\"type\":\"link\",\"payload\":{\"ble\":\"connected\",\"result\":%d}}\n",
                             event->ble_event.connect.result);
         uart_line(buf, len);
+        draw_status();
         break;
     }
 
@@ -154,6 +200,7 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
             int  len = ak_proto_hello_ack(buf, sizeof(buf), PROJECT_VERSION, "ble-gatt");
             emit_frame(buf, len);
         }
+        draw_status();
         break;
 
     case TAL_BLE_EVT_WRITE_REQ: {
@@ -170,6 +217,8 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
         }
         len += snprintf(buf + len, sizeof(buf) - len, "\"}}\n");
         uart_line(buf, len);
+        (void)snprintf(s_last_evt, sizeof(s_last_evt), "rx %u bytes", (unsigned)rx->len);
+        draw_status();
         break;
     }
 
@@ -178,6 +227,7 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
         s_subscribed = false;
         uart_line("{\"v\":1,\"type\":\"link\",\"payload\":{\"ble\":\"disconnected\"}}\n", -1);
         start_advertising();
+        draw_status();
         break;
 
     default:
@@ -205,6 +255,12 @@ static void user_main(void)
         PR_ERR("Input init failed: %d", rt);
         return;
     }
+
+    rt = ak_statuslcd_init();
+    if (rt != OPRT_OK) {
+        PR_ERR("Status LCD init failed: %d (continuing headless)", rt);
+    }
+    draw_status();
 
     tal_kv_init(&(tal_kv_cfg_t){.seed = "agentic-fp2", .key = "ble-gatt-link"});
     tal_sw_timer_init();
@@ -243,6 +299,7 @@ static void user_main(void)
             }
             PR_DEBUG("link: conn=%d sub=%d tx=%u rx=%u", s_connected, s_subscribed, (unsigned)s_tx_frames,
                      (unsigned)s_rx_writes);
+            draw_status();
         }
 
         tal_system_sleep(POLL_INTERVAL_MS);

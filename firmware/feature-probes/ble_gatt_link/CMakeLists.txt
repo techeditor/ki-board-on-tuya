@@ -19,6 +19,8 @@ target_sources(${EXAMPLE_LIB}
         ${AK_APP_COMMON}/src/ak_input.c
         ${AK_APP_COMMON}/src/ak_input_fsm.c
         ${AK_APP_COMMON}/src/ak_protocol.c
+        ${AK_APP_COMMON}/src/ak_gfx.c
+        ${AK_APP_COMMON}/src/ak_statuslcd.c
 )
 target_include_directories(${EXAMPLE_LIB}
     PRIVATE
