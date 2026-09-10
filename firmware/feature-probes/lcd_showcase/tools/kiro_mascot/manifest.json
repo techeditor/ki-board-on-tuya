@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "name": "Kiro Ghost Mascot",
+  "character": "AWS Kiro ghost mascot: a rounded white-to-violet ghost body with a smooth domed top and gently scalloped bottom, two cyan visor eyes, a soft violet/cyan glow; friendly, minimal, no limbs unless an action needs a hint of hands",
+  "workCanvas": [192, 144],
+  "baseline": 124,
+  "groundOffset": -8,
+  "transparentKey": "0x18C5",
+  "palette": "palette.json",
+  "_note": "Action set + enums mirror CodeTank's mascot so the generated sprite_mascot_registry.h drops into ak_scene.c unchanged (mascot_anim_id_t in ak_scene.h). Character is re-skinned to the Kiro ghost. grid/frameCount/fps/maxBox kept at CodeTank's values as a starting point; tune maxBox after first render if the ghost silhouette needs more/less room.",
+  "actions": [
+    {"name":"idle","enum":"MASCOT_ANIM_IDLE","source":"source/idle.png","grid":[4,4],"frameCount":16,"fps":6,"loop":true,"maxBox":[72,64]},
+    {"name":"alert","enum":"MASCOT_ANIM_ALERT","source":"source/alert.png","grid":[4,2],"frameCount":8,"fps":10,"loop":false,"maxBox":[84,84]},
+    {"name":"happy","enum":"MASCOT_ANIM_HAPPY","source":"source/happy.png","grid":[4,2],"frameCount":8,"fps":10,"loop":false,"maxBox":[84,88]},
+    {"name":"sleeping","enum":"MASCOT_ANIM_SLEEPING","source":"source/sleeping.png","grid":[4,3],"frameCount":12,"fps":6,"loop":true,"maxBox":[88,58]},
+    {"name":"disconnected","enum":"MASCOT_ANIM_DISCONNECTED","source":"source/disconnected.png","grid":[4,4],"frameCount":16,"fps":6,"loop":true,"maxBox":[100,82]},
+    {"name":"thinking","enum":"MASCOT_ANIM_THINKING","source":"source/thinking.png","grid":[4,2],"frameCount":8,"fps":8,"loop":true,"maxBox":[84,84]},
+    {"name":"typing","enum":"MASCOT_ANIM_TYPING","source":"source/typing.png","grid":[4,2],"frameCount":8,"fps":8,"loop":true,"maxBox":[106,76]},
+    {"name":"juggling","enum":"MASCOT_ANIM_JUGGLING","source":"source/juggling.png","grid":[4,2],"frameCount":8,"fps":8,"loop":true,"maxBox":[102,98]},
+    {"name":"building","enum":"MASCOT_ANIM_BUILDING","source":"source/building.png","grid":[4,2],"frameCount":8,"fps":8,"loop":true,"maxBox":[116,78]},
+    {"name":"confused","enum":"MASCOT_ANIM_CONFUSED","source":"source/confused.png","grid":[4,4],"frameCount":16,"fps":8,"loop":true,"maxBox":[98,90]},
+    {"name":"dizzy","enum":"MASCOT_ANIM_DIZZY","source":"source/dizzy.png","grid":[4,2],"frameCount":8,"fps":8,"loop":true,"maxBox":[98,98]},
+    {"name":"sweeping","enum":"MASCOT_ANIM_SWEEPING","source":"source/sweeping.png","grid":[4,2],"frameCount":8,"fps":8,"loop":false,"maxBox":[124,78]},
+    {"name":"walking","enum":"MASCOT_ANIM_WALKING","source":"source/walking.png","grid":[4,2],"frameCount":8,"fps":8,"loop":true,"maxBox":[82,58]},
+    {"name":"going_away","enum":"MASCOT_ANIM_GOING_AWAY","source":"source/going_away.png","grid":[4,2],"frameCount":8,"fps":8,"loop":false,"maxBox":[124,76]},
+    {"name":"debugger","enum":"MASCOT_ANIM_DEBUGGER","source":"source/debugger.png","grid":[4,3],"frameCount":12,"fps":8,"loop":true,"maxBox":[116,78]},
+    {"name":"wizard","enum":"MASCOT_ANIM_WIZARD","source":"source/wizard.png","grid":[4,4],"frameCount":16,"fps":8,"loop":true,"maxBox":[132,122]},
+    {"name":"conducting","enum":"MASCOT_ANIM_CONDUCTING","source":"source/conducting.png","grid":[4,2],"frameCount":8,"fps":8,"loop":true,"maxBox":[102,100]},
+    {"name":"beacon","enum":"MASCOT_ANIM_BEACON","source":"source/beacon.png","grid":[4,4],"frameCount":16,"fps":8,"loop":true,"maxBox":[124,98]},
+    {"name":"mini_mascot","enum":"MASCOT_ANIM_MINI_MASCOT","deriveFrom":"walking","frameCount":8,"fps":4,"loop":true,"maxBox":[10,7],"yOffset":-5}
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "generator": "ChatGPT Image built-in tool (or any text-to-image tool that honors a chroma-key background)",
+  "_note": "Same structure as CodeTank prompts.json, re-skinned to the Kiro ghost. To build one action sheet's prompt, concatenate canonical (as identity reference) + actionTemplate + the action line. Render each sheet in the manifest's grid order (left-to-right, top-to-bottom), one full mascot per equal cell, on a perfectly uniform #00ff00 background.",
+  "canonical": {
+    "layout": "eight evenly spaced full-body poses in a strict 4 columns by 2 rows layout",
+    "subject": "the same AWS Kiro ghost: a rounded white-to-violet ghost with a smooth domed top, a gently scalloped wavy bottom hem, two glowing cyan visor eyes set close together, and a soft violet/cyan aura; no arms or legs unless an action needs a faint hint of hands",
+    "style": "crisp hand-authored 16-bit-era pixel art, hard pixel clusters, limited palette, no antialiasing, no soft gradients on the outline",
+    "poses": "front, three-quarter, side, back, happy, thinking, floating-still, drifting",
+    "constraints": "perfectly uniform #00ff00 chroma-key background; no shadow, gradient, texture, floor, text, labels, watermark, border, grid lines or green pixels on the ghost itself"
+  },
+  "actionTemplate": {
+    "identity": "Use canonical-reference.png as Image 1 and preserve the exact ghost silhouette, visor eyes, proportions, violet body, cyan glow, scale and palette.",
+    "layout": "Arrange frames in manifest grid order, left-to-right then top-to-bottom, one complete mascot in each equal cell with a consistent baseline (bottom hem line).",
+    "background": "Use a perfectly uniform #00ff00 background with no shadow, gradient, texture, floor plane or lighting variation.",
+    "constraints": "No text, labels, watermark, dividers, extra characters, cropped body parts, realistic shading, soft edges, costume changes or camera changes."
+  },
+  "actions": {
+    "idle": "gentle float bob and a slow blink of the cyan visor eyes, hem waving softly, returning to the first pose",
+    "alert": "visor eyes widen and flash brighter cyan, a small startled upward pop with compact amber alert pixels, then settle",
+    "happy": "eyes curve into a smile, a joyful upward bounce with restrained cyan/violet sparkles, then settle",
+    "sleeping": "droop lower, eyes dim to a thin cyan line, slow breathing float and tiny cyan sleep bubbles without letter glyphs",
+    "disconnected": "eyes flicker and the aura weakens as it inspects a compact dark network glyph, hem sags, then recovers",
+    "thinking": "tilt slightly, one faint hint of a hand near the top, look upward as a tiny cyan thought sparkle appears and fades",
+    "typing": "hover behind one compact dark keyboard, faint hands alternate rapidly and the visor pulses tiny cyan indicator pixels",
+    "juggling": "juggle exactly three small code-orbs in cyan, violet and pale white along a clear circular arc",
+    "building": "assemble three dark geometric code blocks on a compact workbench and light their cyan edges",
+    "confused": "drift left and right, tilt, and orbit a few abstract cyan/amber question pixels above the dome",
+    "dizzy": "sway with abstract spiral highlights in the visor and three tiny orbiting cyan/violet stars",
+    "sweeping": "sweep small gray/cyan pixel fragments into a neat pile using one consistent compact broom",
+    "walking": "right-facing in-place drift cycle with subtle bob across two steps (a floating ghost 'walk')",
+    "going_away": "wave a faint hand, drift briskly right and dissolve into a compact cyan pixel trail as a one-shot",
+    "debugger": "hold one compact magnifying glass, follow dark blocks and find one amber bug cluster",
+    "wizard": "raise a dark cyan-tipped wand, float higher, trace cyan/violet pixels and form a small portal ring",
+    "conducting": "coordinate a beat with one dark cyan-tipped baton while three cyan data-orbs respond",
+    "beacon": "tap one dark handheld antenna beacon as cyan signal arcs expand and an amber acknowledgement flashes"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "name": "Kiro ghost mascot palette",
+  "_note": "Exactly 32 colors (pipeline enforces this). Ramps: deep bg / neutral grays / Kiro violet body / cyan visor+glow / white highlights / amber+red accents. Tune freely; keep 32 entries.",
+  "colors": [
+    "#101018", "#181826", "#22222e", "#2e2e3e", "#3a3a4e",
+    "#4a4a62", "#5c5c78", "#7676a0", "#9a9ac8",
+    "#3a1f66", "#502890", "#6a3caa", "#8a52c8", "#a877e0", "#c8b4ff", "#e0d0ff",
+    "#003a4a", "#006b80", "#0099aa", "#00c4d7", "#00e5ff", "#8afaff",
+    "#e8e8f4", "#ffffff",
+    "#7a3600", "#ad5900", "#e48300", "#ffc24b",
+    "#c0392f", "#f2504b", "#ff9a8e", "#ffd7c8"
+  ]
+}
