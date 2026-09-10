@@ -23,7 +23,7 @@
 #define AK_STATUSLCD_H 240U /* logical landscape height */
 
 #ifndef AK_STATUSLCD_MADCTL
-#define AK_STATUSLCD_MADCTL 0xA0U /* MV|MY landscape; 0x60 = the 180-flipped one */
+#define AK_STATUSLCD_MADCTL 0x60U /* MV|MX landscape (verified upright); 0xA0 = 180-flipped */
 #endif
 
 /**
