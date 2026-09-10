@@ -222,13 +222,20 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
         break;
     }
 
-    case TAL_BLE_EVT_DISCONNECT:
-        s_connected  = false;
-        s_subscribed = false;
-        uart_line("{\"v\":1,\"type\":\"link\",\"payload\":{\"ble\":\"disconnected\"}}\n", -1);
+    case TAL_BLE_EVT_DISCONNECT: {
+        uint8_t reason = event->ble_event.disconnect.reason;
+        s_connected    = false;
+        s_subscribed   = false;
+        char buf[112];
+        int  len = snprintf(buf, sizeof(buf),
+                            "{\"v\":1,\"type\":\"link\",\"payload\":{\"ble\":\"disconnected\",\"reason\":%u}}\n",
+                            (unsigned)reason);
+        uart_line(buf, len);
+        (void)snprintf(s_last_evt, sizeof(s_last_evt), "disc reason 0x%02X", (unsigned)reason);
         start_advertising();
         draw_status();
         break;
+    }
 
     default:
         break;
