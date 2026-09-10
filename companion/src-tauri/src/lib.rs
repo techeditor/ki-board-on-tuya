@@ -12,6 +12,7 @@
 
 pub mod asr;
 pub mod inject;
+pub mod pc_asr;
 pub mod protocol;
 pub mod transport;
 
@@ -103,6 +104,7 @@ pub fn run() {
 
 #[cfg(target_os = "windows")]
 mod app {
+    use crate::pc_asr::{self, VoiceAction, VoiceSource};
     use crate::protocol::{self, Inbound};
     use crate::transport::usb_serial::{self, SerialPortInfo, UsbSerialTransport};
     use crate::transport::{BoardTransport, TransportKind};
@@ -122,6 +124,7 @@ mod app {
         connection_id: u64,
         logs: Vec<String>,
         last_error: String,
+        voice_source: VoiceSource,
     }
 
     struct AppState {
@@ -137,6 +140,7 @@ mod app {
         endpoint: String,
         firmware_version: String,
         last_error: String,
+        voice_source: String,
     }
 
     fn log_line(app: &AppHandle, message: impl Into<String>) {
@@ -181,6 +185,7 @@ mod app {
             endpoint: inner.endpoint.clone(),
             firmware_version: inner.firmware.clone(),
             last_error: inner.last_error.clone(),
+            voice_source: inner.voice_source.as_str().to_string(),
         })
     }
 
@@ -262,6 +267,22 @@ mod app {
         write_board(state.inner(), &protocol::config_payload(&voice_engine))
     }
 
+    /// FP-5: choose which ASR handles a board voice event. `cloud` = board mic +
+    /// Tuya cloud ASR (FP-3); `system` = activate the PC's own dictation here.
+    /// Mirrors the choice to the board via the config frame so the LCD can show it.
+    #[tauri::command]
+    fn set_voice_source(state: State<Shared>, source: String) -> Result<(), String> {
+        let src = VoiceSource::parse(&source);
+        {
+            let shared = state.inner();
+            let mut inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.voice_source = src;
+        }
+        // Best-effort mirror to the board (ignored if not connected).
+        let _ = write_board(state.inner(), &protocol::config_payload(src.as_str()));
+        Ok(())
+    }
+
     fn spawn_board_reader(
         app: AppHandle,
         state: Shared,
@@ -308,6 +329,22 @@ mod app {
             let _ = write_board(state, &protocol::ack_payload(*seq));
         }
 
+        // FP-5: on a voice-start edge, if the active source is the PC's own ASR,
+        // activate OS dictation (Win+H). Board-mic (cloud) source is a no-op here.
+        if let Inbound::Voice { payload, .. } = &frame {
+            let source = state
+                .inner
+                .lock()
+                .map(|inner| inner.voice_source)
+                .unwrap_or(VoiceSource::Cloud);
+            if pc_asr::route_voice(source, payload.state) == VoiceAction::Activate {
+                match pc_asr::activator().activate() {
+                    Ok(()) => log_line(app, "[PC-ASR] activated OS dictation (Win+H)"),
+                    Err(e) => log_line(app, format!("[PC-ASR] activate failed: {e}")),
+                }
+            }
+        }
+
         log_line(app, format!("[RX] {}", describe_inbound(&frame)));
         let _ = app.emit("board-event", inbound_to_json(&frame));
     }
@@ -322,6 +359,7 @@ mod app {
                 connection_id: 0,
                 logs: Vec::new(),
                 last_error: String::new(),
+                voice_source: VoiceSource::System,
             }),
         });
 
@@ -337,6 +375,7 @@ mod app {
                 send_display,
                 send_led,
                 send_config,
+                set_voice_source,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");
