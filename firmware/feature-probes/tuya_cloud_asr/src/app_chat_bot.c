@@ -15,8 +15,10 @@
 
 /* FP-3: surface ASR text on UART0 as protocol-v1 JSONL (companion/observe). */
 #include <string.h>
+#include "ak_board_io.h"
 #include "ak_statuslcd.h"
 #include "ak_uart.h"
+#include "tdd_button_gpio.h"
 
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
 #include "tkl_wifi.h"
@@ -179,6 +181,28 @@ static void __fp3_lcd_tm_cb(TIMER_ID timer_id, void *arg)
     __fp3_draw_lcd();
 }
 
+/* Bind ai_chat's record button to K4 (P27). The board's default is P29 (onboard
+ * User key), which the expansion baseboard does not route — so CONFIG_BUTTON_NAME
+ * is removed from the config (board skips its P29 registration) and we register
+ * the "ai_chat_button" device on K4 here. Must run BEFORE ai_chat_init(), which
+ * tdl_button_create()s a handle on this device name. HOLD mode = press & hold to
+ * talk, release to send. */
+static void __fp3_register_ptt_button(void)
+{
+    BUTTON_GPIO_CFG_T btn = {
+        .pin               = AK_KEY4_PIN,         /* P27 = K4 */
+        .level             = AK_KEY_ACTIVE_LEVEL, /* active LOW */
+        .mode              = BUTTON_IRQ_MODE,
+        .pin_type.irq_edge = TUYA_GPIO_IRQ_FALL,
+    };
+    OPERATE_RET rt = tdd_gpio_button_register("ai_chat_button", &btn);
+    if (rt != OPRT_OK) {
+        PR_ERR("FP-3: K4 PTT button register failed: %d", rt);
+    } else {
+        PR_NOTICE("FP-3: PTT record button bound to K4 (P27)");
+    }
+}
+
 static void __fp3_emit_asr(const AI_NOTIFY_TEXT_T *t)
 {
     /* {"v":1,"type":"asr","payload":{"text":"<escaped>","ms":<timeindex>}} */
@@ -255,6 +279,8 @@ OPERATE_RET app_chat_bot_init(void)
         PR_ERR("FP-3 status LCD init failed (continuing headless)");
     }
     __fp3_draw_lcd();
+
+    __fp3_register_ptt_button(); /* bind record button to K4 (P27) before ai_chat_init */
 
     AI_CHAT_MODE_CFG_T ai_chat_cfg = {
         .default_mode = AI_CHAT_MODE_HOLD, // push-to-talk; idle low-power gates on this mode
