@@ -189,11 +189,15 @@ static void __fp3_lcd_tm_cb(TIMER_ID timer_id, void *arg)
  * talk, release to send. */
 static void __fp3_register_ptt_button(void)
 {
+    /* K4 (P27) has no external pull-up. IRQ mode forces PULLDOWN for an active-LOW
+     * button (tdd_button_gpio.c), which leaves the pin idle-LOW and never edges.
+     * Use TIMER_SCAN mode with internal PULLUP (same as ak_input drives the keys):
+     * idle HIGH, press pulls to GND (LOW), scan detects down/hold/up for HOLD PTT. */
     BUTTON_GPIO_CFG_T btn = {
-        .pin               = AK_KEY4_PIN,         /* P27 = K4 */
-        .level             = AK_KEY_ACTIVE_LEVEL, /* active LOW */
-        .mode              = BUTTON_IRQ_MODE,
-        .pin_type.irq_edge = TUYA_GPIO_IRQ_FALL,
+        .pin                = AK_KEY4_PIN,         /* P27 = K4 */
+        .level              = AK_KEY_ACTIVE_LEVEL, /* active LOW */
+        .mode               = BUTTON_TIMER_SCAN_MODE,
+        .pin_type.gpio_pull = TUYA_GPIO_PULLUP,
     };
     OPERATE_RET rt = tdd_gpio_button_register("ai_chat_button", &btn);
     if (rt != OPRT_OK) {
