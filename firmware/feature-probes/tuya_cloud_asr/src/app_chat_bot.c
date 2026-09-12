@@ -120,16 +120,41 @@ static void __display_status_tm_cb(TIMER_ID timer_id, void *arg)
 #endif
 
 /* ------------------------------------------------------------ FP-3 status LCD */
-static char     s_fp3_asr[80] = "(waiting for speech)";
-static uint32_t s_fp3_asr_ms  = 0;
-static uint32_t s_fp3_count   = 0;
-static TIMER_ID s_fp3_lcd_tm  = NULL;
+static char     s_fp3_asr[160] = "(waiting for speech)";
+static uint32_t s_fp3_asr_ms   = 0;
+static uint32_t s_fp3_count    = 0;
+static TIMER_ID s_fp3_lcd_tm   = NULL;
 
 static bool __fp3_net_up(void)
 {
     netmgr_status_e st = NETMGR_LINK_DOWN;
     netmgr_conn_get(NETCONN_AUTO, NETCONN_CMD_STATUS, &st);
     return st == NETMGR_LINK_UP;
+}
+
+/* Draw a string at 1x font, char-wrapped to the panel width, up to max_lines. */
+static void __fp3_draw_wrapped(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t max_lines)
+{
+    const uint16_t char_w = 8; /* 8x8 font at scale 1 */
+    const uint16_t line_h = 10;
+    uint16_t       cols   = (uint16_t)((AK_STATUSLCD_W - x - 2) / char_w);
+    size_t         len    = strlen(s);
+    size_t         i      = 0;
+    uint16_t       ln     = 0;
+
+    if (cols == 0 || cols > 60) {
+        cols = 38;
+    }
+    while (i < len && ln < max_lines) {
+        char     buf[64];
+        uint16_t n = 0;
+        while (n < cols && n < sizeof(buf) - 1 && i < len) {
+            buf[n++] = s[i++];
+        }
+        buf[n] = '\0';
+        ak_gfx_text(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
+        ln++;
+    }
 }
 
 static void __fp3_draw_lcd(void)
@@ -143,15 +168,14 @@ static void __fp3_draw_lcd(void)
     up = __fp3_net_up();
     ak_statuslcd_title("FP-3 cloud ASR", up ? AK_COL_GREEN : AK_COL_ORANGE);
 
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 4, "Hold button = talk", AK_COL_CYAN, AK_COL_BLACK, 2);
-    (void)snprintf(line, sizeof(line), "Net: %s", up ? "UP" : "DOWN (pair WiFi)");
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 30, line, up ? AK_COL_GREEN : AK_COL_RED, AK_COL_BLACK, 1);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 2, "Hold K4 = talk", AK_COL_CYAN, AK_COL_BLACK, 1);
+    (void)snprintf(line, sizeof(line), "Net:%s  ASR #%u", up ? "UP" : "DOWN", (unsigned)s_fp3_count);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 16, line, up ? AK_COL_GREEN : AK_COL_RED, AK_COL_BLACK, 1);
 
-    (void)snprintf(line, sizeof(line), "ASR #%u  %ums", (unsigned)s_fp3_count, (unsigned)s_fp3_asr_ms);
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 48, line, AK_COL_GRAY, AK_COL_BLACK, 1);
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 66, s_fp3_asr, AK_COL_YELLOW, AK_COL_BLACK, 2);
+    /* Recognized text: small (1x) and char-wrapped so long sentences fit. */
+    __fp3_draw_wrapped(6, AK_STATUSLCD_CONTENT_Y + 34, s_fp3_asr, AK_COL_YELLOW, 13);
 
-    ak_gfx_text(6, AK_STATUSLCD_H - 14, "full UTF-8 text on UART0 JSONL", AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text(6, AK_STATUSLCD_H - 12, "full UTF-8 on UART0", AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
 }
 
