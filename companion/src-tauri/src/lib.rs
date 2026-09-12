@@ -5,6 +5,9 @@
 //! * [`transport`] — `serialport`-based UART backend + a stable transport trait.
 //! * [`inject`] / [`asr`] — Windows-only key injection and system dictation,
 //!   each a trait with a real `#[cfg(windows)]` impl and a non-Windows stub.
+//! * [`kirocrew`] — platform-neutral session-control HTTP client (route A):
+//!   drives the local Kiro Crew gateway (bind/input/send/switch). Pure helpers
+//!   (secret-path + request shaping) are unit-tested on the Linux host.
 //! * [`describe_inbound`] / [`inbound_to_json`] — pure frame-routing helpers,
 //!   shared by the Tauri reader thread and testable on Linux.
 //! * The Tauri application itself (`app` module + [`run`]) is `#[cfg(windows)]`
@@ -12,6 +15,7 @@
 
 pub mod asr;
 pub mod inject;
+pub mod kirocrew;
 pub mod pc_asr;
 pub mod protocol;
 pub mod transport;
@@ -106,6 +110,7 @@ pub fn run() {
 mod app {
     use crate::pc_asr::{self, VoiceAction, VoiceSource};
     use crate::protocol::{self, Inbound};
+    use crate::kirocrew::KiroCrewClient;
     use crate::transport::usb_serial::{self, SerialPortInfo, UsbSerialTransport};
     use crate::transport::{BoardTransport, TransportKind};
     use crate::{describe_inbound, inbound_to_json};
@@ -125,6 +130,10 @@ mod app {
         logs: Vec<String>,
         last_error: String,
         voice_source: VoiceSource,
+        /// FP-4: id/handle of the currently bound Kiro Crew session (route A).
+        /// A board `asr` text frame is forwarded here via `send()`. `None` until
+        /// a session is bound with `kc_create`.
+        kc_target: Option<String>,
     }
 
     struct AppState {
@@ -283,6 +292,92 @@ mod app {
         Ok(())
     }
 
+    // ───────────────────────── FP-4: Kiro Crew control (route A) ─────────────────────────
+
+    /// Build a session-control client, reading `.local_secret` from disk at
+    /// runtime. The secret is never persisted — the client is dropped at the end
+    /// of each command (R6.3).
+    fn kc_client() -> Result<KiroCrewClient, String> {
+        KiroCrewClient::from_env()
+    }
+
+    /// bind (op ①): create/bind a Kiro Crew session for `agent`, cache it as the
+    /// current target, and return its id.
+    #[tauri::command]
+    fn kc_create(state: State<Shared>, title: String, agent: String) -> Result<String, String> {
+        let id = kc_client()?.create_session(&title, &agent)?;
+        state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .kc_target = Some(id.clone());
+        Ok(id)
+    }
+
+    /// send + execute (ops ②③): run `message` in `target` (or the bound target
+    /// when `target` is omitted) as its next agent turn.
+    #[tauri::command]
+    fn kc_send(state: State<Shared>, message: String, target: Option<String>) -> Result<(), String> {
+        let target = resolve_target(&state, target)?;
+        kc_client()?.send(&target, &message)
+    }
+
+    /// read: fetch the target's latest reply (for LCD feedback / acks).
+    #[tauri::command]
+    fn kc_read(state: State<Shared>, target: Option<String>) -> Result<String, String> {
+        let target = resolve_target(&state, target)?;
+        kc_client()?.read(&target)
+    }
+
+    /// switch (op ④): stop/close `target`; clears it as the bound target if it
+    /// was the current one.
+    #[tauri::command]
+    fn kc_stop(state: State<Shared>, target: Option<String>) -> Result<(), String> {
+        let target = resolve_target(&state, target)?;
+        kc_client()?.stop(&target)?;
+        if let Ok(mut inner) = state.inner.lock() {
+            if inner.kc_target.as_deref() == Some(target.as_str()) {
+                inner.kc_target = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve an explicit `target` argument, else the currently bound target.
+    fn resolve_target(state: &State<Shared>, target: Option<String>) -> Result<String, String> {
+        if let Some(t) = target {
+            if !t.trim().is_empty() {
+                return Ok(t);
+            }
+        }
+        state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .kc_target
+            .clone()
+            .ok_or_else(|| "no Kiro Crew session bound (call kc_create first)".to_string())
+    }
+
+    /// Forward a board-originated text (ASR / macro command) to the bound Kiro
+    /// Crew session via `send()`. Best-effort: no bound target or a gateway error
+    /// is logged, not fatal to the reader thread.
+    fn forward_asr_to_session(app: &AppHandle, state: &Shared, text: &str) {
+        let target = state
+            .inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.kc_target.clone());
+        let Some(target) = target else {
+            log_line(app, "[KC] asr text dropped: no session bound");
+            return;
+        };
+        match kc_client().and_then(|c| c.send(&target, text)) {
+            Ok(()) => log_line(app, format!("[KC] forwarded asr → {target}")),
+            Err(e) => log_line(app, format!("[KC] forward failed: {e}")),
+        }
+    }
+
     fn spawn_board_reader(
         app: AppHandle,
         state: Shared,
@@ -345,6 +440,17 @@ mod app {
             }
         }
 
+        // FP-4: a board-originated text command (an `asr`/dictation result is
+        // carried on the `macro` frame's `name` per the wire protocol) is
+        // forwarded to the bound Kiro Crew session as a new agent turn (route A,
+        // design D3: text → send). No-op when nothing is bound.
+        if let Inbound::Macro { payload, .. } = &frame {
+            let text = payload.name.trim();
+            if !text.is_empty() {
+                forward_asr_to_session(app, state, text);
+            }
+        }
+
         log_line(app, format!("[RX] {}", describe_inbound(&frame)));
         let _ = app.emit("board-event", inbound_to_json(&frame));
     }
@@ -360,6 +466,7 @@ mod app {
                 logs: Vec::new(),
                 last_error: String::new(),
                 voice_source: VoiceSource::System,
+                kc_target: None,
             }),
         });
 
@@ -376,6 +483,10 @@ mod app {
                 send_led,
                 send_config,
                 set_voice_source,
+                kc_create,
+                kc_send,
+                kc_read,
+                kc_stop,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");
