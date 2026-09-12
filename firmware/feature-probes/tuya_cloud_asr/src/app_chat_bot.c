@@ -10,6 +10,7 @@
 #include "netmgr.h"
 
 #include "ai_chat_main.h"
+#include "ai_audio_player.h"
 #include "app_chat_bot.h"
 #include "app_lowpower.h"
 
@@ -124,6 +125,11 @@ static char     s_fp3_asr[160] = "(waiting for speech)";
 static uint32_t s_fp3_asr_ms   = 0;
 static uint32_t s_fp3_count    = 0;
 static TIMER_ID s_fp3_lcd_tm   = NULL;
+
+/* When true, the board does NOT speak the AI's TTS reply (recognized text goes to
+ * the PC/Kiro instead); local alert tones are always kept. Default muted for the
+ * agentic-keyboard use case. Future: companion flips this via a config frame. */
+static bool s_mute_ai_reply = true;
 
 static bool __fp3_net_up(void)
 {
@@ -287,6 +293,17 @@ static void __ai_chat_handle_event(AI_NOTIFY_EVENT_T *event)
 #endif
     } break;
 #endif
+    case AI_USER_EVT_TTS_START:
+    case AI_USER_EVT_TTS_DATA:
+        /* Suppress the AI's spoken reply: the recognized text is routed to the
+         * PC/Kiro, so the board must not talk back. Stop the tone player as the
+         * reply TTS streams. Local alert tones use the same player but fire at
+         * different times (AI_USER_EVT_PLAY_ALERT) and are left untouched, so
+         * special reminders are still spoken. */
+        if (s_mute_ai_reply) {
+            ai_audio_player_stop(AI_AUDIO_PLAYER_ALL);
+        }
+        break;
     default:
         break;
     }
@@ -295,6 +312,14 @@ static void __ai_chat_handle_event(AI_NOTIFY_EVENT_T *event)
 void app_chat_bot_set_online(BOOL_T online)
 {
     app_lowpower_set_online(online);
+}
+
+/* Future companion hook: enable/disable speaking the AI reply on the board.
+ * speak=false (default) keeps the board silent on replies; alert tones are
+ * unaffected. Wire this to an inbound config frame when FP-3 gains board-side RX. */
+void app_chat_bot_set_speak_reply(BOOL_T speak)
+{
+    s_mute_ai_reply = speak ? false : true;
 }
 
 OPERATE_RET app_chat_bot_init(void)

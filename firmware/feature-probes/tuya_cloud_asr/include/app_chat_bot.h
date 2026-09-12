@@ -36,6 +36,14 @@ OPERATE_RET app_chat_bot_init(void);
  */
 void app_chat_bot_set_online(BOOL_T online);
 
+/**
+ * @brief Enable/disable speaking the AI reply (TTS) on the board.
+ *        Default is muted (recognized text is routed to the PC/Kiro instead);
+ *        local alert tones are unaffected. Future companion config hook.
+ * @param[in] speak TRUE to speak replies aloud; FALSE to keep the board silent.
+ */
+void app_chat_bot_set_speak_reply(BOOL_T speak);
+
 #ifdef __cplusplus
 }
 #endif
