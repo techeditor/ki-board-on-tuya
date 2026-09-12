@@ -8,9 +8,28 @@
 # 0x2908 descriptor, SM pairing/bonding). Reuses the shared status-LCD + input
 # modules from firmware/app/common the same way FP-2 (ble_gatt_link) does.
 #
+# ISOLATION ARCHITECTURE (see design.md D11) — solves BOTH D10 spike blockers
+# WITHOUT editing the vendored SDK:
+#   * src/ak_ble_hid.c   includes ONLY nimble/* headers (never a TAL header),
+#     so the two-parameter LIST_HEAD from tuya_ble_linkqueue.h never shares a
+#     translation unit with the one-parameter LIST_HEAD from tuya_list.h
+#     (blocker #1).
+#   * src/tuya_app_main.c includes ONLY tal_api.h + the plain-C bridge header
+#     ak_ble_hid.h (never a nimble header).
+#   * The private nimble/host include dir (holding tuya_ble_mempool.h, pulled
+#     transitively by ble_hs.h) is added to the PROBE's include path below, so
+#     ak_ble_hid.c resolves it — blocker #2 — with no SDK edit. nimble/include
+#     is already PUBLIC via src/tal_bluetooth/CMakeLists.txt but is listed here
+#     too so the probe is self-describing.
+#
 
 set(APP_PATH ${CMAKE_CURRENT_LIST_DIR})
 set(AK_APP_COMMON ${APP_PATH}/../../app/common)
+
+# TuyaOpen SDK root (exported by export.sh). Used only to reach the native
+# NimBLE host-private include dir; we do NOT compile or modify any SDK source.
+set(TUYA_SDK_ROOT $ENV{OPEN_SDK_ROOT})
+set(NIMBLE_DIR ${TUYA_SDK_ROOT}/src/tal_bluetooth/nimble)
 
 aux_source_directory(${APP_PATH}/src APP_SRCS)
 
@@ -27,4 +46,9 @@ target_include_directories(${EXAMPLE_LIB}
     PRIVATE
         ${APP_PATH}/include
         ${AK_APP_COMMON}/include
+        # Native NimBLE headers so ak_ble_hid.c can drive the HOGP GATT server.
+        # nimble/include is already PUBLIC from the SDK; nimble/host is PRIVATE
+        # there and carries tuya_ble_mempool.h (D10 blocker #2) — add it here.
+        ${NIMBLE_DIR}/include
+        ${NIMBLE_DIR}/host
 )
