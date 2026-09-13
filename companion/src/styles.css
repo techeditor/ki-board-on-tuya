@@ -22,7 +22,7 @@
   color: var(--text);
   background: var(--bg);
   font-family: "Courier New", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 16px;
+  font-size: 13px;
 }
 
 * {
@@ -41,19 +41,19 @@ select {
 }
 
 button {
-  min-height: 44px;
+  min-height: 30px;
   border: 2px solid var(--accent-hover);
   border-radius: 0;
   background: var(--accent);
   color: var(--accent-ink);
-  padding: 0 14px;
+  padding: 0 10px;
   cursor: pointer;
-  box-shadow: 4px 4px 0 var(--shadow);
+  box-shadow: 2px 2px 0 var(--shadow);
 }
 
 button:active {
   transform: translate(2px, 2px);
-  box-shadow: 2px 2px 0 var(--shadow);
+  box-shadow: 1px 1px 0 var(--shadow);
 }
 
 button:disabled {
@@ -72,12 +72,12 @@ button.nav {
 input,
 select {
   width: 100%;
-  min-height: 44px;
+  min-height: 30px;
   border: 2px solid var(--border-strong);
   border-radius: 0;
   background: var(--field);
   color: var(--text);
-  padding: 9px 10px;
+  padding: 5px 8px;
 }
 
 button:hover:not(:disabled),
@@ -85,22 +85,22 @@ input:focus,
 select:focus {
   border-color: var(--accent-hover);
   outline: 2px solid rgba(139, 92, 246, 0.35);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 
 label {
   display: block;
-  margin: 14px 0 6px;
+  margin: 9px 0 4px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 11px;
   text-transform: uppercase;
 }
 
 .hint {
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .good-text {
@@ -114,7 +114,7 @@ label {
 .shell {
   height: 100dvh;
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: 180px minmax(0, 1fr);
   background:
     linear-gradient(var(--bg-grid) 1px, transparent 1px),
     linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px),
@@ -126,7 +126,7 @@ label {
 .sidebar {
   border-right: 3px solid var(--border-strong);
   background: var(--sidebar);
-  padding: 18px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   height: 100dvh;
@@ -137,7 +137,7 @@ label {
   margin-top: auto;
   text-align: center;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .sidebar-footer p {
@@ -145,7 +145,7 @@ label {
 }
 
 .brand {
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 h1,
@@ -156,18 +156,18 @@ p {
 }
 
 h1 {
-  font-size: 18px;
+  font-size: 15px;
 }
 
 .brand p,
 .eyebrow {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .nav {
   width: 100%;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
   text-align: left;
 }
 
@@ -181,29 +181,29 @@ h1 {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: 22px;
+  padding: 14px;
 }
 
 .topbar {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 h2 {
-  margin-top: 4px;
-  font-size: 26px;
+  margin-top: 2px;
+  font-size: 18px;
 }
 
 .status {
-  min-width: 154px;
+  min-width: 128px;
   border: 2px solid var(--border-strong);
   background: var(--panel-2);
-  padding: 10px 12px;
+  padding: 6px 10px;
   text-align: center;
-  box-shadow: 4px 4px 0 var(--shadow);
+  box-shadow: 2px 2px 0 var(--shadow);
 }
 
 .status.online {
@@ -215,61 +215,61 @@ h2 {
 .lcd-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
 .lcd,
 .panel {
-  border: 3px solid var(--border-strong);
+  border: 2px solid var(--border-strong);
   background: var(--panel);
-  box-shadow: 6px 6px 0 var(--shadow);
+  box-shadow: 3px 3px 0 var(--shadow);
 }
 
 .lcd {
-  min-height: 86px;
-  padding: 12px;
+  min-height: 56px;
+  padding: 8px 10px;
   overflow: hidden;
 }
 
 .lcd span {
   display: block;
   color: var(--success);
-  font-size: 12px;
-  margin-bottom: 8px;
+  font-size: 10px;
+  margin-bottom: 4px;
 }
 
 .lcd strong {
   display: block;
   min-width: 0;
   overflow-wrap: anywhere;
-  font-size: 18px;
-  line-height: 1.35;
+  font-size: 14px;
+  line-height: 1.3;
 }
 
 .panel {
-  padding: 18px;
-  margin-bottom: 18px;
+  padding: 12px;
+  margin-bottom: 12px;
 }
 
 .panel h3 {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   color: var(--warning);
-  font-size: 18px;
+  font-size: 14px;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 16px;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .input-row {
   display: flex;
   align-items: flex-start;
-  gap: 20px;
-  margin-top: 16px;
+  gap: 16px;
+  margin-top: 12px;
   flex-wrap: wrap;
 }
 
@@ -295,7 +295,7 @@ h2 {
 .key-card {
   border: 2px solid var(--border);
   background: var(--panel-2);
-  padding: 8px;
+  padding: 6px;
   grid-column: span 1;
 }
 
@@ -307,11 +307,11 @@ h2 {
   display: grid;
   place-items: center;
   aspect-ratio: 1;
-  border: 3px solid var(--field);
+  border: 2px solid var(--field);
   background: linear-gradient(145deg, rgba(139, 92, 246, 0.9), rgba(88, 166, 255, 0.78));
   color: var(--text);
   font-weight: 700;
-  font-size: 16px;
+  font-size: 13px;
   overflow-wrap: anywhere;
   text-align: center;
 }
@@ -323,21 +323,21 @@ h2 {
 
 .key-card.hit .key-screen {
   border-color: var(--success);
-  box-shadow: 0 0 0 3px rgba(94, 207, 143, 0.55);
+  box-shadow: 0 0 0 2px rgba(94, 207, 143, 0.55);
 }
 
 .key-map {
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.35;
+  font-size: 10px;
+  line-height: 1.3;
 }
 
 .nav-pad {
   display: grid;
-  grid-template-columns: repeat(3, 44px);
-  grid-template-rows: repeat(3, 44px);
-  gap: 6px;
+  grid-template-columns: repeat(3, 34px);
+  grid-template-rows: repeat(3, 34px);
+  gap: 5px;
   justify-content: start;
   margin-top: 0;
 }
@@ -347,7 +347,7 @@ h2 {
   place-items: center;
   border: 2px solid var(--border);
   background: var(--panel-2);
-  font-size: 11px;
+  font-size: 10px;
   color: var(--muted);
 }
 
@@ -367,23 +367,23 @@ h2 {
   border: 2px solid var(--border);
   background: var(--field);
   color: #d9f7e7;
-  padding: 12px;
+  padding: 10px;
 }
 
 .log {
-  min-height: 360px;
-  max-height: 520px;
-  font-size: 13px;
-  line-height: 1.55;
+  min-height: 280px;
+  max-height: 460px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .error-banner {
   border: 2px solid var(--danger);
   background: rgba(239, 111, 108, 0.18);
   color: #ffd6d4;
-  padding: 12px;
-  margin-bottom: 16px;
-  box-shadow: 4px 4px 0 var(--shadow);
+  padding: 10px;
+  margin-bottom: 12px;
+  box-shadow: 2px 2px 0 var(--shadow);
   overflow-wrap: anywhere;
 }
 
