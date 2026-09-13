@@ -48,6 +48,13 @@ type KcStatus = {
   text: string;
 };
 
+// FP-4b M4 (§3.2): one per-conversation bind slot (K1-K3), mirrors the Rust
+// `bind_store::Slot`. Empty (url null) = unbound; short-press then makes a new chat.
+type BindSlot = {
+  url: string | null;
+  label: string | null;
+};
+
 const defaultStatus: Status = {
   device_connected: false,
   transport: "none",
@@ -112,6 +119,15 @@ function App() {
   const [lcResult, setLcResult] = useState("");
   const [lcError, setLcError] = useState("");
   const [lcBusy, setLcBusy] = useState(false);
+
+  // FP-4b M4 (§3.2): the three per-conversation bind slots (K1-K3). `bindEdit`
+  // holds the per-slot edit field (a /chat/<slug> URL to Set). Short-press a
+  // slot focuses its conversation; long-press (or "Bind current") binds the
+  // current window's conversation.
+  const [binds, setBinds] = useState<BindSlot[]>([]);
+  const [bindEdit, setBindEdit] = useState<Record<number, string>>({});
+  const [bindError, setBindError] = useState("");
+  const [bindBusy, setBindBusy] = useState(false);
 
   // FP-4b STATUS sink ("the eyes"): a localhost HTTP ingress for Kiro agent
   // hooks (delivered by `companion --hook`). Shows the token + hook command to
@@ -298,6 +314,48 @@ function App() {
     setLcResult(`chord: ${name}`);
   }
 
+  // ── FP-4b M4: per-conversation bind slots (§3.2) ──────────────────────────
+  // Arg names match the #[tauri::command] signatures in src-tauri/src/lib.rs:
+  //   kc_bind_get() -> Slot[]        kc_bind_set(slot, url, label?)
+  //   kc_bind_clear(slot)            kc_bind_current(slot)
+  async function runBind(action: () => Promise<void>) {
+    setBindBusy(true);
+    try {
+      setBindError("");
+      await action();
+    } catch (error) {
+      setBindError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBindBusy(false);
+    }
+  }
+
+  async function refreshBinds() {
+    setBinds(await invoke<BindSlot[]>("kc_bind_get"));
+  }
+
+  async function bindSet(slot: number) {
+    const url = (bindEdit[slot] || "").trim();
+    if (!url) {
+      setBindError(`Enter a /chat/<slug> URL for slot ${slot} before Set.`);
+      return;
+    }
+    await invoke("kc_bind_set", { slot, url, label: null });
+    await refreshBinds();
+  }
+
+  async function bindClear(slot: number) {
+    await invoke("kc_bind_clear", { slot });
+    setBindEdit((prev) => ({ ...prev, [slot]: "" }));
+    await refreshBinds();
+  }
+
+  async function bindCurrent(slot: number) {
+    // Mirrors a physical long-press: capture the focused window's URL and bind.
+    await invoke("kc_bind_current", { slot });
+    await refreshBinds();
+  }
+
   // ── FP-4b STATUS sink (the eyes) ──────────────────────────────────────────
   // Arg names match the #[tauri::command] signatures in src-tauri/src/lib.rs:
   //   status_sink_start(port?) -> String (token)   status_sink_stop()
@@ -372,6 +430,11 @@ function App() {
           setSsRunning(true);
         }
       })
+      .catch(() => undefined);
+
+    // Load the persisted M4 bind slots on mount.
+    invoke<BindSlot[]>("kc_bind_get")
+      .then(setBinds)
       .catch(() => undefined);
 
     return () => {
@@ -606,6 +669,61 @@ function App() {
 
         {activeView === "kirocrew" && (
           <>
+            <Panel title="Bindings — K1–K3 conversations (§3.2)">
+              <p className="hint">
+                Bind a specific Kiro Crew <strong>conversation</strong> to each slot key.
+                <strong> Short-press</strong> a board key (K1–K3) to focus its conversation
+                (navigates to <code>/chat/&lt;slug&gt;</code>, stable across sidebar reordering);
+                <strong> long-press</strong> to bind the current conversation. An empty slot's
+                short-press creates a new chat. Requires <em>Bind window</em> below to be set and
+                a browser window with an address bar focused.
+              </p>
+
+              {[1, 2, 3].map((slot) => {
+                const s = binds[slot - 1];
+                const bound = !!(s && s.url && s.url.trim());
+                return (
+                  <div key={slot} style={{ marginTop: slot === 1 ? 6 : 16 }}>
+                    <div className="lcd">
+                      <span>{`K${slot}`}</span>
+                      <strong className={bound ? "good-text" : ""}>
+                        {bound ? (s?.label || s?.url) : "-- (unbound → new chat)"}
+                      </strong>
+                    </div>
+                    <input
+                      style={{ marginTop: 6 }}
+                      value={bindEdit[slot] ?? (s?.url ?? "")}
+                      onChange={(event) =>
+                        setBindEdit((prev) => ({ ...prev, [slot]: event.target.value }))
+                      }
+                      placeholder="http://127.0.0.1:5476/chat/<slug>?sid=<slug>"
+                    />
+                    <div className="actions" style={{ marginTop: 6, flexWrap: "wrap" }}>
+                      <button disabled={bindBusy} onClick={() => runBind(() => bindSet(slot))}>
+                        Set
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={bindBusy}
+                        onClick={() => runBind(() => bindCurrent(slot))}
+                      >
+                        Bind current
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={bindBusy || !bound}
+                        onClick={() => runBind(() => bindClear(slot))}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {bindError && <div className="error-banner" style={{ marginTop: 14 }}>{bindError}</div>}
+            </Panel>
+
             <Panel title="Local Control — the hands (route B)">
               <p className="hint">
                 Focus a <strong>local</strong> Kiro Crew window and inject keystrokes directly

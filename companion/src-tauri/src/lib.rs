@@ -22,6 +22,7 @@ pub mod asr;
 pub mod inject;
 pub mod kirocrew;
 pub mod kirocrew_control;
+pub mod bind_store;
 pub mod pc_asr;
 pub mod protocol;
 pub mod status_sink;
@@ -119,6 +120,7 @@ mod app {
     use crate::protocol::{self, Inbound};
     use crate::kirocrew::KiroCrewClient;
     use crate::kirocrew_control::{Chord, ControlAction, ControlRouter, KiroCrewController};
+    use crate::bind_store::{self, BindStore};
     use crate::status_sink::{DisplayState as StatusDisplay, StatusSink, DEFAULT_STATUS_PORT};
     use crate::transport::ble_gatt::{self, BleDeviceInfo, BleGattTransport};
     use crate::transport::usb_serial::{self, SerialPortInfo, UsbSerialTransport};
@@ -165,6 +167,10 @@ mod app {
         /// Last mapped status per Kiro `session_id` (design: keep last-status
         /// per session, emit a `display` frame for it, push to the UI).
         kc_status: HashMap<String, StatusDisplay>,
+        /// FP-4b M4 (§3.2): per-conversation bind store for K1-K3 slots, loaded
+        /// from `config_dir/ak-companion/binds.json` at startup. Short-press a
+        /// slot -> focus its bound conversation; long-press -> bind current.
+        kc_binds: BindStore,
     }
 
     struct AppState {
@@ -514,6 +520,59 @@ mod app {
         inner.kc_controller.chord(chord)
     }
 
+    // ─────────────── FP-4b M4: per-conversation bind slots (§3.2) ───────────────
+
+    /// M4: return the three bind slots (index 0 = K1 … index 2 = K3) for the UI.
+    #[tauri::command]
+    fn kc_bind_get(state: State<Shared>) -> Result<Vec<crate::bind_store::Slot>, String> {
+        Ok(state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .kc_binds
+            .slots
+            .clone())
+    }
+
+    /// M4: bind slot `slot` (1-based) to `url` (+ optional `label`, defaulting to
+    /// the parsed slug) and persist. Mirrors a long-press bind from the UI.
+    #[tauri::command]
+    fn kc_bind_set(
+        state: State<Shared>,
+        slot: u8,
+        url: String,
+        label: Option<String>,
+    ) -> Result<(), String> {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err("url is empty".to_string());
+        }
+        // Prefer an explicit label; else derive the slug from the URL.
+        let label = label
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .or_else(|| crate::bind_store::parse_chat_slug(&url).map(|(_, slug)| slug));
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        inner.kc_binds.set(slot, Some(url), label);
+        inner.kc_binds.save()
+    }
+
+    /// M4: clear slot `slot` (1-based) and persist.
+    #[tauri::command]
+    fn kc_bind_clear(state: State<Shared>, slot: u8) -> Result<(), String> {
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        inner.kc_binds.clear(slot);
+        inner.kc_binds.save()
+    }
+
+    /// M4: bind the CURRENT window's conversation to slot `slot` (1-based),
+    /// mirroring a physical long-press from the UI — captures the address-bar
+    /// URL, parses the slug, persists, and LCD-echoes the bind.
+    #[tauri::command]
+    fn kc_bind_current(app: AppHandle, state: State<Shared>, slot: u8) -> Result<(), String> {
+        bind_slot(&app, state.inner(), slot)
+    }
+
     // ─────────────── FP-4b: STATUS sink ("the eyes") — T7 wiring ───────────────
 
     /// Apply one mapped status update coming from the hook sink (runs on the
@@ -618,8 +677,84 @@ mod app {
             ControlAction::Chord(c) => format!("chord {c:?}"),
             ControlAction::SendText(t) => format!("send-text {t:?}"),
             ControlAction::Compose(t) => format!("compose {t:?}"),
+            ControlAction::FocusSlot(n) => format!("focus-slot {n}"),
+            ControlAction::BindSlot(n) => format!("bind-slot {n}"),
             ControlAction::None => "none".to_string(),
         }
+    }
+
+    /// Execute a routed control action. Most actions go straight to the
+    /// controller facade via `apply()`; the two M4 slot actions are stateful IO
+    /// (bind store + capture/navigate + LCD echo) and are handled here instead.
+    fn exec_control_action(
+        app: &AppHandle,
+        state: &Shared,
+        action: &ControlAction,
+    ) -> Result<(), String> {
+        match action {
+            ControlAction::FocusSlot(n) => focus_slot(app, state, *n),
+            ControlAction::BindSlot(n) => bind_slot(app, state, *n),
+            other => state
+                .inner
+                .lock()
+                .map_err(|_| "state lock poisoned".to_string())
+                .and_then(|mut inner| inner.kc_controller.apply(other)),
+        }
+    }
+
+    /// M4 short-press: focus the conversation bound to slot `n`. Bound slot ->
+    /// navigate the window to its `/chat/<slug>` URL; empty slot -> create a new
+    /// chat (Alt+Shift+N) per §3.2 "empty slot -> new session".
+    fn focus_slot(_app: &AppHandle, state: &Shared, n: u8) -> Result<(), String> {
+        let url = state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned".to_string())?
+            .kc_binds
+            .get(n)
+            .and_then(|s| s.url.clone())
+            .filter(|u| !u.trim().is_empty());
+
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        match url {
+            Some(u) => inner.kc_controller.navigate_url(&u),
+            // Empty slot: create a new chat instead.
+            None => inner.kc_controller.chord(Chord::NewChat),
+        }
+    }
+
+    /// M4 long-press: bind the CURRENT conversation to slot `n`. Capture the
+    /// window's address-bar URL, parse a `/chat/<slug>` out of it, persist it to
+    /// the slot (label = slug), and emit a `display` frame confirming the bind
+    /// so the board LCD shows `K<n> -> <label>` (M3 renders it).
+    fn bind_slot(app: &AppHandle, state: &Shared, n: u8) -> Result<(), String> {
+        let captured = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.kc_controller.capture_current_url()?
+        };
+        let text = captured.ok_or_else(|| {
+            "no URL captured (is a browser window with an address bar focused?)".to_string()
+        })?;
+        let (url, label) = bind_store::parse_chat_slug(&text)
+            .ok_or_else(|| format!("no /chat/<slug> in captured text {text:?}"))?;
+
+        // Persist the bind.
+        {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner
+                .kc_binds
+                .set(n, Some(url.clone()), Some(label.clone()));
+            inner.kc_binds.save()?;
+        }
+
+        // LCD echo: reuse the existing `display` frame encoder (best-effort —
+        // ignored when the board is offline). state = "bound".
+        let _ = write_board(
+            state,
+            &protocol::display_payload(&label, "bound", &format!("K{n} -> {label}")),
+        );
+        log_line(app, format!("[KC-CTL] bound K{n} -> {label} ({url})"));
+        Ok(())
     }
 
     fn spawn_board_reader(
@@ -710,11 +845,7 @@ mod app {
                 .unwrap_or((false, ControlAction::None));
             if enabled && action != ControlAction::None {
                 let desc = describe_control_action(&action);
-                let result = state
-                    .inner
-                    .lock()
-                    .map_err(|_| "state lock poisoned".to_string())
-                    .and_then(|mut inner| inner.kc_controller.apply(&action));
+                let result = exec_control_action(app, state, &action);
                 match result {
                     Ok(()) => log_line(app, format!("[KC-CTL] {desc}")),
                     Err(e) => log_line(app, format!("[KC-CTL] {desc} failed: {e}")),
@@ -746,6 +877,7 @@ mod app {
                 status_sink: None,
                 status_token: String::new(),
                 kc_status: HashMap::new(),
+                kc_binds: BindStore::load(),
             }),
         });
 
@@ -772,6 +904,10 @@ mod app {
                 kc_send_text,
                 kc_command_bar,
                 kc_chord,
+                kc_bind_get,
+                kc_bind_set,
+                kc_bind_clear,
+                kc_bind_current,
                 status_sink_start,
                 status_sink_stop,
                 status_token,
