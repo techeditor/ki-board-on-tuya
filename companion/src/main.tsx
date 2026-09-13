@@ -39,6 +39,14 @@ type BoardEvent = {
   type?: string;
 };
 
+// FP-4b STATUS: a mapped agent status pushed from the hook sink via `kc-status`.
+type KcStatus = {
+  session_id: string;
+  agent_name: string;
+  state: string;
+  text: string;
+};
+
 const defaultStatus: Status = {
   device_connected: false,
   transport: "none",
@@ -97,6 +105,15 @@ function App() {
   const [lcResult, setLcResult] = useState("");
   const [lcError, setLcError] = useState("");
   const [lcBusy, setLcBusy] = useState(false);
+
+  // FP-4b STATUS sink ("the eyes"): a localhost HTTP ingress for Kiro agent
+  // hooks (delivered by `companion --hook`). Shows the token + hook command to
+  // paste, and a live per-session status list from the `kc-status` UI event.
+  const [ssRunning, setSsRunning] = useState(false);
+  const [ssToken, setSsToken] = useState("");
+  const [ssError, setSsError] = useState("");
+  const [ssBusy, setSsBusy] = useState(false);
+  const [kcStatuses, setKcStatuses] = useState<Record<string, KcStatus>>({});
 
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
@@ -265,6 +282,34 @@ function App() {
     setLcResult(`chord: ${name}`);
   }
 
+  // ── FP-4b STATUS sink (the eyes) ──────────────────────────────────────────
+  // Arg names match the #[tauri::command] signatures in src-tauri/src/lib.rs:
+  //   status_sink_start(port?) -> String (token)   status_sink_stop()
+  //   status_token() -> String
+  async function runSs(action: () => Promise<void>) {
+    setSsBusy(true);
+    try {
+      setSsError("");
+      await action();
+    } catch (error) {
+      setSsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSsBusy(false);
+    }
+  }
+
+  async function ssStart() {
+    const token = await invoke<string>("status_sink_start", { port: null });
+    setSsToken(token);
+    setSsRunning(true);
+  }
+
+  async function ssStop() {
+    await invoke("status_sink_stop");
+    setSsRunning(false);
+    setSsToken("");
+  }
+
   useEffect(() => {
     refreshRuntime().catch(() => undefined);
     const timer = window.setInterval(() => {
@@ -290,10 +335,27 @@ function App() {
       }
     });
 
+    // FP-4b STATUS: live per-session agent status pushed by the hook sink.
+    const unlistenStatus = listen<KcStatus>("kc-status", (event) => {
+      const s = event.payload;
+      setKcStatuses((prev) => ({ ...prev, [s.session_id]: s }));
+    });
+
+    // Recover the sink token/running state on mount (survives a UI reload).
+    invoke<string>("status_token")
+      .then((token) => {
+        if (token) {
+          setSsToken(token);
+          setSsRunning(true);
+        }
+      })
+      .catch(() => undefined);
+
     return () => {
       window.clearInterval(timer);
       unlistenLog.then((fn) => fn());
       unlistenBoard.then((fn) => fn());
+      unlistenStatus.then((fn) => fn());
     };
   }, []);
 
@@ -551,6 +613,76 @@ function App() {
               </div>
 
               {lcError && <div className="error-banner" style={{ marginTop: 14 }}>{lcError}</div>}
+            </Panel>
+
+            <Panel title="Agent Status — the eyes (hook sink)">
+              <p className="hint">
+                Ingests Kiro Crew <strong>agent hooks</strong> on
+                <code> 127.0.0.1:5477/status</code> and mirrors each agent's state to the board
+                LCD as a <code>display</code> frame. The hook is a mode of this very binary
+                (<code>companion --hook</code>), gated by a per-run token.
+              </p>
+
+              <div className="actions" style={{ marginTop: 6 }}>
+                <button disabled={ssBusy || ssRunning} onClick={() => runSs(ssStart)}>
+                  Start sink
+                </button>
+                <button
+                  className="secondary"
+                  disabled={ssBusy || !ssRunning}
+                  onClick={() => runSs(ssStop)}
+                >
+                  Stop sink
+                </button>
+              </div>
+
+              <div className="lcd" style={{ marginTop: 14 }}>
+                <span>SINK</span>
+                <strong>{ssRunning ? "LISTENING · 127.0.0.1:5477" : "-- (start first)"}</strong>
+              </div>
+
+              {ssRunning && (
+                <>
+                  <label style={{ marginTop: 18 }}>Token (X-AK-Status-Token)</label>
+                  <input readOnly value={ssToken} onFocus={(e) => e.currentTarget.select()} />
+
+                  <label style={{ marginTop: 18 }}>Hook command (paste into your Kiro agent config)</label>
+                  <div className="terminal" style={{ whiteSpace: "pre-wrap" }}>
+                    {'"<path-to-companion.exe>" --hook'}
+                  </div>
+                  <p className="hint">
+                    Add this command to your <strong>local</strong> agent config
+                    (<code>~/.kiro/agents/&lt;name&gt;.json</code>) under <code>hooks</code> for
+                    <code> agentSpawn</code>, <code>postToolUse</code> and <code>stop</code>. The
+                    hook reads the sink's port + token from
+                    <code> %LOCALAPPDATA%\\ak-companion\\hook.json</code> (Windows) /
+                    <code> ~/.config/ak-companion/hook.json</code> (else), so no token needs to
+                    be pasted into the config — starting the sink writes it. Example:
+                  </p>
+                  <div className="terminal" style={{ whiteSpace: "pre-wrap" }}>
+{`{
+  "hooks": {
+    "agentSpawn":  [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
+    "postToolUse": [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
+    "stop":        [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }]
+  }
+}`}
+                  </div>
+                </>
+              )}
+
+              <label style={{ marginTop: 18 }}>Live status (per session)</label>
+              <div className="log">
+                {Object.keys(kcStatuses).length === 0
+                  ? "No status yet. Start the sink, then run an agent turn with the hook wired."
+                  : Object.values(kcStatuses).map((s) => (
+                      <div key={s.session_id}>
+                        {`${s.session_id.slice(0, 8)} · ${s.state.toUpperCase()} · ${s.text}`}
+                      </div>
+                    ))}
+              </div>
+
+              {ssError && <div className="error-banner" style={{ marginTop: 14 }}>{ssError}</div>}
             </Panel>
 
             <Panel title="Session Control — route A (legacy, HTTP)">

@@ -35,6 +35,16 @@ btleplug = "=0.11.8"
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "macros"] }
 uuid = "1"
 futures = "0.3"
+# FP-4b status sink (T6): a tiny synchronous localhost HTTP listener for the
+# Kiro-Crew agent-hook ingress. Cross-platform, no async runtime — mirrors the
+# transport reader-thread + stop-flag pattern. Pinned to the current 0.12 line.
+tiny_http = "=0.12.0"
+# Handoff-file location (`%LOCALAPPDATA%`/`~/.config`) for the `--hook` mode to
+# find the sink. Already resolved transitively (v6) so this adds no lock churn.
+dirs = "6"
+# Random status-sink token without pulling `rand`. getrandom 0.2 is already in
+# the tree (reqwest/rustls dep), so pinning the direct dep churns nothing.
+getrandom = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri = { version = "2", features = [] }

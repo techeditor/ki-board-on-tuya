@@ -8,6 +8,11 @@
 //! * [`kirocrew`] — platform-neutral session-control HTTP client (route A):
 //!   drives the local Kiro Crew gateway (bind/input/send/switch). Pure helpers
 //!   (secret-path + request shaping) are unit-tested on the Linux host.
+//! * [`status_sink`] — FP-4b STATUS ("the eyes"): a pure `map_hook_event` (T5)
+//!   plus a cross-platform `tiny_http` localhost sink (T6) that ingests Kiro
+//!   agent-hook events (delivered by this same binary's `--hook` mode) and a
+//!   `{port, token}` handoff file the `--hook` mode reads. Only the callback
+//!   that emits a `display` frame is `#[cfg(windows)]` (in the app module).
 //! * [`describe_inbound`] / [`inbound_to_json`] — pure frame-routing helpers,
 //!   shared by the Tauri reader thread and testable on Linux.
 //! * The Tauri application itself (`app` module + [`run`]) is `#[cfg(windows)]`
@@ -19,6 +24,7 @@ pub mod kirocrew;
 pub mod kirocrew_control;
 pub mod pc_asr;
 pub mod protocol;
+pub mod status_sink;
 pub mod transport;
 
 use protocol::Inbound;
@@ -113,12 +119,14 @@ mod app {
     use crate::protocol::{self, Inbound};
     use crate::kirocrew::KiroCrewClient;
     use crate::kirocrew_control::{Chord, ControlAction, ControlRouter, KiroCrewController};
+    use crate::status_sink::{DisplayState as StatusDisplay, StatusSink, DEFAULT_STATUS_PORT};
     use crate::transport::ble_gatt::{self, BleDeviceInfo, BleGattTransport};
     use crate::transport::usb_serial::{self, SerialPortInfo, UsbSerialTransport};
     use crate::transport::{BoardTransport, TransportKind};
     use crate::{describe_inbound, inbound_to_json};
     use serde::Serialize;
     use serde_json::Value;
+    use std::collections::HashMap;
     use std::sync::mpsc::{self, Receiver};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -142,6 +150,16 @@ mod app {
         /// actions. This is the control path that supersedes route A.
         kc_controller: KiroCrewController,
         kc_router: ControlRouter,
+        /// FP-4b STATUS ("the eyes"): the running localhost hook sink, if
+        /// started. `status_sink_start` sets it; `status_sink_stop` / drop
+        /// tears it down (releasing the port + removing the handoff file).
+        status_sink: Option<StatusSink>,
+        /// The sink's token, cached so `status_token()` can return it without
+        /// re-reading the handoff file. Empty when no sink is running.
+        status_token: String,
+        /// Last mapped status per Kiro `session_id` (design: keep last-status
+        /// per session, emit a `display` frame for it, push to the UI).
+        kc_status: HashMap<String, StatusDisplay>,
     }
 
     struct AppState {
@@ -469,6 +487,103 @@ mod app {
         inner.kc_controller.chord(chord)
     }
 
+    // ─────────────── FP-4b: STATUS sink ("the eyes") — T7 wiring ───────────────
+
+    /// Apply one mapped status update coming from the hook sink (runs on the
+    /// sink's listener thread, so it takes the shared state + app handle by
+    /// value/clone). Keeps last-status per `session_id`, emits a `display` frame
+    /// to the board (best-effort — ignored when the board is offline), and
+    /// emits a `kc-status` UI event.
+    fn apply_status(app: &AppHandle, state: &Shared, status: StatusDisplay) {
+        // Record last-status per session.
+        if let Ok(mut inner) = state.inner.lock() {
+            inner
+                .kc_status
+                .insert(status.session_id.clone(), status.clone());
+        }
+        // Emit a `display` frame to the board (reuse the existing encoder).
+        let _ = write_board(
+            state,
+            &protocol::display_payload(&status.agent_name, &status.state, &status.text),
+        );
+        // Push to the UI live status list.
+        let _ = app.emit(
+            "kc-status",
+            serde_json::json!({
+                "session_id": status.session_id,
+                "agent_name": status.agent_name,
+                "state": status.state,
+                "text": status.text,
+            }),
+        );
+        log_line(
+            app,
+            format!(
+                "[KC-STATUS] {} · {} · {}",
+                status.session_id, status.state, status.text
+            ),
+        );
+    }
+
+    /// Start the localhost status sink on `port` (default when omitted). Wires a
+    /// callback that forwards each mapped status through [`apply_status`]. The
+    /// sink generates a token and writes the `{port, token}` handoff file the
+    /// `--hook` mode reads. Returns the token so the UI can show the exact hook
+    /// command to paste.
+    #[tauri::command]
+    fn status_sink_start(
+        app: AppHandle,
+        state: State<Shared>,
+        port: Option<u16>,
+    ) -> Result<String, String> {
+        let port = port.unwrap_or(DEFAULT_STATUS_PORT);
+        // Tear down any existing sink first (start is idempotent-ish).
+        {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            if let Some(mut existing) = inner.status_sink.take() {
+                existing.stop();
+            }
+        }
+        let app_cb = app.clone();
+        let shared_cb = state.inner().clone();
+        let sink = StatusSink::start(port, move |status| {
+            apply_status(&app_cb, &shared_cb, status);
+        })?;
+        let token = sink.token().to_string();
+        let bound = sink.port();
+        {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.status_sink = Some(sink);
+            inner.status_token = token.clone();
+        }
+        log_line(&app, format!("[KC-STATUS] sink listening on 127.0.0.1:{bound}"));
+        Ok(token)
+    }
+
+    /// Stop the status sink (releases the port, removes the handoff file).
+    #[tauri::command]
+    fn status_sink_stop(app: AppHandle, state: State<Shared>) -> Result<(), String> {
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        if let Some(mut sink) = inner.status_sink.take() {
+            sink.stop();
+        }
+        inner.status_token.clear();
+        drop(inner);
+        log_line(&app, "[KC-STATUS] sink stopped");
+        Ok(())
+    }
+
+    /// Return the current sink token (empty when no sink is running).
+    #[tauri::command]
+    fn status_token(state: State<Shared>) -> Result<String, String> {
+        Ok(state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .status_token
+            .clone())
+    }
+
     /// Compact human-readable description of a routed control action for logs.
     fn describe_control_action(action: &ControlAction) -> String {
         match action {
@@ -598,6 +713,9 @@ mod app {
                 kc_router: ControlRouter::new(
                     crate::kirocrew_control::ControlCtx::with_default_jumps(),
                 ),
+                status_sink: None,
+                status_token: String::new(),
+                kc_status: HashMap::new(),
             }),
         });
 
@@ -623,6 +741,9 @@ mod app {
                 kc_send_text,
                 kc_command_bar,
                 kc_chord,
+                status_sink_start,
+                status_sink_stop,
+                status_token,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");
