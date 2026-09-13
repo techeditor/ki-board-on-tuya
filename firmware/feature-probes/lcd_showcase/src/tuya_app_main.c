@@ -29,6 +29,9 @@
 #include "showcase_state.h"
 #include "showcase_map.h"
 #include "ak_input.h"
+#include "ak_feedback.h"
+
+#include <stdio.h>
 
 #include "tal_api.h"
 #include "tkl_output.h"
@@ -97,6 +100,14 @@ static void on_input(ak_input_kind_t kind, const char *id, ak_input_event_t even
     PR_NOTICE("[showcase] %s '%s' -> intent=%s scene=%u focus=%u rec=%d conn=%d",
               (kind == AK_INPUT_KIND_NAV) ? "nav" : "key", id, showcase_intent_name(intent.type), v->scene, v->focus,
               v->recording, v->connected);
+
+    /* Report each pattern/screen change on UART0 (COM6). */
+    {
+        char msg[80];
+        (void)snprintf(msg, sizeof(msg), "%s -> scene=%u focus=%u rec=%d conn=%d", showcase_intent_name(intent.type),
+                       v->scene, v->focus, v->recording, v->connected);
+        ak_feedback_event("screen", msg);
+    }
 }
 
 static void input_thread(void *arg)
@@ -110,8 +121,14 @@ static void input_thread(void *arg)
     }
     PR_NOTICE("input scan started (5 keys + 5-way nav)");
 
+    uint32_t last_hb = tal_system_get_millisecond();
     while (1) {
-        ak_input_poll(tal_system_get_millisecond(), on_input);
+        uint32_t now = tal_system_get_millisecond();
+        ak_input_poll(now, on_input);
+        if ((uint32_t)(now - last_hb) >= 5000U) {
+            last_hb = now;
+            ak_feedback_heartbeat(now);
+        }
         tal_system_sleep(INPUT_POLL_MS);
     }
 }
@@ -122,6 +139,9 @@ static void user_main(void)
 
     tal_log_init(TAL_LOG_LEVEL_DEBUG, 2048, (TAL_LOG_OUTPUT_CB)tkl_log_output);
     PR_NOTICE("======== lcd_showcase FP (info-dense LCD demo) ========");
+
+    /* UART0 (COM6) JSONL feedback for the companion / serial monitor. */
+    ak_feedback_init();
 
     rt = ak_panel_register();
     if (rt != OPRT_OK) {
@@ -163,6 +183,7 @@ static void user_main(void)
     };
     tal_thread_create_and_start(&s_input_thread, NULL, NULL, input_thread, NULL, &input_cfg);
 
+    ak_feedback_ready("lcd_showcase");
     PR_NOTICE("ready: K1-3 focus slot / K4 PTT / K5 slot-cycle / nav L-R scene / center notif / up-down conn");
 }
 

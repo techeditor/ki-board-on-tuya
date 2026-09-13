@@ -51,6 +51,8 @@ target_sources(${EXAMPLE_LIB}
     PRIVATE
         ${APP_SRCS}
         ${APP_PATH}/../../app/common/src/ak_uart.c
+        ${APP_PATH}/../../app/common/src/ak_protocol.c
+        ${APP_PATH}/../../app/common/src/ak_feedback.c
         ${APP_PATH}/../../app/common/src/ak_gfx.c
         ${APP_PATH}/../../app/common/src/ak_statuslcd.c
     )

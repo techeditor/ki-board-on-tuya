@@ -19,6 +19,7 @@
 #include "ak_board_io.h"
 #include "ak_statuslcd.h"
 #include "ak_uart.h"
+#include "ak_feedback.h"
 #include "tdd_button_gpio.h"
 
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
@@ -121,10 +122,47 @@ static void __display_status_tm_cb(TIMER_ID timer_id, void *arg)
 #endif
 
 /* ------------------------------------------------------------ FP-3 status LCD */
-static char     s_fp3_asr[160] = "(waiting for speech)";
-static uint32_t s_fp3_asr_ms   = 0;
-static uint32_t s_fp3_count    = 0;
-static TIMER_ID s_fp3_lcd_tm   = NULL;
+static char     s_fp3_asr[160]  = "(waiting for speech)";
+static uint32_t s_fp3_asr_ms    = 0;
+static uint32_t s_fp3_count     = 0;
+static TIMER_ID s_fp3_lcd_tm    = NULL;
+static TIMER_ID s_fp3_hb_tm     = NULL;
+static bool     s_fp3_listening = false;
+
+/* Build a single-line, JSON-safe ASCII rendering of the ASR text for the
+ * feedback log line: ak_proto_log() does NOT escape, so quotes, backslashes and
+ * newlines are stripped/replaced here to keep the emitted JSON one valid line.
+ * Non-ASCII (e.g. CJK) bytes become '.', mirroring the on-LCD rendering; the
+ * full UTF-8 text still goes out via __fp3_emit_asr()'s escaped "asr" frame. */
+static void __fp3_safe_line(const AI_NOTIFY_TEXT_T *t, char *out, size_t cap)
+{
+    size_t   n = 0;
+    uint32_t i;
+
+    if (out == NULL || cap == 0) {
+        return;
+    }
+    if (t == NULL || t->data == NULL) {
+        (void)snprintf(out, cap, "(no text)");
+        return;
+    }
+    for (i = 0; i < t->datalen && n < cap - 1; i++) {
+        unsigned char c = (unsigned char)t->data[i];
+        if (c == '"' || c == '\\') {
+            out[n++] = '\'';
+        } else if (c == '\n' || c == '\r' || c == '\t') {
+            out[n++] = ' ';
+        } else if (c >= 0x20 && c < 0x7F) {
+            out[n++] = (char)c;
+        } else {
+            out[n++] = '.';
+        }
+    }
+    out[n] = '\0';
+    if (n == 0) {
+        (void)snprintf(out, cap, "(empty)");
+    }
+}
 
 /* When true, the board does NOT speak the AI's TTS reply (recognized text goes to
  * the PC/Kiro instead); local alert tones are always kept. Default muted for the
@@ -211,6 +249,14 @@ static void __fp3_lcd_tm_cb(TIMER_ID timer_id, void *arg)
     __fp3_draw_lcd();
 }
 
+/* FP-3: ~5s liveness heartbeat on UART0 (COM6). */
+static void __fp3_hb_tm_cb(TIMER_ID timer_id, void *arg)
+{
+    (void)timer_id;
+    (void)arg;
+    ak_feedback_heartbeat(tal_system_get_millisecond());
+}
+
 /* Bind ai_chat's record button to K4 (P27). The board's default is P29 (onboard
  * User key), which the expansion baseboard does not route — so CONFIG_BUTTON_NAME
  * is removed from the config (board skips its P29 registration) and we register
@@ -268,22 +314,46 @@ static void __ai_chat_handle_event(AI_NOTIFY_EVENT_T *event)
     app_lowpower_feed_event(event); // power mgmt: activity / key-mode gate
 
     switch (event->type) {
+    case AI_USER_EVT_MIC_DATA: {
+        /* Mic capture is streaming => PTT is held down. Emit the listening edge
+         * once per capture; the flag is cleared on the terminal ASR event. */
+        if (!s_fp3_listening) {
+            s_fp3_listening = true;
+            ak_feedback_status("tuya_cloud_asr", "listening");
+            ak_feedback_event("ptt", "down (mic capture start)");
+        }
+        break;
+    }
     case AI_USER_EVT_ASR_OK:
         __fp3_emit_asr((const AI_NOTIFY_TEXT_T *)event->data);
         __fp3_set_asr_text((const AI_NOTIFY_TEXT_T *)event->data);
         __fp3_draw_lcd();
+        /* PTT up: recognized text ready. Emit a single-line-safe log line. */
+        {
+            char safe[160];
+            __fp3_safe_line((const AI_NOTIFY_TEXT_T *)event->data, safe, sizeof(safe));
+            ak_feedback_event("asr", safe);
+        }
+        ak_feedback_status("tuya_cloud_asr", "idle");
+        s_fp3_listening = false;
         break;
     case AI_USER_EVT_ASR_ERROR: {
         const char *s = "{\"v\":1,\"type\":\"asr\",\"payload\":{\"error\":\"asr_error\"}}\n";
         ak_uart_write(s, (uint32_t)strlen(s));
         strncpy(s_fp3_asr, "<asr error>", sizeof(s_fp3_asr) - 1);
         __fp3_draw_lcd();
+        ak_feedback_event("asr", "<asr error>");
+        ak_feedback_status("tuya_cloud_asr", "idle");
+        s_fp3_listening = false;
     } break;
     case AI_USER_EVT_ASR_EMPTY: {
         const char *s = "{\"v\":1,\"type\":\"asr\",\"payload\":{\"error\":\"asr_empty\"}}\n";
         ak_uart_write(s, (uint32_t)strlen(s));
         strncpy(s_fp3_asr, "<empty>", sizeof(s_fp3_asr) - 1);
         __fp3_draw_lcd();
+        ak_feedback_event("asr", "<empty>");
+        ak_feedback_status("tuya_cloud_asr", "idle");
+        s_fp3_listening = false;
     } break;
 #if defined(ENABLE_PRINTER) && (ENABLE_PRINTER == 1)
     case AI_USER_EVT_GENERATE_PICTURE:
@@ -326,7 +396,14 @@ OPERATE_RET app_chat_bot_init(void)
 {
     OPERATE_RET rt = OPRT_OK;
 
-    (void)ak_uart_init(); /* FP-3: UART0 P10/P11 for ASR JSONL output */
+    /* FP-3: UART0 P10/P11 carries BOTH the Tuya SDK log (user_log_output_cb ->
+     * UART0) and this probe's ASR JSONL. Open it ONCE via the feedback layer:
+     * ak_feedback_init() calls ak_uart_init() internally (single open) and arms
+     * the feedback ready flag, so __fp3_emit_asr()'s direct ak_uart_write() and
+     * the ak_feedback_*() emitters share the SAME open UART0 — no double-open. */
+    (void)ak_feedback_init();
+    ak_feedback_ready("tuya_cloud_asr");
+    ak_feedback_status("tuya_cloud_asr", "idle");
 
     if (ak_statuslcd_init() != OPRT_OK) {
         PR_ERR("FP-3 status LCD init failed (continuing headless)");
@@ -367,6 +444,10 @@ OPERATE_RET app_chat_bot_init(void)
     /* FP-3: refresh the status LCD (net state) every 2s. */
     tal_sw_timer_create(__fp3_lcd_tm_cb, NULL, &s_fp3_lcd_tm);
     tal_sw_timer_start(s_fp3_lcd_tm, 2000, TAL_TIMER_CYCLE);
+
+    /* FP-3: UART0 feedback heartbeat every 5s. */
+    tal_sw_timer_create(__fp3_hb_tm_cb, NULL, &s_fp3_hb_tm);
+    tal_sw_timer_start(s_fp3_hb_tm, 5000, TAL_TIMER_CYCLE);
 
 #if defined(ENABLE_COMP_AI_DISPLAY) && (ENABLE_COMP_AI_DISPLAY == 1)
     ai_ui_disp_msg(AI_UI_DISP_NETWORK, (uint8_t *)&sg_wifi_status, sizeof(AI_UI_WIFI_STATUS_E));

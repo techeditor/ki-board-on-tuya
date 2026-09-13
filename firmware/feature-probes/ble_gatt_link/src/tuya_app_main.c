@@ -27,6 +27,7 @@
 #include "ak_protocol.h"
 #include "ak_statuslcd.h"
 #include "ak_uart.h"
+#include "ak_feedback.h"
 
 #include "tal_api.h"
 #include "tal_bluetooth.h"
@@ -81,6 +82,7 @@ static void emit_frame(const char *buf, int len)
         TAL_BLE_DATA_T data = {.len = (uint16_t)len, .p_data = (uint8_t *)buf};
         if (tal_ble_server_common_send(&data) == OPRT_OK) {
             s_tx_frames++;
+            ak_feedback_event("ble", "notify sent");
         }
     }
 }
@@ -171,6 +173,8 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
             PR_NOTICE("BLE ready, advertising as %s", BLE_NAME);
             uart_line("{\"v\":1,\"type\":\"link\",\"payload\":{\"ble\":\"advertising\",\"name\":\"" BLE_NAME "\"}}\n",
                       -1); /* len computed below */
+            ak_feedback_status("ble_gatt_link", "advertising");
+            ak_feedback_ready("ble_gatt_link");
             draw_status();
         } else {
             PR_ERR("BLE init failed: %d", event->ble_event.init);
@@ -185,6 +189,7 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
                             "{\"v\":1,\"type\":\"link\",\"payload\":{\"ble\":\"connected\",\"result\":%d}}\n",
                             event->ble_event.connect.result);
         uart_line(buf, len);
+        ak_feedback_event("ble", "central connected");
         draw_status();
         break;
     }
@@ -199,6 +204,7 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
             char buf[128];
             int  len = ak_proto_hello_ack(buf, sizeof(buf), PROJECT_VERSION, "ble-gatt");
             emit_frame(buf, len);
+            ak_feedback_event("ble", "notify subscribed; hello_ack sent");
         }
         draw_status();
         break;
@@ -217,6 +223,11 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
         }
         len += snprintf(buf + len, sizeof(buf) - len, "\"}}\n");
         uart_line(buf, len);
+        {
+            char m[40];
+            (void)snprintf(m, sizeof(m), "rx %u bytes", (unsigned)rx->len);
+            ak_feedback_event("ble", m);
+        }
         (void)snprintf(s_last_evt, sizeof(s_last_evt), "rx %u bytes", (unsigned)rx->len);
         draw_status();
         break;
@@ -232,6 +243,12 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
                             (unsigned)reason);
         uart_line(buf, len);
         (void)snprintf(s_last_evt, sizeof(s_last_evt), "disc reason 0x%02X", (unsigned)reason);
+        {
+            char m[40];
+            (void)snprintf(m, sizeof(m), "disconnected reason 0x%02X", (unsigned)reason);
+            ak_feedback_event("ble", m);
+        }
+        ak_feedback_status("ble_gatt_link", "advertising");
         start_advertising();
         draw_status();
         break;
@@ -252,7 +269,11 @@ static void user_main(void)
     PR_NOTICE("======== Agentic Keyboard FP-2: ble-gatt-link ========");
     PR_NOTICE("Built: %s %s", __DATE__, __TIME__);
 
-    rt = ak_uart_init();
+    /* Open UART0 once via the feedback layer: ak_feedback_init() calls
+     * ak_uart_init() internally (single open) AND arms the feedback ready flag,
+     * so both this probe's own uart_line()/emit_frame() writes and the
+     * ak_feedback_*() emitters share the ONE open UART0 — no double-open. */
+    rt = ak_feedback_init();
     if (rt != OPRT_OK) {
         PR_ERR("UART0 init failed: %d", rt);
         return;
@@ -298,6 +319,7 @@ static void user_main(void)
             int  len = ak_proto_ping(buf, sizeof(buf), ++s_seq, now);
             /* ping is also a liveness beacon for the link state on UART. */
             uart_line(buf, len);
+            ak_feedback_heartbeat(now);
             if (s_connected && s_subscribed) {
                 TAL_BLE_DATA_T d = {.len = (uint16_t)len, .p_data = (uint8_t *)buf};
                 if (tal_ble_server_common_send(&d) == OPRT_OK) {

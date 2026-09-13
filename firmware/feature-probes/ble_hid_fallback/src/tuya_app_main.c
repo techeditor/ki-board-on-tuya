@@ -41,6 +41,7 @@
 #include "ak_gfx.h"
 #include "ak_input.h"
 #include "ak_statuslcd.h"
+#include "ak_feedback.h"
 
 #include "tal_api.h"
 #include "tal_bluetooth.h"
@@ -96,6 +97,8 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
             /* All native NimBLE HOGP setup happens behind the plain-C bridge —
              * this file never touches a nimble header. */
             ak_ble_hid_init();
+            ak_feedback_ready("ble_hid_fallback");
+            ak_feedback_status("ble_hid_fallback", "advertising");
             draw_status();
         } else {
             PR_ERR("BLE init failed: %d", event->ble_event.init);
@@ -122,14 +125,18 @@ static void on_input(ak_input_kind_t kind, const char *id, ak_input_event_t even
     if (kind == AK_INPUT_KIND_KEY) {
         if (strcmp(id, "k1") == 0) {
             ak_ble_hid_send_text("hello kiro");
+            ak_feedback_event("hid", "report sent: text 'hello kiro'");
         } else if (strcmp(id, "k2") == 0) {
             ak_ble_hid_send_key(0, 0x28); /* Enter */
+            ak_feedback_event("hid", "report sent: Enter");
         } else if (strcmp(id, "k3") == 0) {
             ak_ble_hid_send_key(0, 0x2A); /* Backspace */
+            ak_feedback_event("hid", "report sent: Backspace");
         }
     } else if (kind == AK_INPUT_KIND_NAV) {
         if (strcmp(id, "left") == 0 || strcmp(id, "right") == 0) {
             ak_ble_hid_send_key(0x01, 0x2B); /* LeftCtrl+Tab: switch conversation */
+            ak_feedback_event("hid", "report sent: Ctrl+Tab (switch)");
         }
     }
     draw_status();
@@ -144,6 +151,11 @@ static void user_main(void)
     tal_log_init(TAL_LOG_LEVEL_DEBUG, 2048, (TAL_LOG_OUTPUT_CB)tkl_log_output);
     PR_NOTICE("======== Agentic Keyboard FP-6: ble-hid-fallback (T1 spike) ========");
     PR_NOTICE("Built: %s %s", __DATE__, __TIME__);
+
+    /* UART0 (COM6) JSONL feedback. Feedback lives only in this TU (which
+     * includes tal_api.h); ak_ble_hid.c stays nimble-only per the isolation
+     * architecture. */
+    ak_feedback_init();
 
     rt = ak_input_init();
     if (rt != OPRT_OK) {
@@ -169,7 +181,38 @@ static void user_main(void)
     }
 
     while (1) {
-        ak_input_poll(tal_system_get_millisecond(), on_input);
+        uint32_t now = tal_system_get_millisecond();
+        ak_input_poll(now, on_input);
+
+        /* Native GAP/SM events live in ak_ble_hid.c (nimble-only TU), so detect
+         * connect/pair transitions by polling the plain-C bridge accessors and
+         * report the edge on UART0. */
+        static bool     s_was_conn   = false;
+        static bool     s_was_paired = false;
+        static uint32_t s_last_hb    = 0;
+        bool            conn         = ak_ble_hid_connected();
+        bool            paired       = ak_ble_hid_ready();
+        if (conn != s_was_conn) {
+            s_was_conn = conn;
+            ak_feedback_event("hid", conn ? "central connected" : "disconnected");
+            if (!conn) {
+                ak_feedback_status("ble_hid_fallback", "advertising");
+            }
+            draw_status();
+        }
+        if (paired != s_was_paired) {
+            s_was_paired = paired;
+            if (paired) {
+                ak_feedback_event("hid", "paired / bonded");
+                ak_feedback_status("ble_hid_fallback", "paired");
+            }
+            draw_status();
+        }
+        if ((uint32_t)(now - s_last_hb) >= 5000U) {
+            s_last_hb = now;
+            ak_feedback_heartbeat(now);
+        }
+
         tal_system_sleep(POLL_INTERVAL_MS);
     }
 }

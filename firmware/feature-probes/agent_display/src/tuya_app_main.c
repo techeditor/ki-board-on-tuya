@@ -18,7 +18,10 @@
 #include "ak_notify_ui.h"
 #include "app_state.h"
 #include "ak_input.h"
+#include "ak_feedback.h"
 #include "input_map.h"
+
+#include <stdio.h>
 
 #include "tal_api.h"
 #include "tkl_output.h"
@@ -61,6 +64,14 @@ static void on_input(ak_input_kind_t kind, const char *id, ak_input_event_t even
     PR_NOTICE("[evt] %s '%s' %s held=%ums -> intent=%d dir=%d", (kind == AK_INPUT_KIND_NAV) ? "nav" : "key", id,
               ak_input_event_str(event), held_ms, (int)evt.type, evt.dir);
     app_state_apply(&evt);
+
+    /* Report the agent/UI status change this key just drove, on UART0 (COM6). */
+    {
+        char msg[64];
+        (void)snprintf(msg, sizeof(msg), "%s '%s' -> intent=%d dir=%d", (kind == AK_INPUT_KIND_NAV) ? "nav" : "key", id,
+                       (int)evt.type, evt.dir);
+        ak_feedback_event("agent", msg);
+    }
 }
 
 static void input_thread(void *arg)
@@ -74,8 +85,14 @@ static void input_thread(void *arg)
     }
     PR_NOTICE("input scan started (5 keys + 5-way nav)");
 
+    uint32_t last_hb = tal_system_get_millisecond();
     while (1) {
-        ak_input_poll(tal_system_get_millisecond(), on_input);
+        uint32_t now = tal_system_get_millisecond();
+        ak_input_poll(now, on_input);
+        if ((uint32_t)(now - last_hb) >= 5000U) {
+            last_hb = now;
+            ak_feedback_heartbeat(now);
+        }
         tal_system_sleep(INPUT_POLL_MS);
     }
 }
@@ -86,6 +103,9 @@ static void user_main(void)
 
     tal_log_init(TAL_LOG_LEVEL_DEBUG, 2048, (TAL_LOG_OUTPUT_CB)tkl_log_output);
     PR_NOTICE("======== agent_display FP-1 (key-driven states) ========");
+
+    /* UART0 (COM6) JSONL feedback for the companion / serial monitor. */
+    ak_feedback_init();
 
     rt = ak_panel_register();
     if (rt != OPRT_OK) {
@@ -120,6 +140,7 @@ static void user_main(void)
     };
     tal_thread_create_and_start(&s_input_thread, NULL, NULL, input_thread, NULL, &input_cfg);
 
+    ak_feedback_ready("agent_display");
     PR_NOTICE("ready: press keys to drive Agent status / notifications");
 }
 

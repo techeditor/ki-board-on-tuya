@@ -18,6 +18,9 @@ target_sources(${EXAMPLE_LIB}
         ${APP_SRCS}
         ${AK_APP_COMMON}/src/ak_input.c
         ${AK_APP_COMMON}/src/ak_input_fsm.c
+        ${AK_APP_COMMON}/src/ak_feedback.c
+        ${AK_APP_COMMON}/src/ak_uart.c
+        ${AK_APP_COMMON}/src/ak_protocol.c
 )
 target_include_directories(${EXAMPLE_LIB}
     PRIVATE
