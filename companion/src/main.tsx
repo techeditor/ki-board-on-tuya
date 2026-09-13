@@ -21,6 +21,11 @@ type SerialPortInfo = {
   kind: string;
 };
 
+type BleDeviceInfo = {
+  id: string;
+  name: string;
+};
+
 // Flat board-event object emitted by `inbound_to_json` in the backend.
 type BoardEvent = {
   kind: "key" | "nav" | "voice" | "macro" | "hello_ack" | "ping" | "pong" | "unknown";
@@ -64,6 +69,10 @@ function App() {
   const [status, setStatus] = useState<Status>(defaultStatus);
   const [ports, setPorts] = useState<SerialPortInfo[]>([]);
   const [selectedPort, setSelectedPort] = useState("");
+  const [transportMode, setTransportMode] = useState<"usb" | "ble">("usb");
+  const [bleDevices, setBleDevices] = useState<BleDeviceInfo[]>([]);
+  const [selectedBle, setSelectedBle] = useState("");
+  const [bleScanning, setBleScanning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [voiceEngine, setVoiceEngine] = useState<"system" | "third_party">("system");
   const [lastKey, setLastKey] = useState("");
@@ -102,8 +111,29 @@ function App() {
   }
 
   async function connect() {
-    await invoke("connect_device", { portName: selectedPort || null });
+    if (transportMode === "ble") {
+      if (!selectedBle) {
+        throw new Error("Scan and select an AK-KB device first.");
+      }
+      await invoke("connect_device", { transport: "ble", portName: selectedBle });
+    } else {
+      await invoke("connect_device", { transport: "usb", portName: selectedPort || null });
+    }
     await refreshRuntime();
+  }
+
+  async function scanBle() {
+    setBleScanning(true);
+    try {
+      const found = await invoke<BleDeviceInfo[]>("scan_ble");
+      setBleDevices(found);
+      // Auto-select the first match so Connect is one click after a scan.
+      if (found.length > 0 && !found.some((d) => d.id === selectedBle)) {
+        setSelectedBle(found[0].id);
+      }
+    } finally {
+      setBleScanning(false);
+    }
   }
 
   async function disconnect() {
@@ -265,18 +295,68 @@ function App() {
 
         {activeView === "device" && (
           <Panel title="Device Bridge">
-            <label>Board USB port</label>
-            <select value={selectedPort} onChange={(event) => setSelectedPort(event.target.value)}>
-              <option value="">Auto-detect (CH340/CH343)</option>
-              {boardPorts.map((port) => (
-                <option key={port.name} value={port.name}>
-                  {port.name} · {port.kind}
-                </option>
-              ))}
-            </select>
-            <p className="hint good-text">
-              USB/UART is physically trusted — no pairing. The companion greets the board on connect.
-            </p>
+            <label>Transport</label>
+            <div className="actions" style={{ marginTop: 6 }}>
+              <button
+                className={transportMode === "usb" ? "" : "secondary"}
+                onClick={() => setTransportMode("usb")}
+              >
+                USB
+              </button>
+              <button
+                className={transportMode === "ble" ? "" : "secondary"}
+                onClick={() => setTransportMode("ble")}
+              >
+                BLE
+              </button>
+            </div>
+
+            {transportMode === "usb" ? (
+              <>
+                <label>Board USB port</label>
+                <select value={selectedPort} onChange={(event) => setSelectedPort(event.target.value)}>
+                  <option value="">Auto-detect (CH340/CH343)</option>
+                  {boardPorts.map((port) => (
+                    <option key={port.name} value={port.name}>
+                      {port.name} · {port.kind}
+                    </option>
+                  ))}
+                </select>
+                <p className="hint good-text">
+                  USB/UART is physically trusted — no pairing. The companion greets the board on connect.
+                </p>
+              </>
+            ) : (
+              <>
+                <label>AK-KB device</label>
+                <select value={selectedBle} onChange={(event) => setSelectedBle(event.target.value)}>
+                  {bleDevices.length === 0 ? (
+                    <option value="">No devices — press Scan</option>
+                  ) : (
+                    bleDevices.map((dev) => (
+                      <option key={dev.id} value={dev.id}>
+                        {dev.name || "AK-KB"} · {dev.id}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <div className="actions" style={{ marginTop: 6 }}>
+                  <button
+                    className="secondary"
+                    disabled={bleScanning}
+                    onClick={() => runAction(scanBle)}
+                  >
+                    {bleScanning ? "Scanning…" : "Scan"}
+                  </button>
+                </div>
+                <p className="hint warn-text">
+                  BLE GATT · service <code>0x1910</code>, notify <code>0x2B10</code>, write
+                  <code> 0x2B11</code>. Scan (~4s) finds boards advertising <code>AK-KB</code>; the
+                  companion greets only after notify subscription is live.
+                </p>
+              </>
+            )}
+
             <div className="actions">
               <button className="secondary" onClick={() => runAction(connect)}>Connect</button>
               <button className="secondary" onClick={() => runAction(disconnect)}>Disconnect</button>

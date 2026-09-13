@@ -25,6 +25,16 @@ serialport = { version = "4", default-features = false }
 # rustls TLS backend (no OpenSSL system dep), so the crate builds on the Linux
 # CI host. NB: reqwest 0.13 renamed this feature `rustls-tls` -> `rustls`.
 reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+# Phase 2 BLE GATT backend. btleplug is cross-platform (BlueZ/DBus on Linux,
+# WinRT on Windows) and async, so it pulls a minimal tokio (current-thread
+# runtime + channels + timers, no full app async). Pinned exactly so adding it
+# does not churn resolution; 0.11.8 is the latest 0.11.x. NB: on the Linux CI
+# host btleplug's BlueZ backend links against system libdbus (libdbus-1-dev) —
+# absent hosts fail at the LINK step only; the code still type-checks.
+btleplug = "=0.11.8"
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "macros"] }
+uuid = "1"
+futures = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri = { version = "2", features = [] }

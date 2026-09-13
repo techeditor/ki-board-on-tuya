@@ -111,6 +111,7 @@ mod app {
     use crate::pc_asr::{self, VoiceAction, VoiceSource};
     use crate::protocol::{self, Inbound};
     use crate::kirocrew::KiroCrewClient;
+    use crate::transport::ble_gatt::{self, BleDeviceInfo, BleGattTransport};
     use crate::transport::usb_serial::{self, SerialPortInfo, UsbSerialTransport};
     use crate::transport::{BoardTransport, TransportKind};
     use crate::{describe_inbound, inbound_to_json};
@@ -174,6 +175,13 @@ mod app {
         usb_serial::list_serial_ports()
     }
 
+    /// Scan ~4s for BLE peripherals matching the board's advertisement
+    /// (local name `AK-KB` or service `0x1910`) and return their id/name.
+    #[tauri::command]
+    fn scan_ble() -> Result<Vec<BleDeviceInfo>, String> {
+        ble_gatt::scan()
+    }
+
     #[tauri::command]
     fn get_logs(state: State<Shared>) -> Result<Vec<String>, String> {
         Ok(state.inner.lock().map_err(|_| "state lock poisoned")?.logs.clone())
@@ -202,12 +210,14 @@ mod app {
     fn connect_device(
         app: AppHandle,
         state: State<Shared>,
+        transport: Option<String>,
         port_name: Option<String>,
     ) -> Result<(), String> {
+        let transport_kind = transport.as_deref().unwrap_or("usb");
         let shared = state.inner();
         // Tear down any existing connection first. `transport.disconnect()` now
         // sets the transport's stop flag so its background reader thread exits
-        // and releases the OS port before we open a new one.
+        // and releases the OS port / BLE peripheral before we open a new one.
         {
             let mut inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
             if let Some(mut existing) = inner.transport.take() {
@@ -223,27 +233,55 @@ mod app {
         }
 
         let (line_tx, line_rx) = mpsc::channel::<String>();
-        let transport = UsbSerialTransport::connect(port_name, line_tx).map_err(|err| {
-            log_line(&app, format!("[ERROR] transport: {err}"));
-            err
-        })?;
-        let kind = transport.kind();
-        let endpoint = transport.endpoint();
+        // Build the selected backend. Both hand complete JSONL lines to the
+        // same LineSender, so the reader thread below is transport-agnostic.
+        let boxed: Box<dyn BoardTransport> = match transport_kind {
+            "ble" => {
+                let device_id = port_name
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("BLE connect requires a device id (scan and pick one)")?;
+                let transport =
+                    BleGattTransport::connect(device_id, line_tx).map_err(|err| {
+                        log_line(&app, format!("[ERROR] ble transport: {err}"));
+                        err
+                    })?;
+                Box::new(transport)
+            }
+            _ => {
+                let transport =
+                    UsbSerialTransport::connect(port_name.clone(), line_tx).map_err(|err| {
+                        log_line(&app, format!("[ERROR] transport: {err}"));
+                        err
+                    })?;
+                Box::new(transport)
+            }
+        };
+        let kind = boxed.kind();
+        let endpoint = boxed.endpoint();
 
         let connection_id = {
             let mut inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
             inner.kind = kind;
             inner.endpoint = endpoint.clone();
-            inner.transport = Some(Box::new(transport));
+            inner.transport = Some(boxed);
             inner.last_error.clear();
             inner.connection_id = inner.connection_id.wrapping_add(1);
             inner.connection_id
         };
 
-        // USB/UART is physically trusted: greet immediately.
-        write_board(shared, &protocol::hello_payload())?;
+        // Start the reader BEFORE greeting so the board's hello_ack is not
+        // missed. USB/UART is physically trusted and greets immediately; for
+        // BLE the subscription is already confirmed live inside
+        // `BleGattTransport::connect`, so it is likewise safe to greet now
+        // (BLE, unlike USB, is not greet-immediately at the wire level — the
+        // greeting deliberately waits until after notify-subscription).
         spawn_board_reader(app.clone(), shared.clone(), line_rx, connection_id);
-        log_line(&app, format!("[INFO] connected endpoint={endpoint}"));
+        write_board(shared, &protocol::hello_payload())?;
+        log_line(
+            &app,
+            format!("[INFO] connected transport={kind:?} endpoint={endpoint}"),
+        );
         Ok(())
     }
 
@@ -484,6 +522,7 @@ mod app {
             .manage(state)
             .invoke_handler(tauri::generate_handler![
                 list_serial_ports,
+                scan_ble,
                 get_logs,
                 clear_logs,
                 get_status,
