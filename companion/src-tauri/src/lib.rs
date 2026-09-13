@@ -757,35 +757,39 @@ mod app {
         hook_install::status(&resolve_hook_command(exe))
     }
 
-    /// One-click: inject `companion --hook` into agentSpawn/postToolUse/stop of
-    /// EVERY local Kiro agent (idempotent). Returns the post-install status.
+    /// Install `companion --hook` into agentSpawn/postToolUse/stop for the
+    /// explicitly selected local agents (idempotent). Returns status for all
+    /// agents so the UI picker remains complete.
     #[tauri::command]
     fn kc_hook_install(
         app: AppHandle,
         exe: Option<String>,
+        agents: Vec<String>,
     ) -> Result<hook_install::HookStatus, String> {
         let command = resolve_hook_command(exe);
-        let st = hook_install::install(&command)?;
+        let selected_count = agents.len();
+        let st = hook_install::install_selected(&command, &agents)?;
         log_line(
             &app,
-            format!(
-                "[KC-HOOK] installed into {} agent(s) · {}",
-                st.agents.len(),
-                command
-            ),
+            format!("[KC-HOOK] installed into {selected_count} selected agent(s) · {command}"),
         );
         Ok(st)
     }
 
-    /// One-click: remove the companion `--hook` entry from every local Kiro
-    /// agent (leaves hand-authored hooks intact). Returns the post-remove status.
+    /// Remove the companion `--hook` entry from the explicitly selected local
+    /// agents (leaves hand-authored hooks and unselected agents intact).
     #[tauri::command]
     fn kc_hook_remove(
         app: AppHandle,
         exe: Option<String>,
+        agents: Vec<String>,
     ) -> Result<hook_install::HookStatus, String> {
-        let st = hook_install::remove(&resolve_hook_command(exe))?;
-        log_line(&app, format!("[KC-HOOK] removed from {} agent(s)", st.agents.len()));
+        let selected_count = agents.len();
+        let st = hook_install::remove_selected(&resolve_hook_command(exe), &agents)?;
+        log_line(
+            &app,
+            format!("[KC-HOOK] removed from {selected_count} selected agent(s)"),
+        );
         Ok(st)
     }
 

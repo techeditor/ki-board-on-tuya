@@ -161,8 +161,12 @@ function App() {
   // FP-4b Route STATUS (option A): the pinned "watched chat". "" = follow all
   // sessions. Non-empty = only that session's status drives the board LCD.
   const [pinnedSession, setPinnedSession] = useState("");
-  // FP-4b: one-click global hook install state.
+  // FP-4b: selectable hook installation state. On first load every discovered
+  // agent is selected (preserves the former install-all default); users may
+  // then select individuals, select all, or clear the selection.
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
+  const [selectedHookAgents, setSelectedHookAgents] = useState<string[]>([]);
+  const hookSelectionReadyRef = useRef(false);
 
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
@@ -427,21 +431,50 @@ function App() {
     setPinnedSession("");
   }
 
-  // FP-4b: one-click global hook install/remove/status. `exe: null` lets the
-  // backend default to this running companion's own path.
-  async function hookRefresh() {
-    const st = await invoke<HookStatus>("kc_hook_status", { exe: null });
+  // FP-4b: selected-agent hook install/remove/status. On first discovery,
+  // select all agents to preserve the former one-click install-all behavior.
+  // Later refreshes preserve the user's selection and drop names that vanished.
+  function acceptHookStatus(st: HookStatus) {
     setHookStatus(st);
+    const available = st.agents.map((a) => a.agent);
+    setSelectedHookAgents((previous) => {
+      if (!hookSelectionReadyRef.current) {
+        hookSelectionReadyRef.current = true;
+        return available;
+      }
+      const availableSet = new Set(available);
+      return previous.filter((agent) => availableSet.has(agent));
+    });
+  }
+
+  async function hookRefresh() {
+    acceptHookStatus(await invoke<HookStatus>("kc_hook_status", { exe: null }));
   }
 
   async function hookInstall() {
-    const st = await invoke<HookStatus>("kc_hook_install", { exe: null });
-    setHookStatus(st);
+    acceptHookStatus(
+      await invoke<HookStatus>("kc_hook_install", {
+        exe: null,
+        agents: selectedHookAgents,
+      }),
+    );
   }
 
   async function hookRemove() {
-    const st = await invoke<HookStatus>("kc_hook_remove", { exe: null });
-    setHookStatus(st);
+    acceptHookStatus(
+      await invoke<HookStatus>("kc_hook_remove", {
+        exe: null,
+        agents: selectedHookAgents,
+      }),
+    );
+  }
+
+  function toggleHookAgent(agent: string) {
+    setSelectedHookAgents((selected) =>
+      selected.includes(agent)
+        ? selected.filter((name) => name !== agent)
+        : [...selected, agent],
+    );
   }
 
   useEffect(() => {
@@ -529,9 +562,9 @@ function App() {
       .then((sid) => setPinnedSession(sid || ""))
       .catch(() => undefined);
 
-    // Load the global hook install status on mount.
+    // Load hook status and select all discovered agents on first mount.
     invoke<HookStatus>("kc_hook_status", { exe: null })
-      .then(setHookStatus)
+      .then(acceptHookStatus)
       .catch(() => undefined);
 
     return () => {
@@ -954,12 +987,12 @@ function App() {
                 (<code>companion --hook</code>), gated by a per-run token.
               </p>
 
-              <label style={{ marginTop: 8 }}>Global hook (all local Kiro agents)</label>
+              <label style={{ marginTop: 8 }}>Hook installation (choose local agents)</label>
               <p className="hint" style={{ marginTop: 4 }}>
-                One click wires <code>companion --hook</code> into the
-                <em> agentSpawn / postToolUse / stop</em> events of EVERY agent under{" "}
-                <code>{hookStatus?.agents_dir ?? "~/.kiro/agents"}</code>, so status flows to the
-                board without editing any JSON by hand. Hand-authored hooks are left untouched.
+                Choose which agents should run <code>companion --hook</code> for
+                <em> agentSpawn / postToolUse / stop</em>. Install and Remove affect only the
+                checked agents under <code>{hookStatus?.agents_dir ?? "~/.kiro/agents"}</code>;
+                hand-authored hooks and unchecked agents are left untouched.
               </p>
               <div className="lcd" style={{ marginTop: 6 }}>
                 <span>HOOK</span>
@@ -969,39 +1002,95 @@ function App() {
                     : hookStatus.agents.length === 0
                     ? "NO AGENTS FOUND"
                     : hookStatus.fully_installed
-                    ? `INSTALLED · ${hookStatus.agents.length} agent(s)`
+                    ? `INSTALLED · ${hookStatus.agents.length}/${hookStatus.agents.length}`
                     : hookStatus.any_installed
-                    ? `PARTIAL · ${hookStatus.agents.filter((a) => a.installed_events === 3).length}/${hookStatus.agents.length} fully wired`
+                    ? `PARTIAL · ${hookStatus.agents.filter((a) => a.installed_events === 3).length}/${hookStatus.agents.length}`
                     : "NOT INSTALLED"}
                 </strong>
               </div>
               <div className="actions" style={{ marginTop: 6 }}>
                 <button
-                  disabled={!hookStatus || hookStatus.agents.length === 0}
-                  onClick={() => runSs(hookInstall)}
+                  className="secondary"
+                  disabled={
+                    ssBusy ||
+                    !hookStatus ||
+                    selectedHookAgents.length === hookStatus.agents.length
+                  }
+                  onClick={() =>
+                    setSelectedHookAgents(hookStatus?.agents.map((a) => a.agent) ?? [])
+                  }
                 >
-                  Install hook (all agents)
+                  Select all
                 </button>
                 <button
                   className="secondary"
-                  disabled={!hookStatus?.any_installed}
-                  onClick={() => runSs(hookRemove)}
+                  disabled={ssBusy || selectedHookAgents.length === 0}
+                  onClick={() => setSelectedHookAgents([])}
                 >
-                  Remove hook
+                  Clear selection
                 </button>
-                <button className="secondary" onClick={() => runSs(hookRefresh)}>
+                <button className="secondary" disabled={ssBusy} onClick={() => runSs(hookRefresh)}>
                   Refresh
                 </button>
               </div>
               {hookStatus && hookStatus.agents.length > 0 && (
                 <div className="log" style={{ marginTop: 6 }}>
-                  {hookStatus.agents.map((a) => (
-                    <div key={a.agent}>
-                      {`${a.installed_events === 3 ? "✓" : a.installed_events > 0 ? "◐" : "·"} ${a.agent} — ${a.installed_events}/3`}
-                    </div>
-                  ))}
+                  {hookStatus.agents.map((a) => {
+                    const selected = selectedHookAgents.includes(a.agent);
+                    const installState =
+                      a.installed_events === 3
+                        ? "installed"
+                        : a.installed_events > 0
+                        ? `partial ${a.installed_events}/3`
+                        : "not installed";
+                    return (
+                      <label
+                        key={a.agent}
+                        style={{
+                          alignItems: "center",
+                          cursor: ssBusy ? "default" : "pointer",
+                          display: "flex",
+                          gap: 8,
+                          margin: 0,
+                          opacity: selected ? 1 : 0.65,
+                          textTransform: "none",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          disabled={ssBusy}
+                          onChange={() => toggleHookAgent(a.agent)}
+                          style={{ width: "auto" }}
+                        />
+                        <span>{a.agent}</span>
+                        <span style={{ marginLeft: "auto" }}>{installState}</span>
+                      </label>
+                    );
+                  })}
                 </div>
               )}
+              <div className="actions" style={{ marginTop: 6 }}>
+                <button
+                  disabled={ssBusy || selectedHookAgents.length === 0}
+                  onClick={() => runSs(hookInstall)}
+                >
+                  Install selected ({selectedHookAgents.length})
+                </button>
+                <button
+                  className="secondary"
+                  disabled={
+                    ssBusy ||
+                    selectedHookAgents.length === 0 ||
+                    !hookStatus?.agents.some(
+                      (a) => selectedHookAgents.includes(a.agent) && a.installed_events > 0,
+                    )
+                  }
+                  onClick={() => runSs(hookRemove)}
+                >
+                  Remove selected ({selectedHookAgents.length})
+                </button>
+              </div>
               <p className="hint" style={{ marginTop: 4, opacity: 0.7 }}>
                 Note: a Kiro Crew upgrade/rebuild can rewrite agent specs and drop these entries —
                 if status ever falls back to NOT INSTALLED after an update, click Install again.
