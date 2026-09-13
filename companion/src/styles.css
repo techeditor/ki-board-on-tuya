@@ -281,13 +281,13 @@ h2 {
   margin: 0 0 6px;
 }
 
-/* Compact five-key row: K1 K2 K3 K4(2x) K5. Tiles are intentionally small so
-   the whole physical layout reads at a glance. K4 (PTT) spans two columns. */
+/* Five keys on two rows: [K1 K2 K3] / [K4(2x) K5]. K4 (PTT) spans the first
+   two columns so it lines up under K1+K2; K5 takes the third column. */
 .key-row {
   flex: 1 1 320px;
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   align-content: start;
 }

@@ -46,11 +46,11 @@ const defaultStatus: Status = {
 // reference mapping placeholder — remapping UI lands in a later pass. `wide`
 // marks K4 as the double-width push-to-talk key in the INPUT layout.
 const KEY_MAP: { id: string; label: string; intent: string; wide?: boolean }[] = [
-  { id: "k1", label: "K1", intent: "Voice (push-to-talk)" },
-  { id: "k2", label: "K2", intent: "Send / Enter" },
-  { id: "k3", label: "K3", intent: "Cancel / Esc" },
-  { id: "k4", label: "K4", intent: "PTT (hold to talk)", wide: true },
-  { id: "k5", label: "K5", intent: "Unassigned" },
+  { id: "k1", label: "K1", intent: "Agent slot 1" },
+  { id: "k2", label: "K2", intent: "Agent slot 2" },
+  { id: "k3", label: "K3", intent: "Agent slot 3" },
+  { id: "k4", label: "K4", intent: "Push-to-Talk (voice)", wide: true },
+  { id: "k5", label: "K5", intent: "Submit / Continue" },
 ];
 
 // 3×3 grid positions for the compact 5-way navigation cluster.
