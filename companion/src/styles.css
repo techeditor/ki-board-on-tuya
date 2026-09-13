@@ -336,9 +336,9 @@ h2 {
 
 .nav-pad {
   display: grid;
-  grid-template-columns: repeat(3, 24px);
-  grid-template-rows: repeat(3, 24px);
-  gap: 4px;
+  grid-template-columns: repeat(3, 48px);
+  grid-template-rows: repeat(3, 48px);
+  gap: 6px;
   justify-content: start;
   margin-top: 0;
 }
@@ -348,7 +348,7 @@ h2 {
   place-items: center;
   border: 2px solid var(--border);
   background: var(--panel-2);
-  font-size: 10px;
+  font-size: 13px;
   color: var(--muted);
 }
 

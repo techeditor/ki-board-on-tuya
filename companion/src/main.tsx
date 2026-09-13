@@ -668,7 +668,7 @@ function App() {
 
         {activeView === "kirocrew" && (
           <>
-            <Panel title="Bindings — K1–K3 jump-to-chat number (§3.2)">
+            <Panel title="Bindings — K1–K3 jump-to-chat number">
               <p className="hint">
                 Bind each slot key (K1–K3) to a Kiro Crew <strong>chat number</strong> (1–9).
                 Pressing the board key fires <code>Alt+&lt;number&gt;</code> — Kiro Crew's
@@ -680,12 +680,12 @@ function App() {
               {[1, 2, 3].map((slot) => {
                 const n = binds[slot - 1];
                 return (
-                  <div key={slot} style={{ marginTop: slot === 1 ? 6 : 16 }}>
-                    <div className="lcd">
-                      <span>{`K${slot}`}</span>
-                      <strong className="good-text">
+                  <div key={slot} style={{ marginTop: slot === 1 ? 6 : 12 }}>
+                    <div style={{ fontSize: 13 }}>
+                      <strong>{`K${slot}: `}</strong>
+                      <span className="good-text">
                         {n ? `Alt+${n} (jump to chat ${n})` : "--"}
-                      </strong>
+                      </span>
                     </div>
                     <div className="actions" style={{ marginTop: 6, flexWrap: "nowrap", alignItems: "center", gap: 8 }}>
                       <label style={{ margin: 0, whiteSpace: "nowrap" }}>Chat #</label>
