@@ -155,22 +155,61 @@ static void ak_status_wrap(uint16_t x, uint16_t y, const char *s, uint16_t fg, u
     }
 }
 
-/* Render a Kiro Crew agent-status screen from a `display` frame. */
+/* Compose the connection-status header text + color for the title bar.
+ * UART is physically up as soon as it opens (green "LINK: USB"). BLE reflects
+ * the live link state: ADVERTISING (orange) -> CONNECTED (blue) -> LIVE (green).
+ * `out` must hold at least 24 bytes. Returns the title-bar color. */
+static uint16_t ak_link_header(char *out, uint32_t out_len)
+{
+#if AK_TRANSPORT_UART
+    (void)snprintf(out, out_len, "LINK: USB");
+    return AK_COL_GREEN;
+#else
+    switch (ak_ble_gatt_link_state()) {
+    case AK_BLE_LINK_LIVE:
+        (void)snprintf(out, out_len, "LINK: BLE LIVE");
+        return AK_COL_GREEN;
+    case AK_BLE_LINK_CONNECTED:
+        (void)snprintf(out, out_len, "LINK: BLE CONN");
+        return AK_COL_DKBLUE;
+    case AK_BLE_LINK_ADVERTISING:
+    default:
+        (void)snprintf(out, out_len, "LINK: BLE ADV");
+        return AK_COL_ORANGE;
+    }
+#endif
+}
+
+/* Render a Kiro Crew agent-status screen from a `display` frame. The title bar
+ * doubles as the connection-status header (transport + BLE link state). */
 static void ak_render_status(const char *agent, const char *state, const char *text)
 {
     if (!ak_statuslcd_ready()) {
         return;
     }
-    uint16_t color = ak_status_color(state);
+    char     header[24];
+    uint16_t link_color = ak_link_header(header, sizeof(header));
     char     line[48];
 
-    ak_statuslcd_title("Kiro Crew", color);
+    /* Title bar = connection-status header (green when the link is up). */
+    ak_statuslcd_title(header, link_color);
     (void)snprintf(line, sizeof(line), "agent: %s", agent[0] ? agent : "-");
     ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 2, line, AK_COL_WHITE, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), "state: %s", state[0] ? state : "-");
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 16, line, color, AK_COL_BLACK, 1);
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 16, line, ak_status_color(state), AK_COL_BLACK, 1);
     ak_status_wrap(6, AK_STATUSLCD_CONTENT_Y + 34, text, AK_COL_YELLOW, 14);
     ak_statuslcd_flush();
+}
+
+/* Redraw just the connection-status header, preserving the last agent status
+ * content. Cheap enough to call on every BLE link-state change. */
+static char s_last_agent[32] = "-";
+static char s_last_state[16] = "idle";
+static char s_last_text[128] = "waiting for Kiro Crew";
+
+static void ak_refresh_link_header(void)
+{
+    ak_render_status(s_last_agent, s_last_state, s_last_text);
 }
 #endif /* AK_ENABLE_DISPLAY */
 
@@ -198,6 +237,9 @@ static void on_rx_line(const char *line)
         ak_json_str(line, "text", text, sizeof(text));
         PR_NOTICE("display: agent=%s state=%s", agent, state);
 #if AK_ENABLE_DISPLAY
+        snprintf(s_last_agent, sizeof(s_last_agent), "%s", agent);
+        snprintf(s_last_state, sizeof(s_last_state), "%s", state);
+        snprintf(s_last_text, sizeof(s_last_text), "%s", text);
         ak_render_status(agent, state, text);
 #endif
     }
@@ -267,6 +309,18 @@ static void user_main(void)
         if (ak_ble_gatt_take_greet()) {
             send_hello_ack();
         }
+        /* Refresh the connection-status header when the BLE link state changes
+         * (advertising -> connected -> live, or back to advertising on drop). */
+#if AK_ENABLE_DISPLAY
+        {
+            static ak_ble_link_state_t s_last_link = (ak_ble_link_state_t)-1;
+            ak_ble_link_state_t        link = ak_ble_gatt_link_state();
+            if (link != s_last_link) {
+                s_last_link = link;
+                ak_refresh_link_header();
+            }
+        }
+#endif
 #endif
 
         ak_input_poll(now, on_input_event);

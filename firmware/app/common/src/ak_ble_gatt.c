@@ -187,3 +187,14 @@ bool ak_ble_gatt_take_greet(void)
     }
     return false;
 }
+
+ak_ble_link_state_t ak_ble_gatt_link_state(void)
+{
+    if (s_connected && s_subscribed) {
+        return AK_BLE_LINK_LIVE;
+    }
+    if (s_connected) {
+        return AK_BLE_LINK_CONNECTED;
+    }
+    return AK_BLE_LINK_ADVERTISING;
+}

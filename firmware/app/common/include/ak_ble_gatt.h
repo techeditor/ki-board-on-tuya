@@ -50,4 +50,14 @@ int ak_ble_gatt_write(const void *data, uint32_t length);
  */
 bool ak_ble_gatt_take_greet(void);
 
+/** Link state for the app header. */
+typedef enum {
+    AK_BLE_LINK_ADVERTISING = 0, /* not connected — advertising as AK-KB */
+    AK_BLE_LINK_CONNECTED,       /* central connected, notify not yet subscribed */
+    AK_BLE_LINK_LIVE,            /* connected AND subscribed to notify (link live) */
+} ak_ble_link_state_t;
+
+/** Current BLE link state, for the app to render in its header. */
+ak_ble_link_state_t ak_ble_gatt_link_state(void);
+
 #endif /* AK_BLE_GATT_H */
