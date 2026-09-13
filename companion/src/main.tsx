@@ -687,11 +687,12 @@ function App() {
                         {n ? `Alt+${n} (jump to chat ${n})` : "--"}
                       </strong>
                     </div>
-                    <div className="actions" style={{ marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
-                      <label style={{ margin: 0 }}>Chat number</label>
+                    <div className="actions" style={{ marginTop: 6, flexWrap: "nowrap", alignItems: "center", gap: 8 }}>
+                      <label style={{ margin: 0, whiteSpace: "nowrap" }}>Chat #</label>
                       <select
                         value={n ?? ""}
                         disabled={bindBusy}
+                        style={{ width: "auto", minWidth: 56 }}
                         onChange={(event) =>
                           runBind(() => bindSet(slot, Number(event.target.value)))
                         }
@@ -705,6 +706,7 @@ function App() {
                       <button
                         className="secondary"
                         disabled={bindBusy}
+                        style={{ whiteSpace: "nowrap" }}
                         onClick={() => runBind(() => bindClear(slot))}
                       >
                         Reset to {slot}

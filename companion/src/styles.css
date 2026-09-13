@@ -284,11 +284,12 @@ h2 {
 /* Five keys on two rows: [K1 K2 K3] / [K4(2x) K5]. K4 (PTT) spans the first
    two columns so it lines up under K1+K2; K5 takes the third column. */
 .key-row {
-  flex: 1 1 320px;
+  flex: 1 1 210px;
   min-width: 0;
+  max-width: 300px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
   align-content: start;
 }
 
@@ -311,7 +312,7 @@ h2 {
   background: linear-gradient(145deg, rgba(139, 92, 246, 0.9), rgba(88, 166, 255, 0.78));
   color: var(--text);
   font-weight: 700;
-  font-size: 13px;
+  font-size: 11px;
   overflow-wrap: anywhere;
   text-align: center;
 }
@@ -335,9 +336,9 @@ h2 {
 
 .nav-pad {
   display: grid;
-  grid-template-columns: repeat(3, 34px);
-  grid-template-rows: repeat(3, 34px);
-  gap: 5px;
+  grid-template-columns: repeat(3, 24px);
+  grid-template-rows: repeat(3, 24px);
+  gap: 4px;
   justify-content: start;
   margin-top: 0;
 }
