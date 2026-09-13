@@ -167,9 +167,10 @@ mod app {
         /// Last mapped status per Kiro `session_id` (design: keep last-status
         /// per session, emit a `display` frame for it, push to the UI).
         kc_status: HashMap<String, StatusDisplay>,
-        /// FP-4b M4 (§3.2): per-conversation bind store for K1-K3 slots, loaded
-        /// from `config_dir/ak-companion/binds.json` at startup. Short-press a
-        /// slot -> focus its bound conversation; long-press -> bind current.
+        /// FP-4b M4 (§3.2): per-key chat-number store for K1-K3, loaded from
+        /// `config_dir/ak-companion/binds.json` at startup. Each key binds to a
+        /// chat NUMBER (1..=9); pressing it fires `Alt+N` (jump to chat N). The
+        /// numbers here are mirrored into `kc_router.ctx.jump_chats`.
         kc_binds: BindStore,
     }
 
@@ -520,66 +521,46 @@ mod app {
         inner.kc_controller.chord(chord)
     }
 
-    // ─────────────── FP-4b M4: per-conversation bind slots (§3.2) ───────────────
+    // ─────────────── FP-4b M4: per-key chat-number bind slots (§3.2) ───────────────
 
-    /// M4: return the three bind slots (index 0 = K1 … index 2 = K3) for the UI.
+    /// M4: return the three per-key chat NUMBERS (index 0 = K1 … index 2 = K3)
+    /// as a JSON array of `u8` for the UI.
     #[tauri::command]
-    fn kc_bind_get(state: State<Shared>) -> Result<Vec<crate::bind_store::Slot>, String> {
+    fn kc_bind_get(state: State<Shared>) -> Result<Vec<u8>, String> {
         Ok(state
             .inner
             .lock()
             .map_err(|_| "state lock poisoned")?
             .kc_binds
-            .slots
+            .chats
             .clone())
     }
 
-    /// M4: bind slot `slot` (1-based) to `url` (+ optional `label`, defaulting to
-    /// the parsed slug) and persist. Mirrors a long-press bind from the UI.
-    /// M4: bind slot `slot` (1-based) from the UI. The primary field is the
-    /// conversation `label` (its title — client-side command-bar focus, no
-    /// reload); an optional `url` is kept as the manual navigate fallback. At
-    /// least one of the two must be non-empty. When only a URL is given, the
-    /// label is derived from its `/chat/<slug>`. Persists the slot.
+    /// M4: bind slot `slot` (1-based) to chat `number` (`1..=9`). Validates the
+    /// number, persists the store, and updates the LIVE router `ControlCtx` so
+    /// the next board press jumps to the new number without a restart.
     #[tauri::command]
-    fn kc_bind_set(
-        state: State<Shared>,
-        slot: u8,
-        label: Option<String>,
-        url: Option<String>,
-    ) -> Result<(), String> {
-        let label = label
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty());
-        let url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
-        if label.is_none() && url.is_none() {
-            return Err("provide a conversation title (label) and/or a URL".to_string());
+    fn kc_bind_set(state: State<Shared>, slot: u8, number: u8) -> Result<(), String> {
+        if !(1..=9).contains(&number) {
+            return Err(format!("chat number must be 1..=9 (got {number})"));
         }
-        // If only a URL was given, derive the label from its /chat/<slug>.
-        let label = label.or_else(|| {
-            url.as_deref()
-                .and_then(crate::bind_store::parse_chat_slug)
-                .map(|(_, slug)| slug)
-        });
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        inner.kc_binds.set(slot, url, label);
-        inner.kc_binds.save()
+        inner.kc_binds.set(slot, number);
+        inner.kc_binds.save()?;
+        // Keep the live router context in sync with the persisted numbers.
+        inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
+        Ok(())
     }
 
-    /// M4: clear slot `slot` (1-based) and persist.
+    /// M4: reset slot `slot` (1-based) to its default chat number (slot index+1:
+    /// K1->1, K2->2, K3->3), persist, and update the live router context.
     #[tauri::command]
     fn kc_bind_clear(state: State<Shared>, slot: u8) -> Result<(), String> {
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
         inner.kc_binds.clear(slot);
-        inner.kc_binds.save()
-    }
-
-    /// M4: bind the CURRENT window's conversation to slot `slot` (1-based),
-    /// mirroring a physical long-press from the UI — captures the address-bar
-    /// URL, parses the slug, persists, and LCD-echoes the bind.
-    #[tauri::command]
-    fn kc_bind_current(app: AppHandle, state: State<Shared>, slot: u8) -> Result<(), String> {
-        bind_slot(&app, state.inner(), slot)
+        inner.kc_binds.save()?;
+        inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
+        Ok(())
     }
 
     // ─────────────── FP-4b: STATUS sink ("the eyes") — T7 wiring ───────────────
@@ -686,94 +667,24 @@ mod app {
             ControlAction::Chord(c) => format!("chord {c:?}"),
             ControlAction::SendText(t) => format!("send-text {t:?}"),
             ControlAction::Compose(t) => format!("compose {t:?}"),
-            ControlAction::FocusSlot(n) => format!("focus-slot {n}"),
-            ControlAction::BindSlot(n) => format!("bind-slot {n}"),
             ControlAction::None => "none".to_string(),
         }
     }
 
-    /// Execute a routed control action. Most actions go straight to the
-    /// controller facade via `apply()`; the two M4 slot actions are stateful IO
-    /// (bind store + capture/navigate + LCD echo) and are handled here instead.
+    /// Execute a routed control action against the controller facade. All
+    /// actions (including K1-K3 `Chord(JumpChat(n))`) go straight through
+    /// `apply()`; the router already resolved the per-key chat number, so there
+    /// is no stateful slot special-casing left here.
     fn exec_control_action(
-        app: &AppHandle,
+        _app: &AppHandle,
         state: &Shared,
         action: &ControlAction,
     ) -> Result<(), String> {
-        match action {
-            ControlAction::FocusSlot(n) => focus_slot(app, state, *n),
-            ControlAction::BindSlot(n) => bind_slot(app, state, *n),
-            other => state
-                .inner
-                .lock()
-                .map_err(|_| "state lock poisoned".to_string())
-                .and_then(|mut inner| inner.kc_controller.apply(other)),
-        }
-    }
-
-    /// M4 short-press: focus the conversation bound to slot `n`. A slot with a
-    /// non-empty LABEL (the conversation title) -> `command_bar(label)`, the
-    /// CLIENT-SIDE command bar (Ctrl+K + type + Enter) which navigates in-app
-    /// with NO page reload (the SPA is history/pushState, so address-bar nav
-    /// reloads but its own Command Bar does not). A slot with only a URL (manual
-    /// fallback) -> `navigate_url(url)`. An empty slot -> new chat (Alt+Shift+N)
-    /// per §3.2 "empty slot -> new session".
-    fn focus_slot(_app: &AppHandle, state: &Shared, n: u8) -> Result<(), String> {
-        let (label, url) = {
-            let inner = state.inner.lock().map_err(|_| "state lock poisoned".to_string())?;
-            let slot = inner.kc_binds.get(n).cloned().unwrap_or_default();
-            let label = slot
-                .label
-                .filter(|l| !l.trim().is_empty());
-            let url = slot.url.filter(|u| !u.trim().is_empty());
-            (label, url)
-        };
-
-        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        match (label, url) {
-            // Primary path: focus by conversation title via the command bar.
-            (Some(label), _) => inner.kc_controller.command_bar(&label),
-            // Manual fallback: a URL-only slot navigates the address bar.
-            (None, Some(u)) => inner.kc_controller.navigate_url(&u),
-            // Empty slot: create a new chat instead.
-            (None, None) => inner.kc_controller.chord(Chord::NewChat),
-        }
-    }
-
-    /// M4 long-press: bind the CURRENT conversation to slot `n`. Capture the
-    /// window's title, strip the app/browser suffix down to the conversation
-    /// title, persist it to the slot as the LABEL (url = None — focus goes
-    /// through the client-side command bar by title, no reload), and emit a
-    /// `display` frame confirming the bind so the board LCD shows `K<n> -> <label>`
-    /// (M3 renders it).
-    fn bind_slot(app: &AppHandle, state: &Shared, n: u8) -> Result<(), String> {
-        let captured = {
-            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-            inner.kc_controller.capture_current_title()?
-        };
-        let raw = captured.ok_or_else(|| {
-            "no window title captured (is a Kiro Crew window focused?)".to_string()
-        })?;
-        let label = crate::kirocrew_control::strip_conversation_title(&raw);
-        if label.trim().is_empty() {
-            return Err(format!("stripped title is empty (raw {raw:?})"));
-        }
-
-        // Persist the bind: store the title as the label, leave url = None.
-        {
-            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-            inner.kc_binds.set(n, None, Some(label.clone()));
-            inner.kc_binds.save()?;
-        }
-
-        // LCD echo: reuse the existing `display` frame encoder (best-effort —
-        // ignored when the board is offline). state = "bound".
-        let _ = write_board(
-            state,
-            &protocol::display_payload(&label, "bound", &format!("K{n} -> {label}")),
-        );
-        log_line(app, format!("[KC-CTL] bound K{n} -> {label}"));
-        Ok(())
+        state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned".to_string())
+            .and_then(|mut inner| inner.kc_controller.apply(action))
     }
 
     fn spawn_board_reader(
@@ -877,6 +788,11 @@ mod app {
     }
 
     pub fn run() {
+        // Load the persisted per-key chat numbers once, and seed both the store
+        // and the router's ControlCtx from them so the first board press already
+        // jumps to the configured numbers.
+        let kc_binds = BindStore::load();
+        let jump_chats = kc_binds.chats.clone();
         let state: Shared = Arc::new(AppState {
             inner: Mutex::new(Inner {
                 transport: None,
@@ -889,14 +805,14 @@ mod app {
                 voice_source: VoiceSource::System,
                 kc_target: None,
                 kc_controller: KiroCrewController::new(None),
-                kc_router: ControlRouter::new(
-                    crate::kirocrew_control::ControlCtx::with_default_jumps(),
-                ),
+                kc_router: ControlRouter::new(crate::kirocrew_control::ControlCtx {
+                    jump_chats,
+                }),
                 control_enabled: false,
                 status_sink: None,
                 status_token: String::new(),
                 kc_status: HashMap::new(),
-                kc_binds: BindStore::load(),
+                kc_binds,
             }),
         });
 
@@ -926,7 +842,6 @@ mod app {
                 kc_bind_get,
                 kc_bind_set,
                 kc_bind_clear,
-                kc_bind_current,
                 status_sink_start,
                 status_sink_stop,
                 status_token,

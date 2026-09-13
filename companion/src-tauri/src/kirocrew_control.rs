@@ -92,30 +92,15 @@ pub enum ControlAction {
     /// Focus the chat composer (Alt+Enter), then type the text — no Enter, so
     /// the user reviews and submits with K5. This is the K4 voice path.
     Compose(String),
-    /// M4 (§3.2): short-press a slot key (K1-K3) — focus the conversation bound
-    /// to that 1-based slot via the CLIENT-SIDE command bar by its title (no
-    /// page reload), or create a new chat when the slot is empty. Stateful IO,
-    /// executed in `lib.rs` against the bind store + controller, not in the pure
-    /// router.
-    FocusSlot(u8),
-    /// M4 (§3.2): long-press a slot key (K1-K3) — bind the CURRENT conversation
-    /// to that 1-based slot (capture its window title, strip the suffix, persist,
-    /// LCD-confirm). Stateful IO, executed in `lib.rs`.
-    BindSlot(u8),
     /// Nothing to do for this event (e.g. a key *up*, a ping, an ack).
     None,
 }
 
-/// Long-press threshold in milliseconds. MUST match the firmware's
-/// `AK_FSM_LONG_PRESS_MS` (`firmware/app/common/include/ak_features.h` /
-/// `ak_input_fsm.h`, = 800). The firmware classifies the press; the router only
-/// compares `held_ms` on the `Up` edge to tell a short tap from a long-press
-/// tail — a stateless decision (design M4 "Long/short split").
-pub const LONG_PRESS_MS: u32 = 800;
-
 /// Router context — the small amount of state the pure mapping needs but does
 /// not own. `jump_chats[i]` is the chat NUMBER (1..=9) that K(i+1) (K1..K3)
 /// jumps to via the deterministic `Alt+N` shortcut. Defaults to `[1, 2, 3]`.
+/// The number for each key is user-configurable (persisted in the bind store)
+/// and kept in sync here by `lib.rs`.
 #[derive(Clone, Debug, Default)]
 pub struct ControlCtx {
     /// Chat numbers for K1, K2, K3 (index 0..=2). Configurable by the UI.
@@ -128,11 +113,9 @@ impl ControlCtx {
         Self { jump_chats: vec![1, 2, 3] }
     }
 
-    /// Deterministic `Alt+N` jump for slot `idx` (0-based). Retained as the
-    /// documented empty-slot / position-jump fallback (M4 §3.2); the router now
-    /// routes K1-K3 through the per-conversation bind path instead, so this is
-    /// not on the hot path.
-    #[allow(dead_code)]
+    /// Deterministic `Alt+N` jump for slot `idx` (0-based). Returns
+    /// `Chord(JumpChat(n))` when `jump_chats[idx]` is a valid chat number
+    /// (1..=9); `None` when the index is missing or the number is out of range.
     fn jump(&self, idx: usize) -> ControlAction {
         match self.jump_chats.get(idx) {
             Some(&n) if (1..=9).contains(&n) => ControlAction::Chord(Chord::JumpChat(n)),
@@ -154,16 +137,15 @@ fn is_trigger(action: KeyAction) -> bool {
 /// | event                          | action                              |
 /// |--------------------------------|-------------------------------------|
 /// | `macro { name }` (recognized text) | `Compose(name)` — K4 voice → focus composer + type (no send) |
-/// | `key k1..k3` `Long`            | `BindSlot(n)` — bind current conversation to slot (M4 §3.2) |
-/// | `key k1..k3` `Up` (held<LONG_PRESS_MS) | `FocusSlot(n)` — short tap: focus the bound conversation |
-/// | `key k1..k3` `Up` (held>=LONG) / `Down` | `None` — long-press tail / wait-for-release |
+/// | `key k1..k3` `Down`            | `Chord(JumpChat(n))` — n = configured `jump_chats[idx]` (Alt+N, client-side jump to chat n); `None` if unset / out of 1..=9 |
+/// | `key k1..k3` `Long`/`Up`       | `None` — jump fired on `Down`; the rest of the press is a no-op |
 /// | `key k4` (down/long)           | `None` — K4 is push-to-talk; text arrives later as `macro` |
 /// | `key k5` (down/long)           | `Chord(Enter)` — submit / continue  |
 /// | `nav left/right`               | `Chord(PrevChat/NextChat)` — Alt+←/→ |
 /// | `nav up/down`                  | `Chord(Up/Down)` — arrow keys       |
 /// | `nav center` (down/long)       | `Chord(Enter)`                      |
 /// | anything else / any `up` edge  | `None`                              |
-pub fn route_input(ev: &Inbound, _ctx: &ControlCtx) -> ControlAction {
+pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
     match ev {
         // K4's recognized dictation → type into the chat composer (no send).
         Inbound::Macro { payload, .. } => {
@@ -175,30 +157,23 @@ pub fn route_input(ev: &Inbound, _ctx: &ControlCtx) -> ControlAction {
             }
         }
 
-        // K1-K3 are the per-conversation SLOT keys (M4 §3.2). They use a
-        // stateless long/short split off the firmware's own classification,
-        // so they must be matched BEFORE the generic `is_trigger` arm (which
-        // only fires on Down/Long) — a slot key's `Up` edge is meaningful.
+        // K1-K3 = jump keys. They fire on `Down` ONLY — one physical press
+        // produces exactly one `Alt+N` jump; the `Long` and `Up` edges of the
+        // same press are no-ops. Matched BEFORE the generic `is_trigger` arm
+        // (which fires on Down/Long) so `Long` does not double-fire.
         Inbound::Key { payload, .. }
             if matches!(payload.id.as_str(), "k1" | "k2" | "k3") =>
         {
-            let slot = match payload.id.as_str() {
-                "k1" => 1u8,
-                "k2" => 2u8,
-                _ => 3u8,
+            let idx = match payload.id.as_str() {
+                "k1" => 0usize,
+                "k2" => 1usize,
+                _ => 2usize,
             };
             match payload.action {
-                // Long-press -> bind the current conversation to this slot.
-                KeyAction::Long => ControlAction::BindSlot(slot),
-                // Short tap (release under the threshold) -> focus the slot.
-                KeyAction::Up if payload.held_ms < LONG_PRESS_MS => {
-                    ControlAction::FocusSlot(slot)
-                }
-                // Release at/after the threshold is the tail of a long press;
-                // the bind already fired on the `Long` edge — do nothing so a
-                // long press does not focus-then-clobber.
-                KeyAction::Up => ControlAction::None,
-                // Down: wait for release/long, so a long press does NOT focus.
+                // Down -> jump to the configured chat number for this key.
+                KeyAction::Down => ctx.jump(idx),
+                // Long / Up (and anything else) -> nothing; the jump already
+                // fired on Down.
                 _ => ControlAction::None,
             }
         }
@@ -246,36 +221,6 @@ impl ControlRouter {
     }
 }
 
-// ─────────────────────── strip_conversation_title (pure) ───────────────────────
-
-/// Reduce a raw OS window title to just the conversation title.
-///
-/// A browser/app window title carries an app + browser suffix after the chat
-/// name, e.g. `"My chat - Kiro Crew - Google Chrome"` or `"Planning · Kiro Crew"`.
-/// We take the segment BEFORE the first of these separators — `" - "`, `" -- "`,
-/// `" | "`, `" · "` (space-padded), or a bare `"·"` — and trim it. That drops the
-/// suffix and leaves the chat title, which is what the client-side command bar
-/// matches on (M4: focus by TITLE, no reload). A title with no separator (e.g.
-/// `"Kiro Crew"`) is returned trimmed as-is.
-pub fn strip_conversation_title(raw: &str) -> String {
-    // Padded separators are tried first (most specific); the bare middot last so
-    // it only fires when no padded form matched.
-    const PADDED: &[&str] = &[" -- ", " - ", " | ", " · "];
-    let mut cut = raw.len();
-    for sep in PADDED {
-        if let Some(pos) = raw.find(sep) {
-            cut = cut.min(pos);
-        }
-    }
-    if cut == raw.len() {
-        // No padded separator — fall back to a bare middot boundary.
-        if let Some(pos) = raw.find('·') {
-            cut = pos;
-        }
-    }
-    raw[..cut].trim().to_string()
-}
-
 // ─────────────────────── KiroCrewController (T1) ───────────────────────
 
 /// Default window-title substrings tried in order when none is configured.
@@ -310,7 +255,6 @@ mod windows_impl {
     const VK_SHIFT: u16 = 0x10;
     const VK_K: u16 = 0x4B; // 'K'
     const VK_N: u16 = 0x4E; // 'N'
-    const VK_L: u16 = 0x4C; // 'L' — focus browser address bar (Ctrl+L)
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -407,16 +351,6 @@ mod windows_impl {
             vkey_event(VK_CONTROL, false),
             vkey_event(VK_K, false),
             vkey_event(VK_K, true),
-            vkey_event(VK_CONTROL, true),
-        ])
-    }
-
-    /// Ctrl + <vk> (Ctrl↓ vk↓ vk↑ Ctrl↑) — used for Ctrl+L / Ctrl+A / Ctrl+C.
-    fn ctrl_tap(vk: u16) -> Result<(), String> {
-        send(&[
-            vkey_event(VK_CONTROL, false),
-            vkey_event(vk, false),
-            vkey_event(vk, true),
             vkey_event(VK_CONTROL, true),
         ])
     }
@@ -586,53 +520,18 @@ mod windows_impl {
             self.focus()?;
             inject_chord(keys)
         }
-
-        /// M4: capture the focused window's current title text. Focus the
-        /// window, then read its title via GetWindowTextLengthW/GetWindowTextW.
-        /// Returns the RAW window title (the caller strips the app/browser
-        /// suffix with [`super::strip_conversation_title`]); `Ok(None)` when the
-        /// title is empty. Reads only — never navigates or touches the clipboard,
-        /// so it cannot trigger a page reload.
-        pub fn capture_current_title(&mut self) -> Result<Option<String>, String> {
-            self.focus()?;
-            let hwnd = self
-                .hwnd
-                .ok_or_else(|| "control: no window resolved after focus".to_string())?;
-            let title = unsafe {
-                let len = GetWindowTextLengthW(hwnd);
-                if len <= 0 {
-                    return Ok(None);
-                }
-                let mut buf = vec![0u16; (len as usize) + 1];
-                let copied = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
-                if copied <= 0 {
-                    return Ok(None);
-                }
-                String::from_utf16_lossy(&buf[..copied as usize])
-            };
-            if title.trim().is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(title))
-            }
-        }
-
-        /// M4: navigate the focused window to `url`. Focus, Ctrl+L (address
-        /// bar), type the URL, Enter.
-        pub fn navigate_url(&mut self, url: &str) -> Result<(), String> {
-            self.focus()?;
-            ctrl_tap(VK_L)?;
-            std::thread::sleep(std::time::Duration::from_millis(60));
-            type_text_raw(url)?;
-            tap(VK_RETURN)
-        }
     }
 
-    // Silence dead-code warnings for the SendMessageW binding kept for parity /
-    // future close-menu use; referenced here so the linker keeps it honest.
+    // Silence dead-code warnings for the Win32 bindings kept for the window
+    // enumeration path / future close-menu use but not otherwise referenced;
+    // touched here so the linker keeps them honest.
     #[allow(dead_code)]
-    fn _keep_sendmessage_linked() -> unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> isize {
-        SendMessageW
+    fn _keep_win32_linked() -> (
+        unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> isize,
+        unsafe extern "system" fn(HWND, *mut u16, i32) -> i32,
+        unsafe extern "system" fn(HWND) -> i32,
+    ) {
+        (SendMessageW, GetWindowTextW, GetWindowTextLengthW)
     }
 }
 
@@ -676,16 +575,6 @@ mod stub_impl {
         }
 
         pub fn chord(&mut self, _keys: Chord) -> Result<(), String> {
-            Err("control: windows only".to_string())
-        }
-
-        /// Stub: no window system to read a title from — capture nothing.
-        pub fn capture_current_title(&mut self) -> Result<Option<String>, String> {
-            Ok(None)
-        }
-
-        /// Stub: no window system to navigate.
-        pub fn navigate_url(&mut self, _url: &str) -> Result<(), String> {
             Err("control: windows only".to_string())
         }
     }
@@ -743,20 +632,6 @@ impl KiroCrewController {
         self.backend.chord(keys)
     }
 
-    /// M4: capture the focused window's title (raw). `Ok(None)` when the title
-    /// is empty; on non-Windows the stub returns `Ok(None)`. The caller strips
-    /// the app/browser suffix with [`strip_conversation_title`]. Reads only — no
-    /// navigation, so it cannot reload the SPA.
-    pub fn capture_current_title(&mut self) -> Result<Option<String>, String> {
-        self.backend.capture_current_title()
-    }
-
-    /// M4: navigate the focused window to `url` (Ctrl+L + type + Enter). On
-    /// non-Windows the stub returns `Err`.
-    pub fn navigate_url(&mut self, url: &str) -> Result<(), String> {
-        self.backend.navigate_url(url)
-    }
-
     /// Execute a routed [`ControlAction`] against the window. `None` is a no-op.
     pub fn apply(&mut self, action: &ControlAction) -> Result<(), String> {
         match action {
@@ -764,11 +639,6 @@ impl KiroCrewController {
             ControlAction::Chord(c) => self.chord(*c),
             ControlAction::SendText(t) => self.send_text(t),
             ControlAction::Compose(t) => self.compose(t),
-            // M4 slot actions are stateful IO (bind store + capture/navigate)
-            // executed in `lib.rs`, never through the bare controller facade.
-            ControlAction::FocusSlot(_) | ControlAction::BindSlot(_) => {
-                Err("control: FocusSlot/BindSlot are executed in lib.rs".to_string())
-            }
             ControlAction::None => Ok(()),
         }
     }
@@ -809,49 +679,6 @@ mod tests {
             seq: None,
             payload: MacroPayload { name: name.into() },
         }
-    }
-
-    // ── strip_conversation_title ───────────────────────────────
-
-    #[test]
-    fn strip_title_drops_browser_and_app_suffix() {
-        // " - " padded dash (Chrome/Edge tab title).
-        assert_eq!(
-            strip_conversation_title("My chat - Kiro Crew - Google Chrome"),
-            "My chat"
-        );
-        // " · " padded middot (app title style).
-        assert_eq!(strip_conversation_title("Planning · Kiro Crew"), "Planning");
-        // Bare middot (no surrounding spaces).
-        assert_eq!(strip_conversation_title("Planning·Kiro Crew"), "Planning");
-        // " -- " em-dash-ish separator, tried before " - ".
-        assert_eq!(
-            strip_conversation_title("Deep dive -- Kiro Crew"),
-            "Deep dive"
-        );
-        // " | " pipe separator.
-        assert_eq!(
-            strip_conversation_title("Roadmap | Kiro Crew | Firefox"),
-            "Roadmap"
-        );
-    }
-
-    #[test]
-    fn strip_title_returns_trimmed_when_no_separator() {
-        assert_eq!(strip_conversation_title("Kiro Crew"), "Kiro Crew");
-        assert_eq!(strip_conversation_title("  Kiro Crew  "), "Kiro Crew");
-        assert_eq!(strip_conversation_title(""), "");
-    }
-
-    #[test]
-    fn strip_title_takes_the_first_separator_only() {
-        // A chat title that itself contains a dash inside a word is fine — only
-        // the space-padded separator splits, so "pre-flight" survives until the
-        // padded " - " before the suffix.
-        assert_eq!(
-            strip_conversation_title("pre-flight review - Kiro Crew - Chrome"),
-            "pre-flight review"
-        );
     }
 
     // ── Chord parsing ──────────────────────────────────────────
@@ -909,65 +736,83 @@ mod tests {
         );
     }
 
-    // ── Router: K1–K3 → M4 per-conversation slot (long/short split) ──
+    // ── Router: K1–K3 → Alt+<configured number> jump on Down only ──
 
     #[test]
-    fn k1_k2_k3_long_press_binds_slot() {
+    fn k1_k2_k3_down_jumps_to_configured_chat_number() {
+        // Non-default numbers to prove the router reads ctx.jump_chats.
+        let ctx = ControlCtx { jump_chats: vec![5, 2, 9] };
+        assert_eq!(
+            route_input(&key("k1", KeyAction::Down), &ctx),
+            ControlAction::Chord(Chord::JumpChat(5))
+        );
+        assert_eq!(
+            route_input(&key("k2", KeyAction::Down), &ctx),
+            ControlAction::Chord(Chord::JumpChat(2))
+        );
+        assert_eq!(
+            route_input(&key("k3", KeyAction::Down), &ctx),
+            ControlAction::Chord(Chord::JumpChat(9))
+        );
+    }
+
+    #[test]
+    fn k1_k2_k3_down_uses_defaults() {
         let ctx = ControlCtx::with_default_jumps();
         assert_eq!(
-            route_input(&key("k1", KeyAction::Long), &ctx),
-            ControlAction::BindSlot(1)
+            route_input(&key("k1", KeyAction::Down), &ctx),
+            ControlAction::Chord(Chord::JumpChat(1))
         );
         assert_eq!(
-            route_input(&key("k2", KeyAction::Long), &ctx),
-            ControlAction::BindSlot(2)
+            route_input(&key("k2", KeyAction::Down), &ctx),
+            ControlAction::Chord(Chord::JumpChat(2))
         );
         assert_eq!(
-            route_input(&key("k3", KeyAction::Long), &ctx),
-            ControlAction::BindSlot(3)
+            route_input(&key("k3", KeyAction::Down), &ctx),
+            ControlAction::Chord(Chord::JumpChat(3))
         );
     }
 
     #[test]
-    fn k1_k2_k3_short_up_focuses_slot() {
-        let ctx = ControlCtx::default();
-        // Release under the threshold = short tap = focus.
-        assert_eq!(
-            route_input(&key_held("k1", KeyAction::Up, 120), &ctx),
-            ControlAction::FocusSlot(1)
-        );
-        assert_eq!(
-            route_input(&key_held("k2", KeyAction::Up, LONG_PRESS_MS - 1), &ctx),
-            ControlAction::FocusSlot(2)
-        );
-        assert_eq!(
-            route_input(&key_held("k3", KeyAction::Up, 0), &ctx),
-            ControlAction::FocusSlot(3)
-        );
+    fn k1_k3_long_and_up_are_none() {
+        let ctx = ControlCtx::with_default_jumps();
+        // The jump fires on Down; Long and Up edges of the same press do nothing.
+        for id in ["k1", "k2", "k3"] {
+            assert_eq!(
+                route_input(&key(id, KeyAction::Long), &ctx),
+                ControlAction::None,
+                "{id} Long should be None"
+            );
+            assert_eq!(
+                route_input(&key_held(id, KeyAction::Up, 120), &ctx),
+                ControlAction::None,
+                "{id} short Up should be None"
+            );
+            assert_eq!(
+                route_input(&key_held(id, KeyAction::Up, 1500), &ctx),
+                ControlAction::None,
+                "{id} long-tail Up should be None"
+            );
+        }
     }
 
     #[test]
-    fn k1_k2_k3_long_tail_up_is_none() {
-        let ctx = ControlCtx::default();
-        // Release at/after the threshold = tail of a long press; bind already
-        // fired on the `Long` edge, so the release does nothing.
+    fn k1_k3_down_none_when_number_unset_or_out_of_range() {
+        // Missing index (short jump_chats vector) -> None.
+        let short = ControlCtx { jump_chats: vec![1] };
+        assert_eq!(route_input(&key("k2", KeyAction::Down), &short), ControlAction::None);
+        assert_eq!(route_input(&key("k3", KeyAction::Down), &short), ControlAction::None);
+        // Out-of-range number (0 or >9) -> None.
+        let bad = ControlCtx { jump_chats: vec![0, 10, 3] };
+        assert_eq!(route_input(&key("k1", KeyAction::Down), &bad), ControlAction::None);
+        assert_eq!(route_input(&key("k2", KeyAction::Down), &bad), ControlAction::None);
         assert_eq!(
-            route_input(&key_held("k1", KeyAction::Up, LONG_PRESS_MS), &ctx),
-            ControlAction::None
+            route_input(&key("k3", KeyAction::Down), &bad),
+            ControlAction::Chord(Chord::JumpChat(3))
         );
-        assert_eq!(
-            route_input(&key_held("k2", KeyAction::Up, 1500), &ctx),
-            ControlAction::None
-        );
-    }
-
-    #[test]
-    fn k1_k2_k3_down_is_none() {
-        let ctx = ControlCtx::default();
-        // Down waits for release/long — a long press must NOT focus first.
-        assert_eq!(route_input(&key("k1", KeyAction::Down), &ctx), ControlAction::None);
-        assert_eq!(route_input(&key("k2", KeyAction::Down), &ctx), ControlAction::None);
-        assert_eq!(route_input(&key("k3", KeyAction::Down), &ctx), ControlAction::None);
+        // Empty vector (default ControlCtx) -> None.
+        let empty = ControlCtx::default();
+        assert_eq!(route_input(&key("k1", KeyAction::Down), &empty), ControlAction::None);
     }
 
     #[test]
@@ -1013,9 +858,9 @@ mod tests {
     #[test]
     fn key_up_edges_do_not_trigger() {
         let ctx = ControlCtx::with_default_jumps();
-        // K5 is not a slot key; its Up edge is a no-op.
+        // K5 is not a jump key; its Up edge is a no-op.
         assert_eq!(route_input(&key("k5", KeyAction::Up), &ctx), ControlAction::None);
-        // (K1-K3 Up edges are the M4 slot focus/none path — covered above.)
+        // (K1-K3 Up edges are covered above — all None now.)
     }
 
     #[test]
@@ -1051,6 +896,11 @@ mod tests {
         assert_eq!(
             router.route(&key("k5", KeyAction::Down)),
             ControlAction::Chord(Chord::Enter)
+        );
+        // And a K1 Down jumps to the configured number.
+        assert_eq!(
+            router.route(&key("k1", KeyAction::Down)),
+            ControlAction::Chord(Chord::JumpChat(1))
         );
     }
 

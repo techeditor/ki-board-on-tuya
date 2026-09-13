@@ -48,14 +48,11 @@ type KcStatus = {
   text: string;
 };
 
-// FP-4b M4 (§3.2): one per-conversation bind slot (K1-K3), mirrors the Rust
-// `bind_store::Slot`. `label` = conversation TITLE (primary, client-side
-// command-bar focus, no reload); `url` = optional manual navigate fallback.
-// Both empty = unbound; short-press then makes a new chat.
-type BindSlot = {
-  url: string | null;
-  label: string | null;
-};
+// FP-4b M4 (§3.2): the three per-key chat NUMBERS (K1-K3). Each key jumps to a
+// chat number (1..9) via Kiro Crew's "Alt+N = Jump to chat N" shortcut —
+// client-side, no page reload. The number is user-configurable per key. This
+// mirrors the Rust `bind_store::BindStore.chats: Vec<u8>` (index 0 = K1).
+type ChatNumbers = number[];
 
 const defaultStatus: Status = {
   device_connected: false,
@@ -98,7 +95,7 @@ function App() {
   // is the untouched JSON object per board-event.
   const [logsRaw, setLogsRaw] = useState<string[]>([]);
   const [logsShowRaw, setLogsShowRaw] = useState(false);
-  const [voiceEngine, setVoiceEngine] = useState<"system" | "third_party">("system");
+  const [voiceSource, setVoiceSource] = useState<"cloud" | "system">("system");
   const [lastKey, setLastKey] = useState("");
   const [lastNav, setLastNav] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
@@ -122,13 +119,10 @@ function App() {
   const [lcError, setLcError] = useState("");
   const [lcBusy, setLcBusy] = useState(false);
 
-  // FP-4b M4 (§3.2): the three per-conversation bind slots (K1-K3). `bindEdit`
-  // holds the per-slot edit field (a conversation TITLE to Set; a /chat/<slug>
-  // URL is accepted as a manual fallback). Short-press a slot focuses its
-  // conversation via the client-side command bar (no reload); long-press (or
-  // "Bind current") binds the current window's conversation.
-  const [binds, setBinds] = useState<BindSlot[]>([]);
-  const [bindEdit, setBindEdit] = useState<Record<number, string>>({});
+  // FP-4b M4 (§3.2): the three per-key chat NUMBERS (K1-K3). Each key fires
+  // Alt+<number> to jump to that chat (client-side, no reload). Loaded via
+  // kc_bind_get on mount; changing a key's number calls kc_bind_set(slot, n).
+  const [binds, setBinds] = useState<ChatNumbers>([]);
   const [bindError, setBindError] = useState("");
   const [bindBusy, setBindBusy] = useState(false);
 
@@ -207,10 +201,11 @@ function App() {
     setStatus((s) => ({ ...s, control_enabled: enabled }));
   }
 
-  async function selectVoiceEngine(engine: "system" | "third_party") {
-    setVoiceEngine(engine);
-    // Only pushes to the board when connected; ignore the "not connected" error.
-    await invoke("send_config", { voiceEngine: engine }).catch(() => undefined);
+  async function selectVoiceSource(source: "cloud" | "system") {
+    setVoiceSource(source);
+    // set_voice_source updates companion state AND mirrors the choice to the
+    // board via a config frame. Ignore the "not connected" error when offline.
+    await invoke("set_voice_source", { source }).catch(() => undefined);
   }
 
   // ── FP-4 Kiro Crew session control (route A) ──────────────────────────────
@@ -317,10 +312,10 @@ function App() {
     setLcResult(`chord: ${name}`);
   }
 
-  // ── FP-4b M4: per-conversation bind slots (§3.2) ──────────────────────────
+  // ── FP-4b M4: per-key chat numbers (§3.2) ─────────────────────────────────
   // Arg names match the #[tauri::command] signatures in src-tauri/src/lib.rs:
-  //   kc_bind_get() -> Slot[]        kc_bind_set(slot, label?, url?)
-  //   kc_bind_clear(slot)            kc_bind_current(slot)
+  //   kc_bind_get() -> number[]      kc_bind_set(slot, number)
+  //   kc_bind_clear(slot)
   async function runBind(action: () => Promise<void>) {
     setBindBusy(true);
     try {
@@ -334,37 +329,18 @@ function App() {
   }
 
   async function refreshBinds() {
-    setBinds(await invoke<BindSlot[]>("kc_bind_get"));
+    setBinds(await invoke<ChatNumbers>("kc_bind_get"));
   }
 
-  async function bindSet(slot: number) {
-    const title = (bindEdit[slot] || "").trim();
-    if (!title) {
-      setBindError(`Enter a conversation title for slot ${slot} before Set.`);
-      return;
-    }
-    // Title-primary: store the conversation title as the label (client-side
-    // command-bar focus, no reload). url stays null unless the manual fallback
-    // is used. A pasted /chat/<slug> URL still works — the backend keeps it as
-    // the url fallback and derives the label from the slug.
-    const looksLikeUrl = title.includes("/chat/");
-    await invoke("kc_bind_set", {
-      slot,
-      label: looksLikeUrl ? null : title,
-      url: looksLikeUrl ? title : null,
-    });
+  // Set slot `slot` (1-based) to chat `number` (1..9).
+  async function bindSet(slot: number, number: number) {
+    await invoke("kc_bind_set", { slot, number });
     await refreshBinds();
   }
 
+  // Reset slot `slot` to its default number (slot index+1: K1->1, K2->2, K3->3).
   async function bindClear(slot: number) {
     await invoke("kc_bind_clear", { slot });
-    setBindEdit((prev) => ({ ...prev, [slot]: "" }));
-    await refreshBinds();
-  }
-
-  async function bindCurrent(slot: number) {
-    // Mirrors a physical long-press: capture the focused window's title and bind.
-    await invoke("kc_bind_current", { slot });
     await refreshBinds();
   }
 
@@ -434,6 +410,13 @@ function App() {
       setKcStatuses((prev) => ({ ...prev, [s.session_id]: s }));
     });
 
+    // The board reports its current voice routing (cloud/system) on change and
+    // on hello — reflect a board-side switch in the selector.
+    const unlistenVoiceSource = listen<string>("voice-source", (event) => {
+      const src = event.payload === "cloud" ? "cloud" : "system";
+      setVoiceSource(src);
+    });
+
     // Recover the sink token/running state on mount (survives a UI reload).
     invoke<string>("status_token")
       .then((token) => {
@@ -444,8 +427,8 @@ function App() {
       })
       .catch(() => undefined);
 
-    // Load the persisted M4 bind slots on mount.
-    invoke<BindSlot[]>("kc_bind_get")
+    // Load the persisted M4 per-key chat numbers on mount.
+    invoke<ChatNumbers>("kc_bind_get")
       .then(setBinds)
       .catch(() => undefined);
 
@@ -454,6 +437,7 @@ function App() {
       unlistenLog.then((fn) => fn());
       unlistenBoard.then((fn) => fn());
       unlistenStatus.then((fn) => fn());
+      unlistenVoiceSource.then((fn) => fn());
     };
   }, []);
 
@@ -587,24 +571,27 @@ function App() {
               <button className="secondary" onClick={() => runAction(refreshRuntime)}>Refresh</button>
             </div>
 
-            <label>Voice engine</label>
+            <label>Voice recognition path</label>
             <div className="actions" style={{ marginTop: 6 }}>
               <button
-                className={voiceEngine === "system" ? "" : "secondary"}
-                onClick={() => runAction(() => selectVoiceEngine("system"))}
+                className={voiceSource === "cloud" ? "" : "secondary"}
+                onClick={() => runAction(() => selectVoiceSource("cloud"))}
               >
-                System (Windows ASR)
+                Board cloud ASR
               </button>
               <button
-                className={voiceEngine === "third_party" ? "" : "secondary"}
-                onClick={() => runAction(() => selectVoiceEngine("third_party"))}
+                className={voiceSource === "system" ? "" : "secondary"}
+                onClick={() => runAction(() => selectVoiceSource("system"))}
               >
-                Third-party ASR
+                PC system ASR
               </button>
             </div>
             <p className="hint">
-              Phase 1 uses the Windows system recognizer. The choice is pushed to the board as a
-              <code> config </code> frame when connected.
+              <strong>Board cloud ASR</strong>: the board mic feeds Tuya cloud ASR; recognized text
+              returns as an <code>asr</code> frame. <strong>PC system ASR</strong>: a K4 press sends
+              <code> voice.start</code> and the companion activates Windows dictation (Win+H). The
+              choice is mirrored to the board (and the board can switch it too — this reflects the
+              board's reported path).
             </p>
           </Panel>
         )}
@@ -681,54 +668,46 @@ function App() {
 
         {activeView === "kirocrew" && (
           <>
-            <Panel title="Bindings — K1–K3 conversations (§3.2)">
+            <Panel title="Bindings — K1–K3 jump-to-chat number (§3.2)">
               <p className="hint">
-                Bind a specific Kiro Crew <strong>conversation</strong> to each slot key by its
-                <strong> title</strong>. <strong>Short-press</strong> a board key (K1–K3) to focus
-                its conversation via the <strong>client-side Command Bar</strong> (typed by title —
-                <em> no page reload</em>, unlike address-bar navigation which reloads the SPA);
-                <strong> long-press</strong> to bind the current conversation (its window title is
-                captured and stripped). An empty slot's short-press creates a new chat. A
-                <code> /chat/&lt;slug&gt;</code> URL is still accepted as a manual navigate fallback.
-                Requires <em>Bind window</em> below to be set.
+                Bind each slot key (K1–K3) to a Kiro Crew <strong>chat number</strong> (1–9).
+                Pressing the board key fires <code>Alt+&lt;number&gt;</code> — Kiro Crew's
+                <em> "Jump to chat N"</em> shortcut — switching to that chat <strong>client-side,
+                with no page reload</strong>. The number is configurable per key. Requires
+                <em> Local Control</em> below to be bound to a Kiro Crew window and control enabled.
               </p>
 
               {[1, 2, 3].map((slot) => {
-                const s = binds[slot - 1];
-                const bound = !!(s && ((s.label && s.label.trim()) || (s.url && s.url.trim())));
+                const n = binds[slot - 1];
                 return (
                   <div key={slot} style={{ marginTop: slot === 1 ? 6 : 16 }}>
                     <div className="lcd">
                       <span>{`K${slot}`}</span>
-                      <strong className={bound ? "good-text" : ""}>
-                        {bound ? (s?.label || s?.url) : "-- (unbound → new chat)"}
+                      <strong className="good-text">
+                        {n ? `Alt+${n} (jump to chat ${n})` : "--"}
                       </strong>
                     </div>
-                    <input
-                      style={{ marginTop: 6 }}
-                      value={bindEdit[slot] ?? (s?.label ?? s?.url ?? "")}
-                      onChange={(event) =>
-                        setBindEdit((prev) => ({ ...prev, [slot]: event.target.value }))
-                      }
-                      placeholder="Conversation title (or a /chat/<slug> URL for manual fallback)"
-                    />
-                    <div className="actions" style={{ marginTop: 6, flexWrap: "wrap" }}>
-                      <button disabled={bindBusy} onClick={() => runBind(() => bindSet(slot))}>
-                        Set
-                      </button>
+                    <div className="actions" style={{ marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                      <label style={{ margin: 0 }}>Chat number</label>
+                      <select
+                        value={n ?? ""}
+                        disabled={bindBusy}
+                        onChange={(event) =>
+                          runBind(() => bindSet(slot, Number(event.target.value)))
+                        }
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                          <option key={num} value={num}>
+                            {num}
+                          </option>
+                        ))}
+                      </select>
                       <button
                         className="secondary"
                         disabled={bindBusy}
-                        onClick={() => runBind(() => bindCurrent(slot))}
-                      >
-                        Bind current
-                      </button>
-                      <button
-                        className="secondary"
-                        disabled={bindBusy || !bound}
                         onClick={() => runBind(() => bindClear(slot))}
                       >
-                        Clear
+                        Reset to {slot}
                       </button>
                     </div>
                   </div>
