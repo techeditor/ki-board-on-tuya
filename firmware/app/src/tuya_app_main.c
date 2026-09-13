@@ -57,6 +57,9 @@
 static THREAD_HANDLE  s_app_thread = NULL;
 static uint32_t       s_sequence   = 0;
 static ak_rx_reader_t s_rx;
+/* UART/USB: set once the PC companion greets (hello -> we answer hello_ack), so
+ * the header can show "USB Connected" vs "USB Disconnected". */
+static bool s_pc_connected = false;
 
 static void transport_write_frame(const char *frame, int length)
 {
@@ -156,25 +159,30 @@ static void ak_status_wrap(uint16_t x, uint16_t y, const char *s, uint16_t fg, u
 }
 
 /* Compose the connection-status header text + color for the title bar.
- * UART is physically up as soon as it opens (green "LINK: USB"). BLE reflects
- * the live link state: ADVERTISING (orange) -> CONNECTED (blue) -> LIVE (green).
- * `out` must hold at least 24 bytes. Returns the title-bar color. */
+ * Header reads "Companion: <state>". USB reflects whether the PC companion has
+ * greeted (Connected green / Disconnected orange). BLE reflects the live link
+ * state: ADVERTISING (orange) -> CONNECTED (blue) -> LIVE (green).
+ * `out` must hold at least 28 bytes. Returns the title-bar color. */
 static uint16_t ak_link_header(char *out, uint32_t out_len)
 {
 #if AK_TRANSPORT_UART
-    (void)snprintf(out, out_len, "LINK: USB");
-    return AK_COL_GREEN;
+    if (s_pc_connected) {
+        (void)snprintf(out, out_len, "Companion: USB Connected");
+        return AK_COL_GREEN;
+    }
+    (void)snprintf(out, out_len, "Companion: USB Disconnected");
+    return AK_COL_ORANGE;
 #else
     switch (ak_ble_gatt_link_state()) {
     case AK_BLE_LINK_LIVE:
-        (void)snprintf(out, out_len, "LINK: BLE LIVE");
+        (void)snprintf(out, out_len, "Companion: BLE LIVE");
         return AK_COL_GREEN;
     case AK_BLE_LINK_CONNECTED:
-        (void)snprintf(out, out_len, "LINK: BLE CONN");
+        (void)snprintf(out, out_len, "Companion: BLE CONN");
         return AK_COL_DKBLUE;
     case AK_BLE_LINK_ADVERTISING:
     default:
-        (void)snprintf(out, out_len, "LINK: BLE ADV");
+        (void)snprintf(out, out_len, "Companion: BLE ADV");
         return AK_COL_ORANGE;
     }
 #endif
@@ -187,7 +195,7 @@ static void ak_render_status(const char *agent, const char *state, const char *t
     if (!ak_statuslcd_ready()) {
         return;
     }
-    char     header[24];
+    char     header[32];
     uint16_t link_color = ak_link_header(header, sizeof(header));
     char     line[48];
 
@@ -222,6 +230,13 @@ static void on_rx_line(const char *line)
     }
     if (strcmp(type, "hello") == 0) {
         send_hello_ack();
+        /* The PC companion has greeted -> mark USB link up and refresh header. */
+        if (!s_pc_connected) {
+            s_pc_connected = true;
+#if AK_ENABLE_DISPLAY
+            ak_refresh_link_header();
+#endif
+        }
     } else if (strcmp(type, "ping") == 0) {
         send_pong();
     } else if (strcmp(type, "config") == 0) {
