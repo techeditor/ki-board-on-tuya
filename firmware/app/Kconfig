@@ -1,0 +1,17 @@
+menu "configure app (Agentic Keyboard) "
+
+# Transport backend selection (mechanism A). A build profile under config/
+# sets exactly one of these = y; CMakeLists.txt translates the chosen symbol
+# into the app-level -DAK_TRANSPORT_* macro that ak_features.h switches on.
+# Default (none set) -> ak_features.h falls back to the UART transport.
+config AK_TRANSPORT_BLE_GATT
+    bool "Use the BLE GATT transport backend (JSONL over service 0x1910)"
+    default n
+    select ENABLE_BLUETOOTH
+
+config AK_TRANSPORT_BLE_HID
+    bool "Use the BLE HID transport backend (standard keyboard, no JSONL)"
+    default n
+    select ENABLE_BLUETOOTH
+
+endmenu

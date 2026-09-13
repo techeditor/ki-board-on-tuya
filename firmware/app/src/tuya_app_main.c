@@ -31,8 +31,20 @@
 #define ak_transport_write ak_uart_write
 #define ak_transport_read  ak_uart_read
 #define AK_TRANSPORT_NAME  "uart"
+#elif AK_TRANSPORT_BLE_GATT
+#include "ak_ble_gatt.h"
+#define ak_transport_init               ak_ble_gatt_init
+#define ak_transport_write              ak_ble_gatt_write
+#define ak_transport_read               ak_ble_gatt_read
+#define AK_TRANSPORT_NAME               "ble_gatt"
+/* BLE greets on notify-subscribe, not at init (see ak_ble_gatt_take_greet). */
+#define AK_TRANSPORT_GREET_ON_SUBSCRIBE 1
 #else
-#error "Only the UART transport backend is implemented so far"
+#error "Select exactly one AK_TRANSPORT_* backend in the build profile"
+#endif
+
+#ifndef AK_TRANSPORT_GREET_ON_SUBSCRIBE
+#define AK_TRANSPORT_GREET_ON_SUBSCRIBE 0
 #endif
 
 #define APP_TASK_STACK_SIZE   (5U * 1024U)
@@ -138,8 +150,12 @@ static void user_main(void)
     PR_NOTICE("======== Agentic Keyboard for Kiro: product fw %s ========", APP_FW_VERSION);
     PR_NOTICE("Board: expansion baseboard v1.2 (WS2812=P%u/SPI1, LCD_BL=P%u)", (unsigned)AK_WS2812_DATA_PIN,
               (unsigned)AK_LCD_BACKLIGHT_PIN);
+#if AK_TRANSPORT_UART
     PR_NOTICE("Transport: %s (UART%u RX=P%u TX=P%u @%u 8N1)", AK_TRANSPORT_NAME, (unsigned)AK_UART_PORT,
               (unsigned)AK_UART_RX_PIN, (unsigned)AK_UART_TX_PIN, (unsigned)AK_UART_BAUDRATE);
+#else
+    PR_NOTICE("Transport: %s (BLE GATT peripheral, service 0x1910)", AK_TRANSPORT_NAME);
+#endif
     PR_NOTICE("Inputs: 5 keys + 5-way nav, debounce=%ums long=%ums", (unsigned)AK_FSM_DEBOUNCE_MS,
               (unsigned)AK_FSM_LONG_PRESS_MS);
 
@@ -165,11 +181,24 @@ static void user_main(void)
     last_heartbeat = now;
 
     ak_rx_reader_init(&s_rx);
+#if !AK_TRANSPORT_GREET_ON_SUBSCRIBE
+    /* Wired transports are up as soon as init returns: greet immediately. */
     send_hello_ack();
+#else
+    /* BLE greets on notify-subscribe instead (polled in the loop below). */
+    PR_NOTICE("Transport is BLE; hello_ack deferred until notify-subscribe");
+#endif
     PR_NOTICE("Firmware ready; scanning inputs, heartbeat every %ums", HEARTBEAT_INTERVAL_MS);
 
     while (1) {
         now = tal_system_get_millisecond();
+
+#if AK_TRANSPORT_GREET_ON_SUBSCRIBE
+        /* When a central subscribes to notifications, the link is live: greet. */
+        if (ak_ble_gatt_take_greet()) {
+            send_hello_ack();
+        }
+#endif
 
         ak_input_poll(now, on_input_event);
 

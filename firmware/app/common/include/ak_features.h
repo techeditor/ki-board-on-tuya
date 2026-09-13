@@ -10,7 +10,10 @@
  *
  * Defaults below describe the phase-1 wired variant (v1_uart): UART transport,
  * voice handled PC-side by the Companion (Windows ASR), so the board-side cloud
- * ASR module is off. A build profile overrides these via CONFIG_* / -D flags.
+ * ASR module is off. A build profile overrides these via CONFIG_* / -D flags:
+ * config/TUYA_T5AI_CORE_ble.config sets CONFIG_AK_TRANSPORT_BLE_GATT=y, which
+ * CMakeLists.txt translates into -DAK_TRANSPORT_UART=0 -DAK_TRANSPORT_BLE_GATT=1
+ * (the #ifndef guards below then leave those -D values in place).
  */
 
 #ifndef AK_FEATURES_H

@@ -1,0 +1,189 @@
+/**
+ * @file ak_ble_gatt.c
+ * @brief BLE GATT transport backend for the Agentic Keyboard product firmware.
+ *
+ * See ak_ble_gatt.h. Ported from the real-hardware-verified FP-2
+ * ble_gatt_link probe (firmware/feature-probes/ble_gatt_link):
+ *
+ *   - advertise local name "AK-KB" + 16-bit service UUID 0x1910,
+ *   - use Tuya's built-in BLE common service (chars 0x2B10 notify / 0x2B11 write),
+ *   - NOTIFY JSONL frames via tal_ble_server_common_send() only while subscribed,
+ *   - receive companion writes in TAL_BLE_EVT_WRITE_REQ -> write_report.report
+ *     and push them into an internal RX ring the app drains via ak_ble_gatt_read.
+ *
+ * The event callback runs in the BLE stack context; the app main loop calls
+ * ak_ble_gatt_read()/ak_ble_gatt_write() from its own thread, so the RX ring
+ * head/tail are the only shared state. On this single-core target the ring is
+ * a lock-free SPSC buffer (callback = producer, app loop = consumer) with
+ * volatile indices; a byte lost under a simultaneous wrap is tolerable for a
+ * best-effort link and never corrupts the buffer structure.
+ */
+
+#include "ak_ble_gatt.h"
+
+#include <string.h>
+
+#include "tal_api.h"
+#include "tal_bluetooth.h"
+
+#define BLE_NAME   "AK-KB"
+#define SERVER_MTU 247U
+
+/* RX ring buffer: companion writes (0x2B11) land here for ak_ble_gatt_read.
+ * Power of two so the mask wraps cheaply. 512 comfortably holds several MTU
+ * writes of JSONL between app-loop drains (loop polls every ~5 ms). */
+#define RX_RING_SIZE 512U
+#define RX_RING_MASK (RX_RING_SIZE - 1U)
+
+static uint8_t           s_rx_ring[RX_RING_SIZE];
+static volatile uint32_t s_rx_head; /* producer (BLE event cb) writes here */
+static volatile uint32_t s_rx_tail; /* consumer (app loop) reads here */
+
+static bool                s_connected;
+static bool                s_subscribed;
+static volatile bool       s_greet_pending; /* set on subscribe, cleared by take_greet */
+static TAL_BLE_PEER_INFO_T s_peer;
+
+/* Advertising: flags + complete list of 16-bit service UUIDs (0x1910). */
+static uint8_t s_adv_data[] = {
+    0x02, 0x01, 0x06,       /* flags: LE General Discoverable, BR/EDR not supported */
+    0x03, 0x03, 0x10, 0x19, /* complete list of 16-bit service UUIDs: 0x1910 */
+};
+
+/* Scan response: complete local name "AK-KB". */
+static uint8_t s_scan_rsp[] = {
+    0x06, 0x09, 'A', 'K', '-', 'K', 'B',
+};
+
+/* ------------------------------------------------------------ RX ring */
+
+static void rx_ring_push(const uint8_t *data, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t next = (s_rx_head + 1U) & RX_RING_MASK;
+        if (next == (s_rx_tail & RX_RING_MASK)) {
+            /* Full: drop the oldest byte to keep accepting the newest data. */
+            s_rx_tail = (s_rx_tail + 1U) & RX_RING_MASK;
+        }
+        s_rx_ring[s_rx_head & RX_RING_MASK] = data[i];
+        s_rx_head                           = next;
+    }
+}
+
+/* ------------------------------------------------------------ advertising */
+
+static void start_advertising(void)
+{
+    TAL_BLE_DATA_T adv = {.len = sizeof(s_adv_data), .p_data = s_adv_data};
+    TAL_BLE_DATA_T rsp = {.len = sizeof(s_scan_rsp), .p_data = s_scan_rsp};
+    tal_ble_advertising_data_set(&adv, &rsp);
+    tal_ble_advertising_start(TUYAOS_BLE_DEFAULT_ADV_PARAM);
+}
+
+/* ------------------------------------------------------------ BLE events */
+
+static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
+{
+    if (event == NULL) {
+        return;
+    }
+
+    switch (event->type) {
+    case TAL_BLE_STACK_INIT:
+        if (event->ble_event.init == 0) {
+            start_advertising();
+            PR_NOTICE("BLE ready, advertising as %s", BLE_NAME);
+        } else {
+            PR_ERR("BLE init failed: %d", event->ble_event.init);
+        }
+        break;
+
+    case TAL_BLE_EVT_PERIPHERAL_CONNECT:
+        s_peer      = event->ble_event.connect.peer;
+        s_connected = true;
+        PR_NOTICE("BLE central connected (result %d)", event->ble_event.connect.result);
+        break;
+
+    case TAL_BLE_EVT_MTU_REQUEST:
+        tal_ble_server_exchange_mtu_reply(s_peer, SERVER_MTU);
+        break;
+
+    case TAL_BLE_EVT_SUBSCRIBE:
+        s_subscribed = event->ble_event.subscribe.cur_notify ? true : false;
+        if (s_subscribed) {
+            /* Greet on subscribe, not at init: latch for the app to send hello_ack. */
+            s_greet_pending = true;
+            PR_NOTICE("BLE notify subscribed; hello_ack pending");
+        }
+        break;
+
+    case TAL_BLE_EVT_WRITE_REQ: {
+        TAL_BLE_DATA_T *rx = &event->ble_event.write_report.report;
+        if (rx->p_data != NULL && rx->len > 0) {
+            rx_ring_push(rx->p_data, rx->len);
+        }
+        break;
+    }
+
+    case TAL_BLE_EVT_DISCONNECT:
+        s_connected  = false;
+        s_subscribed = false;
+        PR_NOTICE("BLE disconnected (reason 0x%02X); re-advertising", (unsigned)event->ble_event.disconnect.reason);
+        start_advertising();
+        break;
+
+    default:
+        break;
+    }
+}
+
+/* ------------------------------------------------------------ interface */
+
+OPERATE_RET ak_ble_gatt_init(void)
+{
+    s_rx_head       = 0;
+    s_rx_tail       = 0;
+    s_connected     = false;
+    s_subscribed    = false;
+    s_greet_pending = false;
+
+    return tal_ble_bt_init(TAL_BLE_ROLE_PERIPERAL, ble_event_cb);
+}
+
+int ak_ble_gatt_read(uint8_t *data, uint32_t length)
+{
+    if (data == NULL || length == 0) {
+        return 0;
+    }
+    uint32_t n = 0;
+    while (n < length && (s_rx_tail & RX_RING_MASK) != (s_rx_head & RX_RING_MASK)) {
+        data[n++] = s_rx_ring[s_rx_tail & RX_RING_MASK];
+        s_rx_tail = (s_rx_tail + 1U) & RX_RING_MASK;
+    }
+    return (int)n;
+}
+
+int ak_ble_gatt_write(const void *data, uint32_t length)
+{
+    if (data == NULL || length == 0) {
+        return 0;
+    }
+    if (!s_connected || !s_subscribed) {
+        /* No subscribed central: drop the frame (mirrors FP-2 emit_frame). */
+        return 0;
+    }
+    TAL_BLE_DATA_T d = {.len = (uint16_t)length, .p_data = (uint8_t *)data};
+    if (tal_ble_server_common_send(&d) == OPRT_OK) {
+        return (int)length;
+    }
+    return 0;
+}
+
+bool ak_ble_gatt_take_greet(void)
+{
+    if (s_greet_pending) {
+        s_greet_pending = false;
+        return true;
+    }
+    return false;
+}

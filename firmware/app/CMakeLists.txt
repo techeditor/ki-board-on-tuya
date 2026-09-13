@@ -10,6 +10,7 @@ set(AK_COMMON_PATH ${APP_PATH}/common)
 # Shared core sources compiled into every variant.
 set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_uart.c
+    ${AK_COMMON_PATH}/src/ak_ble_gatt.c
     ${AK_COMMON_PATH}/src/ak_input_fsm.c
     ${AK_COMMON_PATH}/src/ak_input.c
     ${AK_COMMON_PATH}/src/ak_protocol.c
@@ -32,3 +33,13 @@ target_include_directories(${EXAMPLE_LIB}
         ${APP_PATH}/include
         ${AK_COMMON_PATH}/include
 )
+
+# Transport backend selection (mechanism A). A build profile under config/
+# sets exactly one CONFIG_AK_TRANSPORT_* = y; translate it into the app-level
+# C macro that ak_features.h / tuya_app_main.c switch on. Absent any of these
+# (the default TUYA_T5AI_CORE.config), ak_features.h defaults to UART.
+if (CONFIG_AK_TRANSPORT_BLE_GATT STREQUAL "y")
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_TRANSPORT_UART=0 AK_TRANSPORT_BLE_GATT=1)
+elseif (CONFIG_AK_TRANSPORT_BLE_HID STREQUAL "y")
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_TRANSPORT_UART=0 AK_TRANSPORT_BLE_HID=1)
+endif()
