@@ -29,6 +29,19 @@ int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state)
                     (unsigned)seq, state);
 }
 
+int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text)
+{
+    return snprintf(buf, size, "{\"v\":1,\"seq\":%u,\"type\":\"asr\",\"payload\":{\"text\":\"%s\"}}\n",
+                    (unsigned)seq, text);
+}
+
+int ak_proto_voice_source(char *buf, size_t size, uint32_t seq, const char *source)
+{
+    return snprintf(buf, size,
+                    "{\"v\":1,\"seq\":%u,\"type\":\"voice_source\",\"payload\":{\"source\":\"%s\"}}\n",
+                    (unsigned)seq, source);
+}
+
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport)
 {
     return snprintf(buf, size,

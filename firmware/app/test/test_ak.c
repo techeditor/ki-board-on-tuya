@@ -142,6 +142,16 @@ static void test_protocol(void)
     ak_proto_ack(buf, sizeof(buf), 42);
     CHECK_STR(buf, "{\"v\":1,\"type\":\"ack\",\"payload\":{\"seq\":42}}\n", "ack frame");
 
+    ak_proto_asr(buf, sizeof(buf), 11, "hello world");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":11,\"type\":\"asr\",\"payload\":{\"text\":\"hello world\"}}\n",
+              "asr frame");
+
+    ak_proto_voice_source(buf, sizeof(buf), 12, "cloud");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":12,\"type\":\"voice_source\",\"payload\":{\"source\":\"cloud\"}}\n",
+              "voice_source frame");
+
     ak_proto_hello_ack(buf, sizeof(buf), "0.1.0", "uart");
     CHECK_STR(buf,
               "{\"v\":1,\"type\":\"hello_ack\",\"payload\":{\"fw\":\"0.1.0\",\"transport\":\"uart\","

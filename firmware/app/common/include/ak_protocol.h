@@ -17,6 +17,14 @@
 int ak_proto_key(char *buf, size_t size, uint32_t seq, const char *id, const char *action, uint32_t held_ms);
 int ak_proto_nav(char *buf, size_t size, uint32_t seq, const char *dir, const char *action, uint32_t held_ms);
 int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state);
+/* Board -> PC: recognized speech text from the board-side (Tuya cloud) ASR.
+   The PC forwards it to Kiro Crew. `text` must already be a JSON-safe ASCII
+   single line (caller sanitizes). */
+int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text);
+/* Board -> PC: report the board's CURRENT voice routing ("cloud" = board mic +
+   Tuya cloud ASR, "system" = PC's own ASR). Sent on change and on hello, so the
+   companion UI reflects a board-side switch. */
+int ak_proto_voice_source(char *buf, size_t size, uint32_t seq, const char *source);
 
 /* Handshake / heartbeat. */
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport);

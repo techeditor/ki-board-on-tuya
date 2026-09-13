@@ -19,6 +19,7 @@
 #include "ak_board_io.h"
 #include "ak_display.h"
 #include "ak_features.h"
+#include "ak_asr.h"
 #include "ak_input.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
@@ -107,6 +108,23 @@ static ak_rx_reader_t s_rx;
  * the header can show "USB Connected" vs "USB Disconnected". */
 static bool s_pc_connected = false;
 
+/* Which ASR path a K4 (PTT) press uses. "system" = board only emits
+ * voice.start; the PC companion runs its own ASR (Win+H). "cloud" = board mic +
+ * Tuya cloud ASR (requires AK_ASR_BOARD_CLOUD + authorized/networked device).
+ * Selectable from EITHER end: the PC pushes a `config` frame, or the board
+ * toggles locally and reports a `voice_source` frame. Defaults to system since
+ * the cloud backend is a compile-time option that is off by default. */
+typedef enum { AK_VOICE_SYSTEM = 0, AK_VOICE_CLOUD } ak_voice_source_t;
+static ak_voice_source_t s_voice_source = AK_VOICE_SYSTEM;
+
+/* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
+#define AK_PTT_KEY_ID "k4"
+
+static const char *ak_voice_source_str(ak_voice_source_t s)
+{
+    return (s == AK_VOICE_CLOUD) ? "cloud" : "system";
+}
+
 static void transport_write_frame(const char *frame, int length)
 {
     if (length <= 0 || length >= (int)FRAME_BUFFER_SIZE) {
@@ -117,6 +135,11 @@ static void transport_write_frame(const char *frame, int length)
         PR_WARN("transport short write: %d/%d", written, length);
     }
 }
+
+/* Forward declarations: PTT / voice helpers are defined below but referenced by
+ * on_input_event and send_hello_ack above them. */
+static void on_ptt_edge(bool pressed);
+static void send_voice_source(void);
 
 /* Input event -> key/nav JSONL frame on the active transport. */
 static void on_input_event(ak_input_kind_t kind, const char *id, ak_input_event_t event, uint32_t held_ms)
@@ -133,6 +156,16 @@ static void on_input_event(ak_input_kind_t kind, const char *id, ak_input_event_
     }
     transport_write_frame(frame, length);
     PR_DEBUG("input %s %s held=%ums", id, action, held_ms);
+
+    /* K4 = push-to-talk: drive the selected voice path on the press/release
+     * edge (in addition to the raw key frame the companion INPUT view uses). */
+    if (kind == AK_INPUT_KIND_KEY && strcmp(id, AK_PTT_KEY_ID) == 0) {
+        if (event == AK_INPUT_EVENT_DOWN) {
+            on_ptt_edge(true);
+        } else if (event == AK_INPUT_EVENT_UP) {
+            on_ptt_edge(false);
+        }
+    }
 }
 
 static void send_hello_ack(void)
@@ -140,6 +173,57 @@ static void send_hello_ack(void)
     char frame[FRAME_BUFFER_SIZE];
     int  length = ak_proto_hello_ack(frame, sizeof(frame), APP_FW_VERSION, AK_TRANSPORT_NAME);
     transport_write_frame(frame, length);
+    /* Follow the greeting with the current voice routing so the companion UI
+     * reflects the board's state as soon as a link comes up. */
+    send_voice_source();
+}
+
+/* Emit a voice.start / voice.stop edge (PC companion runs its own ASR). */
+static void send_voice(const char *state)
+{
+    char frame[FRAME_BUFFER_SIZE];
+    s_sequence++;
+    transport_write_frame(frame, ak_proto_voice(frame, sizeof(frame), s_sequence, state));
+}
+
+/* Report the board's current voice routing so the companion UI reflects it. */
+static void send_voice_source(void)
+{
+    char frame[FRAME_BUFFER_SIZE];
+    s_sequence++;
+    transport_write_frame(frame,
+                          ak_proto_voice_source(frame, sizeof(frame), s_sequence,
+                                                ak_voice_source_str(s_voice_source)));
+}
+
+/* Cloud-ASR result callback: forward recognized text to the PC as an `asr`
+ * frame. Registered with ak_asr_init; a no-op path when the stub is compiled. */
+static void on_asr_text(const char *text)
+{
+    char frame[FRAME_BUFFER_SIZE];
+    if (text == NULL || text[0] == '\0') {
+        return;
+    }
+    s_sequence++;
+    transport_write_frame(frame, ak_proto_asr(frame, sizeof(frame), s_sequence, text));
+}
+
+/* A K4 (PTT) edge -> drive the selected voice path. On the cloud route the
+ * board runs its own capture (when the backend is available); otherwise it
+ * emits voice.start/stop so the PC companion activates its own ASR. */
+static void on_ptt_edge(bool pressed)
+{
+    if (s_voice_source == AK_VOICE_CLOUD && ak_asr_available()) {
+        if (pressed) {
+            ak_asr_start();
+        } else {
+            ak_asr_stop();
+        }
+        return;
+    }
+    /* System route (or cloud selected but backend not compiled/ready): tell the
+     * PC to start/stop its own dictation on the press/release edge. */
+    send_voice(pressed ? "start" : "stop");
 }
 
 static void send_heartbeat(uint32_t uptime_ms)
@@ -261,7 +345,10 @@ static void ak_render_status(const char *agent, const char *state, const char *t
     ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 2, line, AK_COL_WHITE, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), "state: %s", state[0] ? state : "-");
     ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 16, line, ak_status_color(state), AK_COL_BLACK, 1);
-    ak_status_wrap(6, AK_STATUSLCD_CONTENT_Y + 34, text, AK_COL_YELLOW, 14);
+    (void)snprintf(line, sizeof(line), "voice: %s%s", ak_voice_source_str(s_voice_source),
+                   (s_voice_source == AK_VOICE_CLOUD && !ak_asr_available()) ? " (stub)" : "");
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 30, line, AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_status_wrap(6, AK_STATUSLCD_CONTENT_Y + 46, text, AK_COL_YELLOW, 13);
     ak_statuslcd_flush();
 }
 
@@ -298,6 +385,22 @@ static void on_rx_line(const char *line)
     } else if (strcmp(type, "config") == 0) {
         uint32_t seq = 0;
         ak_json_uint(line, "seq", &seq);
+        /* The PC selects the voice path here: {"voice_engine":"cloud"|"system"}
+         * (the companion mirrors its choice to the board via config). */
+        char engine[16] = "";
+        if (ak_json_str(line, "voice_engine", engine, sizeof(engine))) {
+            ak_voice_source_t want =
+                (strcmp(engine, "cloud") == 0) ? AK_VOICE_CLOUD : AK_VOICE_SYSTEM;
+            if (want != s_voice_source) {
+                s_voice_source = want;
+                PR_NOTICE("voice source -> %s (from PC config)", ak_voice_source_str(want));
+#if AK_ENABLE_DISPLAY
+                ak_refresh_link_header();
+#endif
+            }
+            /* Echo the resulting source so the UI reflects the applied value. */
+            send_voice_source();
+        }
         send_ack(seq);
     } else if (strcmp(type, "display") == 0) {
         char agent[32] = "";
@@ -347,6 +450,12 @@ static void user_main(void)
         PR_ERR("input init failed: %d", rt);
         return;
     }
+
+    /* Board-side cloud ASR backend (stub unless AK_ASR_BOARD_CLOUD is set).
+     * Registers the recognized-text callback that emits `asr` frames. */
+    ak_asr_init(on_asr_text);
+    PR_NOTICE("Voice source: %s (cloud backend %s)", ak_voice_source_str(s_voice_source),
+              ak_asr_available() ? "ready" : "stub/off");
 
 #if AK_ENABLE_DISPLAY
     /* Status LCD (shared ak_statuslcd + ak_gfx, no LVGL): renders Kiro Crew

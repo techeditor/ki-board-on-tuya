@@ -11,6 +11,7 @@ set(AK_COMMON_PATH ${APP_PATH}/common)
 set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_uart.c
     ${AK_COMMON_PATH}/src/ak_ble_gatt.c
+    ${AK_COMMON_PATH}/src/ak_asr.c
     ${AK_COMMON_PATH}/src/ak_input_fsm.c
     ${AK_COMMON_PATH}/src/ak_input.c
     ${AK_COMMON_PATH}/src/ak_protocol.c
