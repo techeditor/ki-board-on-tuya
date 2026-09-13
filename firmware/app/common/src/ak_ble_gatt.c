@@ -26,8 +26,9 @@
 #include "tal_api.h"
 #include "tal_bluetooth.h"
 
-#define BLE_NAME   "AK-KB"
-#define SERVER_MTU 247U
+#define BLE_NAME                 "AK-KB"
+#define SERVER_MTU               247U
+#define ADV_MAINTAIN_INTERVAL_MS 1000U
 
 /* RX ring buffer: companion writes (0x2B11) land here for ak_ble_gatt_read.
  * Power of two so the mask wraps cheaply. 512 comfortably holds several MTU
@@ -41,6 +42,7 @@ static volatile uint32_t s_rx_tail; /* consumer (app loop) reads here */
 
 static bool                s_connected;
 static bool                s_subscribed;
+static uint32_t            s_last_adv_maintain_ms;
 static volatile bool       s_greet_pending; /* set on subscribe, cleared by take_greet */
 static TAL_BLE_PEER_INFO_T s_peer;
 
@@ -76,8 +78,10 @@ static void start_advertising(void)
 {
     TAL_BLE_DATA_T adv = {.len = sizeof(s_adv_data), .p_data = s_adv_data};
     TAL_BLE_DATA_T rsp = {.len = sizeof(s_scan_rsp), .p_data = s_scan_rsp};
-    tal_ble_advertising_data_set(&adv, &rsp);
-    tal_ble_advertising_start(TUYAOS_BLE_DEFAULT_ADV_PARAM);
+    /* update works both while another advertiser is active and while stopped;
+     * data_set alone may fail to replace Tuya's already-running advertisement. */
+    (void)tal_ble_advertising_data_update(&adv, &rsp);
+    (void)tal_ble_advertising_start(TUYAOS_BLE_DEFAULT_ADV_PARAM);
 }
 
 /* ------------------------------------------------------------ BLE events */
@@ -143,11 +147,25 @@ OPERATE_RET ak_ble_gatt_init(void)
 {
     s_rx_head       = 0;
     s_rx_tail       = 0;
-    s_connected     = false;
-    s_subscribed    = false;
-    s_greet_pending = false;
+    s_connected             = false;
+    s_subscribed            = false;
+    s_last_adv_maintain_ms  = 0;
+    s_greet_pending         = false;
 
     return tal_ble_bt_init(TAL_BLE_ROLE_PERIPERAL, ble_event_cb);
+}
+
+void ak_ble_gatt_maintain(uint32_t now_ms)
+{
+    if (s_connected || (uint32_t)(now_ms - s_last_adv_maintain_ms) < ADV_MAINTAIN_INTERVAL_MS) {
+        return;
+    }
+    s_last_adv_maintain_ms = now_ms;
+
+    /* netmgr's Tuya BLE monitor stops advertising once MQTT connects. Reapply
+     * our data and start here; start is intentionally best-effort because an
+     * already-running advertiser is the desired state on some BLE ports. */
+    start_advertising();
 }
 
 int ak_ble_gatt_read(uint8_t *data, uint32_t length)

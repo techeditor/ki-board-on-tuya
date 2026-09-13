@@ -10,16 +10,17 @@
 #include "ak_cloud.h"
 
 #include "ak_features.h"
+#include "ak_reset_netcfg.h"
 #include "tal_api.h"
 
 #if AK_ASR_BOARD_CLOUD
 
 /* ── Real backend (Tuya IoT client + netmgr) ────────────────────────────────
  * Ported from firmware/feature-probes/tuya_cloud_asr/src/tuya_main.c. Only the
- * IoT bring-up is ported here; capture (K4 push-to-talk) is driven by ak_asr.c
- * via tuya_ai_input_start/stop, and the recognized-text -> `asr` frame path is
- * ak_asr.c's on_text callback (registered by tuya_app_main). No ai_chat_button
- * device is registered — K4 stays owned by ak_input. */
+ * IoT bring-up is ported here; K4 capture is routed by the app through the
+ * official HOLD mode events in ak_asr.c, and recognized text reaches the app
+ * through ak_asr.c's callback. K4 remains owned by ak_input so system/cloud
+ * routing stays dynamic and no unconditional cloud hardware button is added. */
 
 #include "tuya_iot.h"
 #include "tuya_iot_dp.h"
@@ -31,6 +32,7 @@
 #endif
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
 #include "netconn_wifi.h"
+#include "tkl_wifi.h"
 #endif
 
 /* License + PID wiring. The real UUID/AuthKey/PID live in the GITIGNORED header
@@ -119,6 +121,13 @@ OPERATE_RET ak_cloud_init(void)
     tal_time_service_init();
     tuya_authorize_init();
 
+    /* FP-3 recovery path: three resets inside five seconds clear only Tuya
+     * activation/network data. UUID/AuthKey authorization is stored separately. */
+    rt = ak_reset_netcfg_start();
+    if (rt != OPRT_OK) {
+        PR_WARN("cloud: netcfg reset counter start failed: %d", rt);
+    }
+
     /* Prefer a flashed License; fall back to the compile-time OPENSDK values. */
     if (OPRT_OK != tuya_authorize_read(&s_license)) {
         s_license.uuid    = TUYA_OPENSDK_UUID;
@@ -150,8 +159,16 @@ OPERATE_RET ak_cloud_init(void)
 #endif
     netmgr_init(type);
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
+#if AK_TRANSPORT_BLE_GATT
+    /* TAL exposes one BLE callback/advertiser. Tuya BLE netcfg and AK JSONL GATT
+     * cannot own it simultaneously, so cloud+AK builds pair through the official
+     * SoftAP netcfg path while BLE remains dedicated to the companion. */
+    netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_NETCFG,
+                    &(netcfg_args_t){.type = NETCFG_TUYA_WIFI_AP});
+#else
     netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_NETCFG,
                     &(netcfg_args_t){.type = NETCFG_TUYA_BLE | NETCFG_TUYA_WIFI_AP});
+#endif
 #endif
 
     s_iot_ready = true;
@@ -176,8 +193,15 @@ OPERATE_RET ak_cloud_init(void)
  * keepalive. Kept off the app's input/RX loop so key latency is unaffected. */
 static void __iot_task(void *arg)
 {
+    OPERATE_RET rt = OPRT_OK;
     (void)arg;
     tuya_iot_start(&s_ai_client);
+#if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
+    /* FP-3 keeps Wi-Fi fully awake unless its optional app_lowpower module is
+     * enabled; the product does not enable that module. */
+    tkl_wifi_set_lp_mode(0, 0);
+#endif
+    TUYA_CALL_ERR_LOG(ak_reset_netcfg_check());
     for (;;) {
         tuya_iot_yield(&s_ai_client);
     }

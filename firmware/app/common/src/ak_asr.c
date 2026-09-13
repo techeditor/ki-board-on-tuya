@@ -17,17 +17,18 @@
  * AI agent). Requires ENABLE_AI_COMPONENTS, Wi-Fi provisioning and a PID bound
  * to an AI agent.
  *
- * K4 stays owned by ak_input (no ai_chat button is registered): the app's
- * on_ptt_edge drives capture directly via tuya_ai_input_start/stop, so the same
- * physical key serves both the "system" (PC ASR) and "cloud" routes selected at
- * runtime. HOLD mode is still used for its MANUAL-VAD audio pipeline + event
- * stream; recognized text arrives on AI_USER_EVT_ASR_OK and is handed to
- * s_on_text as a NUL-terminated string. */
+ * K4 stays owned by ak_input (no ai_chat hardware button is registered). The
+ * app injects HOLD long-press/release events only when the selected route is
+ * cloud, preserving system-mode Windows dictation. HOLD itself owns codec/VAD
+ * capture and the cloud uploader; recognized text arrives on
+ * AI_USER_EVT_ASR_OK and is handed to s_on_text as a NUL-terminated string. */
 
 #include "ai_chat_main.h"
 #include "ai_user_event.h"
 #include "ai_audio_player.h"
+#include "ai_manage_mode.h"
 #include "netmgr.h"
+#include "tdl_button_manage.h"
 #include "tuya_ai_agent.h"
 
 #include <string.h>
@@ -122,11 +123,11 @@ OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error)
 
 bool ak_asr_available(void)
 {
-    /* Ready = ai_chat initialized AND the device is networked (cloud ASR needs
-     * the link up). Authorization is a prerequisite of a successful network
-     * connect, so netmgr LINK_UP implies an authorized, provisioned device. */
+    /* A Wi-Fi link alone is not enough: between association and MQTT/AI-agent
+     * initialization tuya_ai_input_start() silently does nothing. Only expose
+     * cloud routing after both the link and AI agent are ready. */
     netmgr_status_e st = NETMGR_LINK_DOWN;
-    if (!s_ai_ready) {
+    if (!s_ai_ready || !tuya_ai_agent_is_ready()) {
         return false;
     }
     netmgr_conn_get(NETCONN_AUTO, NETCONN_CMD_STATUS, &st);
@@ -135,25 +136,35 @@ bool ak_asr_available(void)
 
 void ak_asr_start(void)
 {
-    if (s_ai_ready) {
-#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
-        /* Long-press "start talking" prompt tone (长按提示音). In HOLD mode the SDK
-         * normally plays this from its own button/mode path (ai_chat_main); we drive
-         * capture manually via tuya_ai_input_start (to gate cloud vs system on K4),
-         * which bypasses that path — so play the alert here to match FP-3's UX. */
-        ai_audio_player_alert(AI_AUDIO_ALERT_LONG_KEY_TALK);
-#endif
-        /* Begin a capture (force=false: normal agent scode). Recognized text
-         * comes back later via __ai_event_cb / AI_USER_EVT_ASR_OK. */
-        tuya_ai_input_start(false);
+    if (!s_ai_ready || !tuya_ai_agent_is_ready()) {
+        return;
     }
+#if defined(ENABLE_BUTTON) && (ENABLE_BUTTON == 1)
+    /* Inject the same event FP-3's registered ai_chat_button emits. HOLD then
+     * transitions IDLE -> LISTEN, wakes the codec/VAD, and its VAD callback
+     * starts tuya_ai_input only after real microphone data can flow. */
+    OPERATE_RET rt = ai_mode_handle_key(TDL_BUTTON_LONG_PRESS_START, NULL);
+    if (rt != OPRT_OK) {
+        PR_ERR("ak_asr: HOLD long-press event failed: %d", rt);
+    }
+#else
+    PR_ERR("ak_asr: ENABLE_BUTTON is required for HOLD event injection");
+#endif
 }
 
 void ak_asr_stop(void)
 {
-    if (s_ai_ready) {
-        tuya_ai_input_stop();
+    if (!s_ai_ready) {
+        return;
     }
+#if defined(ENABLE_BUTTON) && (ENABLE_BUTTON == 1)
+    /* HOLD transitions LISTEN -> UPLOAD; that path disables VAD and ends the
+     * cloud input session after queued microphone frames are drained. */
+    OPERATE_RET rt = ai_mode_handle_key(TDL_BUTTON_PRESS_UP, NULL);
+    if (rt != OPRT_OK) {
+        PR_ERR("ak_asr: HOLD release event failed: %d", rt);
+    }
+#endif
 }
 
 #else /* !AK_ASR_BOARD_CLOUD — stub */

@@ -13,6 +13,7 @@ set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_ble_gatt.c
     ${AK_COMMON_PATH}/src/ak_asr.c
     ${AK_COMMON_PATH}/src/ak_cloud.c
+    ${AK_COMMON_PATH}/src/ak_reset_netcfg.c
     ${AK_COMMON_PATH}/src/ak_wifi.c
     ${AK_COMMON_PATH}/src/ak_input_fsm.c
     ${AK_COMMON_PATH}/src/ak_input.c

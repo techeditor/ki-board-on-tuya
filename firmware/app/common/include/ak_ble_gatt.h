@@ -50,6 +50,13 @@ int ak_ble_gatt_write(const void *data, uint32_t length);
  */
 bool ak_ble_gatt_take_greet(void);
 
+/**
+ * Keep the AK-KB advertisement alive while disconnected. The Tuya cloud
+ * netmgr also initializes its BLE manager and may stop advertising after MQTT
+ * connects; the product loop calls this periodically to restore AK ownership.
+ */
+void ak_ble_gatt_maintain(uint32_t now_ms);
+
 /** Link state for the app header. */
 typedef enum {
     AK_BLE_LINK_ADVERTISING = 0, /* not connected — advertising as AK-KB */

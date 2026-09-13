@@ -42,16 +42,13 @@
 
 static OPERATE_RET ak_transport_init(void)
 {
+    /* netmgr_init() also calls tal_ble_bt_init() and replaces the single TAL
+     * callback. Bring UART up now; initialize AK BLE after cloud/netmgr below. */
     OPERATE_RET ru = ak_uart_init();
-    OPERATE_RET rb = ak_ble_gatt_init();
-    /* Succeed if at least one link came up; warn on a partial failure. */
     if (ru != OPRT_OK) {
-        PR_WARN("dual: UART init failed: %d", ru);
+        PR_WARN("dual: UART init failed: %d; continuing to delayed BLE init", ru);
     }
-    if (rb != OPRT_OK) {
-        PR_WARN("dual: BLE init failed: %d", rb);
-    }
-    return (ru == OPRT_OK || rb == OPRT_OK) ? OPRT_OK : ru;
+    return OPRT_OK;
 }
 
 static int ak_transport_write(const void *data, uint32_t length)
@@ -118,6 +115,10 @@ static bool s_pc_connected = false;
  * the cloud backend is a compile-time option that is off by default. */
 typedef enum { AK_VOICE_SYSTEM = 0, AK_VOICE_CLOUD } ak_voice_source_t;
 static ak_voice_source_t s_voice_source = AK_VOICE_SYSTEM;
+/* Route is latched on K4 DOWN. Cloud waits for the LONG event (matching FP-3
+ * HOLD semantics); system emits start immediately and always receives its UP. */
+static bool s_ptt_cloud_route   = false;
+static bool s_ptt_cloud_started = false;
 
 /* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
 #define AK_PTT_KEY_ID "k4"
@@ -140,7 +141,7 @@ static void transport_write_frame(const char *frame, int length)
 
 /* Forward declarations: PTT / voice helpers are defined below but referenced by
  * on_input_event and send_hello_ack above them. */
-static void on_ptt_edge(bool pressed);
+static void on_ptt_event(ak_input_event_t event);
 static void send_voice_source(void);
 
 /* Input event -> key/nav JSONL frame on the active transport. */
@@ -159,14 +160,12 @@ static void on_input_event(ak_input_kind_t kind, const char *id, ak_input_event_
     transport_write_frame(frame, length);
     PR_DEBUG("input %s %s held=%ums", id, action, held_ms);
 
-    /* K4 = push-to-talk: drive the selected voice path on the press/release
-     * edge (in addition to the raw key frame the companion INPUT view uses). */
-    if (kind == AK_INPUT_KIND_KEY && strcmp(id, AK_PTT_KEY_ID) == 0) {
-        if (event == AK_INPUT_EVENT_DOWN) {
-            on_ptt_edge(true);
-        } else if (event == AK_INPUT_EVENT_UP) {
-            on_ptt_edge(false);
-        }
+    /* K4 = push-to-talk. Cloud consumes DOWN/LONG/UP as one latched HOLD
+     * interaction; system still uses immediate DOWN/UP Windows dictation. */
+    if (kind == AK_INPUT_KIND_KEY && strcmp(id, AK_PTT_KEY_ID) == 0 &&
+        (event == AK_INPUT_EVENT_DOWN || event == AK_INPUT_EVENT_LONG ||
+         event == AK_INPUT_EVENT_UP)) {
+        on_ptt_event(event);
     }
 }
 
@@ -234,22 +233,41 @@ static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
                                                ak_wifi_state_str(state), ssid));
 }
 
-/* A K4 (PTT) edge -> drive the selected voice path. On the cloud route the
- * board runs its own capture (when the backend is available); otherwise it
- * emits voice.start/stop so the PC companion activates its own ASR. */
-static void on_ptt_edge(bool pressed)
+/* K4 push-to-talk routing. The route is decided on DOWN and held until UP:
+ * - system: emit voice.start immediately, then voice.stop on UP;
+ * - cloud: wait for LONG, inject FP-3 HOLD long-press, then release on UP.
+ * A short cloud press intentionally starts no ASR session, matching FP-3. */
+static void on_ptt_event(ak_input_event_t event)
 {
-    if (s_voice_source == AK_VOICE_CLOUD && ak_asr_available()) {
-        if (pressed) {
-            ak_asr_start();
-        } else {
-            ak_asr_stop();
+    if (event == AK_INPUT_EVENT_DOWN) {
+        s_ptt_cloud_route =
+            (s_voice_source == AK_VOICE_CLOUD && ak_asr_available());
+        s_ptt_cloud_started = false;
+        if (!s_ptt_cloud_route) {
+            send_voice("start");
         }
         return;
     }
-    /* System route (or cloud selected but backend not compiled/ready): tell the
-     * PC to start/stop its own dictation on the press/release edge. */
-    send_voice(pressed ? "start" : "stop");
+
+    if (event == AK_INPUT_EVENT_LONG) {
+        if (s_ptt_cloud_route && !s_ptt_cloud_started) {
+            ak_asr_start();
+            s_ptt_cloud_started = true;
+        }
+        return;
+    }
+
+    if (event == AK_INPUT_EVENT_UP) {
+        if (s_ptt_cloud_route) {
+            if (s_ptt_cloud_started) {
+                ak_asr_stop();
+            }
+        } else {
+            send_voice("stop");
+        }
+        s_ptt_cloud_route = false;
+        s_ptt_cloud_started = false;
+    }
 }
 
 static void send_heartbeat(uint32_t uptime_ms)
@@ -540,6 +558,15 @@ static void user_main(void)
      * context (tuya_iot_init + netmgr), or it dereferences a NULL handle and
      * hard-faults at boot (the black-screen crash). No-op on the v1/BLE profiles. */
     OPERATE_RET cloud_rt = ak_cloud_init();
+#if AK_TRANSPORT_DUAL
+    /* netmgr_init() initializes Tuya BLE and overwrites TAL's single BLE event
+     * callback. Register AK last so writes/subscriptions reach our JSONL GATT
+     * transport and its scan response advertises the companion-visible name. */
+    OPERATE_RET ble_rt = ak_ble_gatt_init();
+    if (ble_rt != OPRT_OK) {
+        PR_ERR("dual: delayed AK BLE init failed: %d (UART remains available)", ble_rt);
+    }
+#endif
     if (cloud_rt != OPRT_OK) {
         PR_ERR("cloud init failed: %d — skipping ai_chat_init to avoid a fault; "
                "board-side cloud ASR unavailable (keyboard still works)",
@@ -585,6 +612,10 @@ static void user_main(void)
 
     while (1) {
         now = tal_system_get_millisecond();
+
+#if AK_TRANSPORT_BLE_GATT
+        ak_ble_gatt_maintain(now);
+#endif
 
 #if AK_TRANSPORT_GREET_ON_SUBSCRIBE
         /* When a central subscribes to notifications, the link is live: greet. */
