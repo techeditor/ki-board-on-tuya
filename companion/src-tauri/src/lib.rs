@@ -55,6 +55,9 @@ pub fn describe_inbound(frame: &Inbound) -> String {
         Inbound::VoiceSource { seq, payload } => {
             format!("voice_source {}{}", payload.source, seq_suffix(*seq))
         }
+        Inbound::WifiStatus { seq, payload } => {
+            format!("wifi_status {} {}{}", payload.state, payload.ssid, seq_suffix(*seq))
+        }
         Inbound::HelloAck(ack) => format!(
             "hello_ack fw={} transport={} caps=[{}]",
             ack.fw,
@@ -97,6 +100,9 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
         }),
         Inbound::VoiceSource { seq, payload } => json!({
             "kind": "voice_source", "seq": seq, "source": payload.source
+        }),
+        Inbound::WifiStatus { seq, payload } => json!({
+            "kind": "wifi_status", "seq": seq, "state": payload.state, "ssid": payload.ssid
         }),
         Inbound::HelloAck(ack) => json!({
             "kind": "hello_ack", "fw": ack.fw,
@@ -392,6 +398,17 @@ mod app {
     #[tauri::command]
     fn send_config(state: State<Shared>, voice_engine: String) -> Result<(), String> {
         write_board(state.inner(), &protocol::config_payload(&voice_engine))
+    }
+
+    /// Provision Wi-Fi on the board: send SSID + password over the JSONL
+    /// channel. The board applies it via netmgr and reports back a wifi_status
+    /// frame (surfaced to the UI as a 'wifi-status' event).
+    #[tauri::command]
+    fn send_wifi(state: State<Shared>, ssid: String, pass: String) -> Result<(), String> {
+        if ssid.trim().is_empty() {
+            return Err("SSID is required".to_string());
+        }
+        write_board(state.inner(), &protocol::wifi_payload(ssid.trim(), &pass))
     }
 
     /// FP-5: choose which ASR handles a board voice event. `cloud` = board mic +
@@ -780,6 +797,15 @@ mod app {
             log_line(app, format!("[VOICE] board voice source = {}", src.as_str()));
         }
 
+        // The board reports Wi-Fi provisioning progress -> push to the UI so the
+        // WiFi config panel shows connecting/connected/failed.
+        if let Inbound::WifiStatus { payload, .. } = &frame {
+            let _ = app.emit("wifi-status", serde_json::json!({
+                "state": payload.state, "ssid": payload.ssid
+            }));
+            log_line(app, format!("[WIFI] {} {}", payload.state, payload.ssid));
+        }
+
         // FP-5: on a voice-start edge, if the active source is the PC's own ASR,
         // activate OS dictation (Win+H). Board-mic (cloud) source is a no-op here.
         // GATED on `control_enabled` (same gate as route B): while control is
@@ -880,6 +906,7 @@ mod app {
                 send_display,
                 send_led,
                 send_config,
+                send_wifi,
                 set_voice_source,
                 kc_bind_window,
                 kc_send_text,

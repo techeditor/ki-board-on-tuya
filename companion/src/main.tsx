@@ -108,6 +108,11 @@ function App() {
   const rawBufRef = useRef<string[]>([]);
   const [pausedCount, setPausedCount] = useState(0);
   const [voiceSource, setVoiceSource] = useState<"cloud" | "system">("system");
+  // WiFi provisioning (DEVICE panel): send SSID/pass to the board over the link.
+  const [wifiSsid, setWifiSsid] = useState("");
+  const [wifiPass, setWifiPass] = useState("");
+  const [wifiStatus, setWifiStatus] = useState("");
+  const [wifiBusy, setWifiBusy] = useState(false);
   const [lastKey, setLastKey] = useState("");
   const [lastNav, setLastNav] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
@@ -242,6 +247,25 @@ function App() {
     // set_voice_source updates companion state AND mirrors the choice to the
     // board via a config frame. Ignore the "not connected" error when offline.
     await invoke("set_voice_source", { source }).catch(() => undefined);
+  }
+
+  async function sendWifi() {
+    if (!wifiSsid.trim()) {
+      setUiError("Enter a WiFi SSID first.");
+      return;
+    }
+    setWifiBusy(true);
+    try {
+      setUiError("");
+      setWifiStatus("sending…");
+      await invoke("send_wifi", { ssid: wifiSsid.trim(), pass: wifiPass });
+      setWifiStatus("sent, waiting for board…");
+    } catch (error) {
+      setWifiStatus("");
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWifiBusy(false);
+    }
   }
 
   // ── FP-4b route B: Local Control (window focus + keystroke injection) ──────
@@ -421,6 +445,12 @@ function App() {
       setVoiceSource(src);
     });
 
+    // The board reports WiFi provisioning progress.
+    const unlistenWifi = listen<{ state: string; ssid: string }>("wifi-status", (event) => {
+      const { state, ssid } = event.payload;
+      setWifiStatus(ssid ? `${state} · ${ssid}` : state);
+    });
+
     // Recover the sink token/running state on mount (survives a UI reload).
     invoke<string>("status_token")
       .then((token) => {
@@ -447,6 +477,7 @@ function App() {
       unlistenBoard.then((fn) => fn());
       unlistenStatus.then((fn) => fn());
       unlistenVoiceSource.then((fn) => fn());
+      unlistenWifi.then((fn) => fn());
     };
   }, []);
 
@@ -601,6 +632,38 @@ function App() {
               <code> voice.start</code> and the companion activates Windows dictation (Win+H). The
               choice is mirrored to the board (and the board can switch it too — this reflects the
               board's reported path).
+            </p>
+
+            <label style={{ marginTop: 14 }}>WiFi provisioning (for board cloud ASR)</label>
+            <input
+              value={wifiSsid}
+              onChange={(event) => setWifiSsid(event.target.value)}
+              placeholder="WiFi SSID (2.4GHz)"
+            />
+            <input
+              type="password"
+              value={wifiPass}
+              onChange={(event) => setWifiPass(event.target.value)}
+              placeholder="WiFi password"
+              style={{ marginTop: 6 }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !wifiBusy) runAction(sendWifi);
+              }}
+            />
+            <div className="actions" style={{ marginTop: 6 }}>
+              <button disabled={wifiBusy} onClick={() => runAction(sendWifi)}>
+                Configure WiFi
+              </button>
+            </div>
+            <div className="lcd" style={{ marginTop: 6 }}>
+              <span>WIFI</span>
+              <strong className={wifiStatus.startsWith("connected") ? "good-text" : ""}>
+                {wifiStatus || "-- (not configured)"}
+              </strong>
+            </div>
+            <p className="hint">
+              Connect the board first (USB/BLE), then send WiFi credentials — the board joins the
+              AP over its own radio (needs the cloud-ASR firmware profile; 2.4GHz only).
             </p>
           </Panel>
         )}

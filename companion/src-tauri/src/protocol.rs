@@ -76,6 +76,16 @@ pub fn config_payload(voice_engine: &str) -> Value {
     })
 }
 
+/// PC -> board: provision Wi-Fi credentials. The board connects via netmgr and
+/// reports back a `wifi_status` frame.
+pub fn wifi_payload(ssid: &str, pass: &str) -> Value {
+    serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "type": "wifi",
+        "payload": { "ssid": ssid, "pass": pass }
+    })
+}
+
 /// PC -> board: acknowledge a board event by its sequence number.
 pub fn ack_payload(seq: u64) -> Value {
     serde_json::json!({
@@ -187,6 +197,14 @@ pub struct VoiceSourcePayload {
     pub source: String,
 }
 
+/// `wifi_status` payload: the board's Wi-Fi provisioning/connection state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiStatusPayload {
+    pub state: String,
+    #[serde(default)]
+    pub ssid: String,
+}
+
 // ─────────────────────── Payload structs (PC -> board) ───────────────────────
 
 /// `display` payload.
@@ -253,6 +271,8 @@ pub enum Inbound {
     Asr { seq: Option<u64>, payload: AsrPayload },
     /// The board's current voice routing, reported on change / on hello.
     VoiceSource { seq: Option<u64>, payload: VoiceSourcePayload },
+    /// The board's Wi-Fi provisioning/connection status.
+    WifiStatus { seq: Option<u64>, payload: WifiStatusPayload },
     HelloAck(HelloAckPayload),
     Ping,
     Pong,
@@ -301,6 +321,9 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "voice_source" => serde_json::from_value::<VoiceSourcePayload>(payload)
             .ok()
             .map(|p| Inbound::VoiceSource { seq, payload: p }),
+        "wifi_status" => serde_json::from_value::<WifiStatusPayload>(payload)
+            .ok()
+            .map(|p| Inbound::WifiStatus { seq, payload: p }),
         "hello_ack" => serde_json::from_value::<HelloAckPayload>(payload)
             .ok()
             .map(Inbound::HelloAck),
@@ -506,6 +529,26 @@ mod tests {
             Inbound::VoiceSource {
                 seq: Some(12),
                 payload: VoiceSourcePayload { source: "cloud".into() },
+            }
+        );
+    }
+
+    #[test]
+    fn wifi_payload_and_status_roundtrip() {
+        let p = wifi_payload("MyAP", "secret");
+        assert_eq!(p["type"], "wifi");
+        assert_eq!(p["payload"]["ssid"], "MyAP");
+        assert_eq!(p["payload"]["pass"], "secret");
+
+        let ws = decode_line(
+            r#"{"v":1,"seq":13,"type":"wifi_status","payload":{"state":"connected","ssid":"MyAP"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ws,
+            Inbound::WifiStatus {
+                seq: Some(13),
+                payload: WifiStatusPayload { state: "connected".into(), ssid: "MyAP".into() },
             }
         );
     }
