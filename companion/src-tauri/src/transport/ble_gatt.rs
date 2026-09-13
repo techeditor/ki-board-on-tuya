@@ -330,16 +330,46 @@ async fn connect_peripheral(
         .map_err(|err| format!("discover services failed: {err}"))?;
 
     let chars = peripheral.characteristics();
+
+    // Diagnostic: dump the whole discovered GATT table. When 0x2B10 is missing
+    // this is what distinguishes "the board never registered the 0x1910 command
+    // service" from "Windows handed back a stale/empty GATT cache for this MAC".
+    eprintln!(
+        "[ble] {device_id}: discovered {} services / {} characteristics",
+        peripheral.services().len(),
+        chars.len()
+    );
+    for svc in peripheral.services() {
+        eprintln!("[ble]   service {}", svc.uuid);
+        for c in &svc.characteristics {
+            eprintln!("[ble]     char {} props={:?}", c.uuid, c.properties);
+        }
+    }
+
+    let discovered = || {
+        let mut uuids: Vec<String> = chars.iter().map(|c| c.uuid.to_string()).collect();
+        uuids.sort();
+        if uuids.is_empty() {
+            "none — the adapter returned an empty GATT table (stale Windows cache? remove the AK-KB pairing and re-scan)".to_string()
+        } else {
+            uuids.join(", ")
+        }
+    };
+
     let notify_char = chars
         .iter()
         .find(|c| c.uuid == NOTIFY_UUID)
         .cloned()
-        .ok_or("notify characteristic 0x2B10 not found on device")?;
+        .ok_or_else(|| {
+            format!("notify characteristic 0x2B10 not found on device (discovered: {})", discovered())
+        })?;
     let write_char = chars
         .iter()
         .find(|c| c.uuid == WRITE_UUID)
         .cloned()
-        .ok_or("write characteristic 0x2B11 not found on device")?;
+        .ok_or_else(|| {
+            format!("write characteristic 0x2B11 not found on device (discovered: {})", discovered())
+        })?;
 
     Ok((peripheral, notify_char, write_char))
 }
