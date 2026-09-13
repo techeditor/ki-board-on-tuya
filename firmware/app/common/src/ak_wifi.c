@@ -23,6 +23,17 @@ const char *ak_wifi_state_str(ak_wifi_state_t s)
     }
 }
 
+const char *ak_license_result_str(ak_license_result_t r)
+{
+    switch (r) {
+    case AK_LICENSE_WRITTEN:
+        return "written";
+    case AK_LICENSE_FAILED:
+    default:
+        return "failed";
+    }
+}
+
 #if AK_ASR_BOARD_CLOUD
 
 /* ── Real backend (Tuya netmgr) ─────────────────────────────────────────────
@@ -32,6 +43,8 @@ const char *ak_wifi_state_str(ak_wifi_state_t s)
 
 #include "netmgr.h"
 #include "netconn_wifi.h"
+#include "tuya_authorize.h"
+#include "tuya_iot.h"
 
 #include <string.h>
 
@@ -102,6 +115,29 @@ void ak_wifi_connect(const char *ssid, const char *pass)
      * status callback (__netmgr_status_cb). */
 }
 
+ak_license_result_t ak_license_write(const char *uuid, const char *authkey)
+{
+    if (uuid == NULL || uuid[0] == '\0' || authkey == NULL || authkey[0] == '\0') {
+        return AK_LICENSE_FAILED;
+    }
+    OPERATE_RET rt = tuya_authorize_write(uuid, authkey);
+    if (rt != OPRT_OK) {
+        PR_ERR("ak_license: tuya_authorize_write failed: %d", rt);
+        return AK_LICENSE_FAILED;
+    }
+    PR_NOTICE("ak_license: UUID/AuthKey written to storage");
+    return AK_LICENSE_WRITTEN;
+}
+
+bool ak_license_present(void)
+{
+    tuya_iot_license_t lic = {0};
+    if (tuya_authorize_read(&lic) != OPRT_OK) {
+        return false;
+    }
+    return lic.uuid != NULL && lic.uuid[0] != '\0';
+}
+
 #else /* !AK_ASR_BOARD_CLOUD — stub (no wifi stack in this profile) */
 
 static ak_wifi_status_cb s_on_status = NULL;
@@ -125,6 +161,19 @@ void ak_wifi_connect(const char *ssid, const char *pass)
     if (s_on_status) {
         s_on_status(AK_WIFI_FAILED, ssid ? ssid : "");
     }
+}
+
+ak_license_result_t ak_license_write(const char *uuid, const char *authkey)
+{
+    (void)uuid;
+    (void)authkey;
+    /* No authorize stack in this profile. */
+    return AK_LICENSE_FAILED;
+}
+
+bool ak_license_present(void)
+{
+    return false;
 }
 
 #endif /* AK_ASR_BOARD_CLOUD */

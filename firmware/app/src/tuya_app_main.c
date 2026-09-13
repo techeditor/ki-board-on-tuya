@@ -427,6 +427,26 @@ static void on_rx_line(const char *line)
         PR_NOTICE("wifi config: ssid=%s (pass %u chars)", ssid, (unsigned)strlen(pass));
         ak_wifi_connect(ssid, pass);
         send_ack(seq);
+    } else if (strcmp(type, "license") == 0) {
+        /* PC provisions the device license: {"type":"license","payload":
+         * {"uuid":"..","authkey":".."}}. Written to persistent storage; PID
+         * stays compile-time. Never echo the secret back — only a status. */
+        uint32_t seq          = 0;
+        char     uuid[40]     = "";
+        char     authkey[48]  = "";
+        ak_json_uint(line, "seq", &seq);
+        ak_json_str(line, "uuid", uuid, sizeof(uuid));
+        ak_json_str(line, "authkey", authkey, sizeof(authkey));
+        PR_NOTICE("license write: uuid len %u, authkey len %u", (unsigned)strlen(uuid),
+                  (unsigned)strlen(authkey));
+        ak_license_result_t lr = ak_license_write(uuid, authkey);
+        {
+            char frame[FRAME_BUFFER_SIZE];
+            s_sequence++;
+            transport_write_frame(frame, ak_proto_license_status(frame, sizeof(frame), s_sequence,
+                                                                  ak_license_result_str(lr)));
+        }
+        send_ack(seq);
     } else if (strcmp(type, "display") == 0) {
         char agent[32] = "";
         char state[16] = "";

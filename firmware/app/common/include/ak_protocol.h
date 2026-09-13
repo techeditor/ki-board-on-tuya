@@ -29,6 +29,10 @@ int ak_proto_voice_source(char *buf, size_t size, uint32_t seq, const char *sour
    "connecting" / "connected" / "failed" / "disconnected"; `ssid` is the target
    AP (may be empty). Sent when a wifi config frame is applied and on change. */
 int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state, const char *ssid);
+/* Board -> PC: report device-license (UUID/AuthKey) provisioning result.
+   `state` is "written" / "failed" / "present" (already had one). No secret is
+   ever echoed back. */
+int ak_proto_license_status(char *buf, size_t size, uint32_t seq, const char *state);
 
 /* Handshake / heartbeat. */
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport);

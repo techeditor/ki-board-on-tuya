@@ -158,6 +158,11 @@ static void test_protocol(void)
               "\"ssid\":\"MyAP\"}}\n",
               "wifi_status frame");
 
+    ak_proto_license_status(buf, sizeof(buf), 14, "written");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":14,\"type\":\"license_status\",\"payload\":{\"state\":\"written\"}}\n",
+              "license_status frame");
+
     ak_proto_hello_ack(buf, sizeof(buf), "0.1.0", "uart");
     CHECK_STR(buf,
               "{\"v\":1,\"type\":\"hello_ack\",\"payload\":{\"fw\":\"0.1.0\",\"transport\":\"uart\","

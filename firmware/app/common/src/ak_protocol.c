@@ -50,6 +50,13 @@ int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state
                     (unsigned)seq, state, ssid ? ssid : "");
 }
 
+int ak_proto_license_status(char *buf, size_t size, uint32_t seq, const char *state)
+{
+    return snprintf(buf, size,
+                    "{\"v\":1,\"seq\":%u,\"type\":\"license_status\",\"payload\":{\"state\":\"%s\"}}\n",
+                    (unsigned)seq, state);
+}
+
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport)
 {
     return snprintf(buf, size,

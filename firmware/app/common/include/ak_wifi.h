@@ -50,4 +50,26 @@ bool ak_wifi_available(void);
  *  callback. In the stub this immediately reports AK_WIFI_FAILED. */
 void ak_wifi_connect(const char *ssid, const char *pass);
 
+/* ── Device license (UUID/AuthKey) provisioning ────────────────────────────
+ * Written to persistent storage via tuya_authorize_write; survives reboot. The
+ * PID stays compile-time (CONFIG_TUYA_PRODUCT_ID) — it is product-wide, while
+ * UUID/AuthKey are per-device. Gated by AK_ASR_BOARD_CLOUD like the rest of the
+ * cloud stack; the stub returns an error string. */
+
+/** Result of a license write, for the license_status frame. */
+typedef enum {
+    AK_LICENSE_WRITTEN = 0, /* newly written to storage */
+    AK_LICENSE_FAILED,      /* write failed / not supported (stub) */
+} ak_license_result_t;
+
+const char *ak_license_result_str(ak_license_result_t r);
+
+/** Write UUID + AuthKey to persistent storage. Idempotent-ish: overwrites any
+ *  existing license. Returns the result (also suitable for a status frame). */
+ak_license_result_t ak_license_write(const char *uuid, const char *authkey);
+
+/** True if the device already has a license stored (so the UI can show it is
+ *  provisioned without echoing the secret). */
+bool ak_license_present(void);
+
 #endif /* AK_WIFI_H */
