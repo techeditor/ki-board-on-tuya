@@ -150,6 +150,11 @@ mod app {
         /// actions. This is the control path that supersedes route A.
         kc_controller: KiroCrewController,
         kc_router: ControlRouter,
+        /// When false (the default), board key/nav frames are NEVER routed to
+        /// Kiro Crew control — the INPUT view only reflects trigger state. The
+        /// user must explicitly enable control (UI toggle -> set_control_enabled)
+        /// before board events drive the local Kiro Crew window.
+        control_enabled: bool,
         /// FP-4b STATUS ("the eyes"): the running localhost hook sink, if
         /// started. `status_sink_start` sets it; `status_sink_stop` / drop
         /// tears it down (releasing the port + removing the handoff file).
@@ -176,6 +181,7 @@ mod app {
         firmware_version: String,
         last_error: String,
         voice_source: String,
+        control_enabled: bool,
     }
 
     fn log_line(app: &AppHandle, message: impl Into<String>) {
@@ -218,6 +224,23 @@ mod app {
         Ok(())
     }
 
+    /// Enable/disable routing board key/nav frames to Kiro Crew control. Default
+    /// is OFF: while disabled the board only reports trigger state to the UI and
+    /// never drives the local Kiro Crew window.
+    #[tauri::command]
+    fn set_control_enabled(app: AppHandle, state: State<Shared>, enabled: bool) -> Result<(), String> {
+        state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .control_enabled = enabled;
+        log_line(
+            &app,
+            format!("[KC-CTL] board control {}", if enabled { "ENABLED" } else { "disabled" }),
+        );
+        Ok(())
+    }
+
     #[tauri::command]
     fn get_status(state: State<Shared>) -> Result<Status, String> {
         let inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
@@ -228,6 +251,7 @@ mod app {
             firmware_version: inner.firmware.clone(),
             last_error: inner.last_error.clone(),
             voice_source: inner.voice_source.as_str().to_string(),
+            control_enabled: inner.control_enabled,
         })
     }
 
@@ -240,21 +264,24 @@ mod app {
     ) -> Result<(), String> {
         let transport_kind = transport.as_deref().unwrap_or("usb");
         let shared = state.inner();
-        // Tear down any existing connection first. `transport.disconnect()` now
-        // sets the transport's stop flag so its background reader thread exits
-        // and releases the OS port / BLE peripheral before we open a new one.
+        // Only one transport at a time. If something is already connected, do
+        // NOT silently tear it down — tell the user to disconnect first. This
+        // makes switching USB<->BLE an explicit two-step action and avoids
+        // yanking a live link out from under the reader thread.
         {
-            let mut inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
-            if let Some(mut existing) = inner.transport.take() {
-                existing.disconnect();
+            let inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
+            if inner.transport.is_some() {
+                let current = match inner.kind {
+                    TransportKind::Usb => "USB",
+                    TransportKind::Ble => "BLE",
+                    TransportKind::None => "a transport",
+                };
+                let want = if transport_kind == "ble" { "BLE" } else { "USB" };
+                return Err(format!(
+                    "Already connected over {current} ({}). Disconnect first before connecting over {want}.",
+                    if inner.endpoint.is_empty() { "—" } else { inner.endpoint.as_str() }
+                ));
             }
-            inner.kind = TransportKind::None;
-            inner.endpoint.clear();
-            // NOTE: the generation counter is bumped exactly once per connect,
-            // in the install block below. Bumping it here too (as before) made
-            // `connection_id` advance by 2 per connect, desyncing the value the
-            // freshly spawned reader is gated on from the app state and letting
-            // event delivery break after a reconnect.
         }
 
         let (line_tx, line_rx) = mpsc::channel::<String>();
@@ -590,6 +617,7 @@ mod app {
             ControlAction::CommandBar(cmd) => format!("command-bar {cmd:?}"),
             ControlAction::Chord(c) => format!("chord {c:?}"),
             ControlAction::SendText(t) => format!("send-text {t:?}"),
+            ControlAction::Compose(t) => format!("compose {t:?}"),
             ControlAction::None => "none".to_string(),
         }
     }
@@ -669,17 +697,18 @@ mod app {
 
         // FP-4b (route B — "the hands"): map the board event to a control action
         // via the pure router, then drive the local Kiro Crew window (focus +
-        // SendInput). This is the control path that supersedes route A. Runs
-        // alongside route A above; a `None` action is a no-op. Errors (e.g. no
-        // window matches) are logged, never fatal to the reader thread.
+        // SendInput). GATED on `control_enabled` (default OFF): while disabled,
+        // board key/nav frames only reflect trigger state in the UI and NEVER
+        // drive Kiro Crew. Errors (e.g. no window matches) are logged, never
+        // fatal to the reader thread.
         {
-            let action = state
+            let (enabled, action) = state
                 .inner
                 .lock()
                 .ok()
-                .map(|inner| inner.kc_router.route(&frame))
-                .unwrap_or(ControlAction::None);
-            if action != ControlAction::None {
+                .map(|inner| (inner.control_enabled, inner.kc_router.route(&frame)))
+                .unwrap_or((false, ControlAction::None));
+            if enabled && action != ControlAction::None {
                 let desc = describe_control_action(&action);
                 let result = state
                     .inner
@@ -713,6 +742,7 @@ mod app {
                 kc_router: ControlRouter::new(
                     crate::kirocrew_control::ControlCtx::with_default_jumps(),
                 ),
+                control_enabled: false,
                 status_sink: None,
                 status_token: String::new(),
                 kc_status: HashMap::new(),
@@ -726,6 +756,7 @@ mod app {
                 scan_ble,
                 get_logs,
                 clear_logs,
+                set_control_enabled,
                 get_status,
                 connect_device,
                 disconnect_device,

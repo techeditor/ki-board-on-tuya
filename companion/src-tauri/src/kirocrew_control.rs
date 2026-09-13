@@ -33,6 +33,17 @@ pub enum Chord {
     Right,
     /// Ctrl+K — open the Kiro Crew command bar.
     CtrlK,
+    /// Alt+N — jump to chat N (N = 1..=9). Deterministic, unlike a command-bar
+    /// text search. (Kiro Crew default shortcut "Jump to chat N".)
+    JumpChat(u8),
+    /// Alt+Left — previous chat.
+    PrevChat,
+    /// Alt+Right — next chat.
+    NextChat,
+    /// Alt+Enter — focus the chat text input (composer).
+    FocusInput,
+    /// Alt+Shift+N — new chat.
+    NewChat,
 }
 
 impl Chord {
@@ -47,7 +58,21 @@ impl Chord {
             "left" => Some(Chord::Left),
             "right" => Some(Chord::Right),
             "ctrlk" | "ctrl+k" | "command_bar" | "commandbar" => Some(Chord::CtrlK),
-            _ => None,
+            "prevchat" | "prev_chat" | "prev-chat" => Some(Chord::PrevChat),
+            "nextchat" | "next_chat" | "next-chat" => Some(Chord::NextChat),
+            "focusinput" | "focus_input" | "focus-input" => Some(Chord::FocusInput),
+            "newchat" | "new_chat" | "new-chat" => Some(Chord::NewChat),
+            other => {
+                // "chat1".."chat9" -> JumpChat(1..=9)
+                if let Some(d) = other.strip_prefix("chat") {
+                    if let Ok(n) = d.parse::<u8>() {
+                        if (1..=9).contains(&n) {
+                            return Some(Chord::JumpChat(n));
+                        }
+                    }
+                }
+                None
+            }
         }
     }
 }
@@ -64,35 +89,31 @@ pub enum ControlAction {
     Chord(Chord),
     /// Type free text into the focused input (no command bar, no Enter).
     SendText(String),
+    /// Focus the chat composer (Alt+Enter), then type the text — no Enter, so
+    /// the user reviews and submits with K5. This is the K4 voice path.
+    Compose(String),
     /// Nothing to do for this event (e.g. a key *up*, a ping, an ack).
     None,
 }
 
 /// Router context — the small amount of state the pure mapping needs but does
-/// not own. `session_jump[i]` is the command-bar string for K(i+1) (K1..K3),
-/// e.g. a session-switch command like `"switch to session 1"`; an empty / short
-/// vector simply yields [`ControlAction::None`] for the missing slots.
+/// not own. `jump_chats[i]` is the chat NUMBER (1..=9) that K(i+1) (K1..K3)
+/// jumps to via the deterministic `Alt+N` shortcut. Defaults to `[1, 2, 3]`.
 #[derive(Clone, Debug, Default)]
 pub struct ControlCtx {
-    /// Command-bar strings for K1, K2, K3 (index 0..=2). Configurable by the UI.
-    pub session_jump: Vec<String>,
+    /// Chat numbers for K1, K2, K3 (index 0..=2). Configurable by the UI.
+    pub jump_chats: Vec<u8>,
 }
 
 impl ControlCtx {
-    /// Sensible defaults for the three session-jump keys.
+    /// Sensible defaults: K1->chat 1, K2->chat 2, K3->chat 3 (Alt+1/2/3).
     pub fn with_default_jumps() -> Self {
-        Self {
-            session_jump: vec![
-                "switch to session 1".to_string(),
-                "switch to session 2".to_string(),
-                "switch to session 3".to_string(),
-            ],
-        }
+        Self { jump_chats: vec![1, 2, 3] }
     }
 
     fn jump(&self, idx: usize) -> ControlAction {
-        match self.session_jump.get(idx) {
-            Some(cmd) if !cmd.trim().is_empty() => ControlAction::CommandBar(cmd.clone()),
+        match self.jump_chats.get(idx) {
+            Some(&n) if (1..=9).contains(&n) => ControlAction::Chord(Chord::JumpChat(n)),
             _ => ControlAction::None,
         }
     }
@@ -106,28 +127,29 @@ fn is_trigger(action: KeyAction) -> bool {
 
 /// Pure mapping: board event + context → control action. No IO.
 ///
-/// Mapping table (design R2.3):
+/// Mapping table (design R2.3), using Kiro Crew's real default shortcuts:
 ///
 /// | event                          | action                              |
 /// |--------------------------------|-------------------------------------|
-/// | `macro { name }` (recognized text) | `CommandBar(name)` — K4 dictation → command bar |
-/// | `key k1` (down/long)           | `CommandBar(ctx.session_jump[0])`   |
-/// | `key k2` (down/long)           | `CommandBar(ctx.session_jump[1])`   |
-/// | `key k3` (down/long)           | `CommandBar(ctx.session_jump[2])`   |
+/// | `macro { name }` (recognized text) | `Compose(name)` — K4 voice → focus composer + type (no send) |
+/// | `key k1` (down/long)           | `Chord(JumpChat(1))` — Alt+1        |
+/// | `key k2` (down/long)           | `Chord(JumpChat(2))` — Alt+2        |
+/// | `key k3` (down/long)           | `Chord(JumpChat(3))` — Alt+3        |
 /// | `key k4` (down/long)           | `None` — K4 is push-to-talk; text arrives later as `macro` |
 /// | `key k5` (down/long)           | `Chord(Enter)` — submit / continue  |
-/// | `nav up/down/left/right`       | `Chord(Up/Down/Left/Right)`         |
+/// | `nav left/right`               | `Chord(PrevChat/NextChat)` — Alt+←/→ |
+/// | `nav up/down`                  | `Chord(Up/Down)` — arrow keys       |
 /// | `nav center` (down/long)       | `Chord(Enter)`                      |
 /// | anything else / any `up` edge  | `None`                              |
 pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
     match ev {
-        // K4's recognized dictation / a macro command → drive the command bar.
+        // K4's recognized dictation → type into the chat composer (no send).
         Inbound::Macro { payload, .. } => {
             let text = payload.name.trim();
             if text.is_empty() {
                 ControlAction::None
             } else {
-                ControlAction::CommandBar(text.to_string())
+                ControlAction::Compose(text.to_string())
             }
         }
 
@@ -148,8 +170,9 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
         Inbound::Nav { payload, .. } if is_trigger(payload.action) => match payload.dir {
             NavDir::Up => ControlAction::Chord(Chord::Up),
             NavDir::Down => ControlAction::Chord(Chord::Down),
-            NavDir::Left => ControlAction::Chord(Chord::Left),
-            NavDir::Right => ControlAction::Chord(Chord::Right),
+            // Joystick left/right = previous/next chat (Alt+←/→) — deterministic.
+            NavDir::Left => ControlAction::Chord(Chord::PrevChat),
+            NavDir::Right => ControlAction::Chord(Chord::NextChat),
             NavDir::Center => ControlAction::Chord(Chord::Enter),
             NavDir::Unknown => ControlAction::None,
         },
@@ -206,7 +229,10 @@ mod windows_impl {
     const VK_RIGHT: u16 = 0x27;
     const VK_DOWN: u16 = 0x28;
     const VK_CONTROL: u16 = 0x11;
+    const VK_MENU: u16 = 0x12; // Alt
+    const VK_SHIFT: u16 = 0x10;
     const VK_K: u16 = 0x4B; // 'K'
+    const VK_N: u16 = 0x4E; // 'N'
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -307,16 +333,46 @@ mod windows_impl {
         ])
     }
 
-    fn chord_vk(c: Chord) -> Option<u16> {
-        Some(match c {
-            Chord::Enter => VK_RETURN,
-            Chord::Esc => VK_ESCAPE,
-            Chord::Up => VK_UP,
-            Chord::Down => VK_DOWN,
-            Chord::Left => VK_LEFT,
-            Chord::Right => VK_RIGHT,
-            Chord::CtrlK => return None, // handled via ctrl_k(), not a single VK
-        })
+    /// Alt + <vk> (Alt↓ vk↓ vk↑ Alt↑).
+    fn alt_tap(vk: u16) -> Result<(), String> {
+        send(&[
+            vkey_event(VK_MENU, false),
+            vkey_event(vk, false),
+            vkey_event(vk, true),
+            vkey_event(VK_MENU, true),
+        ])
+    }
+
+    /// Alt + Shift + <vk>.
+    fn alt_shift_tap(vk: u16) -> Result<(), String> {
+        send(&[
+            vkey_event(VK_MENU, false),
+            vkey_event(VK_SHIFT, false),
+            vkey_event(vk, false),
+            vkey_event(vk, true),
+            vkey_event(VK_SHIFT, true),
+            vkey_event(VK_MENU, true),
+        ])
+    }
+
+    /// Inject one chord. Simple chords tap a single VK; the Kiro Crew shortcuts
+    /// use Alt / Alt+Shift combos.
+    fn inject_chord(c: Chord) -> Result<(), String> {
+        match c {
+            Chord::Enter => tap(VK_RETURN),
+            Chord::Esc => tap(VK_ESCAPE),
+            Chord::Up => tap(VK_UP),
+            Chord::Down => tap(VK_DOWN),
+            Chord::Left => tap(VK_LEFT),
+            Chord::Right => tap(VK_RIGHT),
+            Chord::CtrlK => ctrl_k(),
+            Chord::JumpChat(n) if (1..=9).contains(&n) => alt_tap(0x30 + n as u16), // Alt+'1'..'9'
+            Chord::JumpChat(n) => Err(format!("JumpChat({n}) out of range 1..=9")),
+            Chord::PrevChat => alt_tap(VK_LEFT),  // Alt+Left
+            Chord::NextChat => alt_tap(VK_RIGHT), // Alt+Right
+            Chord::FocusInput => alt_tap(VK_RETURN), // Alt+Enter
+            Chord::NewChat => alt_shift_tap(VK_N),   // Alt+Shift+N
+        }
     }
 
     // --- Window enumeration + focus. ---
@@ -431,12 +487,16 @@ mod windows_impl {
             tap(VK_RETURN)
         }
 
+        /// Focus the composer (Alt+Enter), then type — no Enter (K5 submits).
+        pub fn compose(&mut self, text: &str) -> Result<(), String> {
+            self.focus()?;
+            alt_tap(VK_RETURN)?; // Alt+Enter = focus text input
+            type_text_raw(text)
+        }
+
         pub fn chord(&mut self, keys: Chord) -> Result<(), String> {
             self.focus()?;
-            match chord_vk(keys) {
-                Some(vk) => tap(vk),
-                None => ctrl_k(), // Chord::CtrlK
-            }
+            inject_chord(keys)
         }
     }
 
@@ -480,6 +540,10 @@ mod stub_impl {
         }
 
         pub fn command_bar(&mut self, _cmd: &str) -> Result<(), String> {
+            Err("control: windows only".to_string())
+        }
+
+        pub fn compose(&mut self, _text: &str) -> Result<(), String> {
             Err("control: windows only".to_string())
         }
 
@@ -531,6 +595,11 @@ impl KiroCrewController {
         self.backend.command_bar(cmd)
     }
 
+    /// Focus the composer (Alt+Enter), then type `text` (no Enter).
+    pub fn compose(&mut self, text: &str) -> Result<(), String> {
+        self.backend.compose(text)
+    }
+
     /// Focus, then inject a single named [`Chord`].
     pub fn chord(&mut self, keys: Chord) -> Result<(), String> {
         self.backend.chord(keys)
@@ -542,6 +611,7 @@ impl KiroCrewController {
             ControlAction::CommandBar(cmd) => self.command_bar(cmd),
             ControlAction::Chord(c) => self.chord(*c),
             ControlAction::SendText(t) => self.send_text(t),
+            ControlAction::Compose(t) => self.compose(t),
             ControlAction::None => Ok(()),
         }
     }
@@ -588,18 +658,25 @@ mod tests {
         assert_eq!(Chord::parse(" up "), Some(Chord::Up));
         assert_eq!(Chord::parse("ctrl+k"), Some(Chord::CtrlK));
         assert_eq!(Chord::parse("command_bar"), Some(Chord::CtrlK));
+        assert_eq!(Chord::parse("prevchat"), Some(Chord::PrevChat));
+        assert_eq!(Chord::parse("next-chat"), Some(Chord::NextChat));
+        assert_eq!(Chord::parse("focus_input"), Some(Chord::FocusInput));
+        assert_eq!(Chord::parse("newchat"), Some(Chord::NewChat));
+        assert_eq!(Chord::parse("chat3"), Some(Chord::JumpChat(3)));
+        assert_eq!(Chord::parse("chat9"), Some(Chord::JumpChat(9)));
+        assert_eq!(Chord::parse("chat0"), None);
         assert_eq!(Chord::parse("nope"), None);
         assert_eq!(Chord::parse(""), None);
     }
 
-    // ── Router: K4 recognized text → command bar ───────────────
+    // ── Router: K4 recognized text → compose into the chat input ───
 
     #[test]
-    fn macro_text_routes_to_command_bar() {
+    fn macro_text_routes_to_compose() {
         let ctx = ControlCtx::with_default_jumps();
         assert_eq!(
-            route_input(&mac("open the settings page"), &ctx),
-            ControlAction::CommandBar("open the settings page".into())
+            route_input(&mac("summarize the file"), &ctx),
+            ControlAction::Compose("summarize the file".into())
         );
     }
 
@@ -625,30 +702,28 @@ mod tests {
         );
     }
 
-    // ── Router: K1–K3 → session jump command bar ───────────────
+    // ── Router: K1–K3 → Alt+N jump-chat chords ─────────────────
 
     #[test]
-    fn k1_k2_k3_route_to_configured_session_jumps() {
-        let ctx = ControlCtx {
-            session_jump: vec!["jump A".into(), "jump B".into(), "jump C".into()],
-        };
+    fn k1_k2_k3_route_to_jumpchat_chords() {
+        let ctx = ControlCtx::with_default_jumps(); // [1,2,3]
         assert_eq!(
             route_input(&key("k1", KeyAction::Down), &ctx),
-            ControlAction::CommandBar("jump A".into())
+            ControlAction::Chord(Chord::JumpChat(1))
         );
         assert_eq!(
             route_input(&key("k2", KeyAction::Down), &ctx),
-            ControlAction::CommandBar("jump B".into())
+            ControlAction::Chord(Chord::JumpChat(2))
         );
         assert_eq!(
             route_input(&key("k3", KeyAction::Down), &ctx),
-            ControlAction::CommandBar("jump C".into())
+            ControlAction::Chord(Chord::JumpChat(3))
         );
     }
 
     #[test]
-    fn k1_k2_k3_with_no_config_are_none() {
-        let ctx = ControlCtx::default(); // empty session_jump
+    fn k1_k2_k3_with_empty_config_are_none() {
+        let ctx = ControlCtx { jump_chats: vec![] };
         assert_eq!(route_input(&key("k1", KeyAction::Down), &ctx), ControlAction::None);
         assert_eq!(route_input(&key("k2", KeyAction::Down), &ctx), ControlAction::None);
         assert_eq!(route_input(&key("k3", KeyAction::Down), &ctx), ControlAction::None);
@@ -660,10 +735,10 @@ mod tests {
         assert_eq!(route_input(&key("k4", KeyAction::Down), &ctx), ControlAction::None);
     }
 
-    // ── Router: nav → arrow / center chords ────────────────────
+    // ── Router: nav → arrows / prev-next chat / center ─────────
 
     #[test]
-    fn nav_directions_route_to_arrow_chords() {
+    fn nav_directions_route_to_expected_chords() {
         let ctx = ControlCtx::default();
         assert_eq!(
             route_input(&nav(NavDir::Up, KeyAction::Down), &ctx),
@@ -675,11 +750,11 @@ mod tests {
         );
         assert_eq!(
             route_input(&nav(NavDir::Left, KeyAction::Down), &ctx),
-            ControlAction::Chord(Chord::Left)
+            ControlAction::Chord(Chord::PrevChat)
         );
         assert_eq!(
             route_input(&nav(NavDir::Right, KeyAction::Down), &ctx),
-            ControlAction::Chord(Chord::Right)
+            ControlAction::Chord(Chord::NextChat)
         );
     }
 
