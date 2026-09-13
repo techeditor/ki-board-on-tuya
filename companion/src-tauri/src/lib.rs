@@ -16,6 +16,7 @@
 pub mod asr;
 pub mod inject;
 pub mod kirocrew;
+pub mod kirocrew_control;
 pub mod pc_asr;
 pub mod protocol;
 pub mod transport;
@@ -111,6 +112,7 @@ mod app {
     use crate::pc_asr::{self, VoiceAction, VoiceSource};
     use crate::protocol::{self, Inbound};
     use crate::kirocrew::KiroCrewClient;
+    use crate::kirocrew_control::{Chord, ControlAction, ControlRouter, KiroCrewController};
     use crate::transport::ble_gatt::{self, BleDeviceInfo, BleGattTransport};
     use crate::transport::usb_serial::{self, SerialPortInfo, UsbSerialTransport};
     use crate::transport::{BoardTransport, TransportKind};
@@ -135,6 +137,11 @@ mod app {
         /// A board `asr` text frame is forwarded here via `send()`. `None` until
         /// a session is bound with `kc_create`.
         kc_target: Option<String>,
+        /// FP-4b (route B): the window-focus + SendInput controller ("the
+        /// hands") and the pure router that maps board events to control
+        /// actions. This is the control path that supersedes route A.
+        kc_controller: KiroCrewController,
+        kc_router: ControlRouter,
     }
 
     struct AppState {
@@ -426,6 +433,52 @@ mod app {
         }
     }
 
+    // ───────────────────── FP-4b: Kiro Crew control (route B — "the hands") ─────────────────────
+
+    /// route B: point the controller at a window whose title contains `title`
+    /// (empty → default candidates "Kiro Crew" / "Agentic"). Verifies a match
+    /// by focusing immediately, so the UI can show a bind result (AC1.5).
+    #[tauri::command]
+    fn kc_bind_window(state: State<Shared>, title: String) -> Result<(), String> {
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        inner.kc_controller.set_title_match(title);
+        // Focus now to verify the window exists; bubbles up the "no match" Err.
+        inner.kc_controller.focus()
+    }
+
+    /// route B: focus the bound window and type `text` (no command bar, no Enter).
+    #[tauri::command]
+    fn kc_send_text(state: State<Shared>, text: String) -> Result<(), String> {
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        inner.kc_controller.send_text(&text)
+    }
+
+    /// route B: focus, open the command bar (Ctrl+K), type `cmd`, press Enter.
+    #[tauri::command]
+    fn kc_command_bar(state: State<Shared>, cmd: String) -> Result<(), String> {
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        inner.kc_controller.command_bar(&cmd)
+    }
+
+    /// route B: focus and inject a single named chord
+    /// (`enter`/`esc`/`up`/`down`/`left`/`right`/`ctrlk`).
+    #[tauri::command]
+    fn kc_chord(state: State<Shared>, name: String) -> Result<(), String> {
+        let chord = Chord::parse(&name).ok_or_else(|| format!("unknown chord {name:?}"))?;
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        inner.kc_controller.chord(chord)
+    }
+
+    /// Compact human-readable description of a routed control action for logs.
+    fn describe_control_action(action: &ControlAction) -> String {
+        match action {
+            ControlAction::CommandBar(cmd) => format!("command-bar {cmd:?}"),
+            ControlAction::Chord(c) => format!("chord {c:?}"),
+            ControlAction::SendText(t) => format!("send-text {t:?}"),
+            ControlAction::None => "none".to_string(),
+        }
+    }
+
     fn spawn_board_reader(
         app: AppHandle,
         state: Shared,
@@ -499,6 +552,32 @@ mod app {
             }
         }
 
+        // FP-4b (route B — "the hands"): map the board event to a control action
+        // via the pure router, then drive the local Kiro Crew window (focus +
+        // SendInput). This is the control path that supersedes route A. Runs
+        // alongside route A above; a `None` action is a no-op. Errors (e.g. no
+        // window matches) are logged, never fatal to the reader thread.
+        {
+            let action = state
+                .inner
+                .lock()
+                .ok()
+                .map(|inner| inner.kc_router.route(&frame))
+                .unwrap_or(ControlAction::None);
+            if action != ControlAction::None {
+                let desc = describe_control_action(&action);
+                let result = state
+                    .inner
+                    .lock()
+                    .map_err(|_| "state lock poisoned".to_string())
+                    .and_then(|mut inner| inner.kc_controller.apply(&action));
+                match result {
+                    Ok(()) => log_line(app, format!("[KC-CTL] {desc}")),
+                    Err(e) => log_line(app, format!("[KC-CTL] {desc} failed: {e}")),
+                }
+            }
+        }
+
         log_line(app, format!("[RX] {}", describe_inbound(&frame)));
         let _ = app.emit("board-event", inbound_to_json(&frame));
     }
@@ -515,6 +594,10 @@ mod app {
                 last_error: String::new(),
                 voice_source: VoiceSource::System,
                 kc_target: None,
+                kc_controller: KiroCrewController::new(None),
+                kc_router: ControlRouter::new(
+                    crate::kirocrew_control::ControlCtx::with_default_jumps(),
+                ),
             }),
         });
 
@@ -536,6 +619,10 @@ mod app {
                 kc_send,
                 kc_read,
                 kc_stop,
+                kc_bind_window,
+                kc_send_text,
+                kc_command_bar,
+                kc_chord,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");

@@ -89,6 +89,15 @@ function App() {
   const [kcError, setKcError] = useState("");
   const [kcBusy, setKcBusy] = useState(false);
 
+  // FP-4b route B ("Local Control", the hands) state: focus a Kiro Crew window
+  // and inject keystrokes. Independent of the route-A session-control client.
+  const [lcTitle, setLcTitle] = useState("");
+  const [lcBound, setLcBound] = useState(false);
+  const [lcText, setLcText] = useState("");
+  const [lcResult, setLcResult] = useState("");
+  const [lcError, setLcError] = useState("");
+  const [lcBusy, setLcBusy] = useState(false);
+
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
     [ports],
@@ -205,6 +214,57 @@ function App() {
     setKcReply("");
   }
 
+  // ── FP-4b route B: Local Control (window focus + keystroke injection) ──────
+  // Arg names match the #[tauri::command] signatures in src-tauri/src/lib.rs:
+  //   kc_bind_window(title)   kc_send_text(text)
+  //   kc_command_bar(cmd)     kc_chord(name)
+  async function runLc(action: () => Promise<void>) {
+    setLcBusy(true);
+    try {
+      setLcError("");
+      await action();
+    } catch (error) {
+      setLcError(error instanceof Error ? error.message : String(error));
+      setLcBound(false);
+      setLcResult("bind/inject failed");
+    } finally {
+      setLcBusy(false);
+    }
+  }
+
+  async function lcBind() {
+    // Empty title => backend tries the default candidates ("Kiro Crew"/"Agentic").
+    await invoke("kc_bind_window", { title: lcTitle.trim() });
+    setLcBound(true);
+    setLcResult(`focused ${lcTitle.trim() || "Kiro Crew / Agentic"}`);
+  }
+
+  async function lcSendText() {
+    const text = lcText.trim();
+    if (!text) {
+      setLcError("Type some text to send.");
+      return;
+    }
+    await invoke("kc_send_text", { text });
+    setLcResult(`sent text (${text.length} chars)`);
+  }
+
+  async function lcCommandBar() {
+    const cmd = lcText.trim();
+    if (!cmd) {
+      setLcError("Type a command for the command bar.");
+      return;
+    }
+    await invoke("kc_command_bar", { cmd });
+    setLcResult(`command bar: ${cmd}`);
+    setLcText("");
+  }
+
+  async function lcChord(name: string) {
+    await invoke("kc_chord", { name });
+    setLcResult(`chord: ${name}`);
+  }
+
   useEffect(() => {
     refreshRuntime().catch(() => undefined);
     const timer = window.setInterval(() => {
@@ -250,7 +310,7 @@ function App() {
             className={activeView === view ? "nav active" : "nav"}
             onClick={() => setActiveView(view)}
           >
-            {view === "kirocrew" ? "KIRO CREW" : view.toUpperCase()}
+            {view === "kirocrew" ? "LOCAL CTRL" : view.toUpperCase()}
           </button>
         ))}
         <div className="sidebar-footer">
@@ -431,65 +491,128 @@ function App() {
         )}
 
         {activeView === "kirocrew" && (
-          <Panel title="Kiro Crew Control">
-            <p className="hint">
-              Route A · session-control API on <code>127.0.0.1:5476</code>. Bind an agent session,
-              then send messages as agent turns and read replies.
-            </p>
+          <>
+            <Panel title="Local Control — the hands (route B)">
+              <p className="hint">
+                Focus a <strong>local</strong> Kiro Crew window and inject keystrokes directly
+                (no HTTP). Board keys route to command-bar / chords through the same backend.
+              </p>
 
-            <label>Agent name</label>
-            <input
-              value={kcAgent}
-              onChange={(event) => setKcAgent(event.target.value)}
-              placeholder="kirocrew"
-            />
-            <div className="actions" style={{ marginTop: 6 }}>
-              <button disabled={kcBusy} onClick={() => runKc(kcBind)}>
-                Bind session
-              </button>
-              <button
-                className="secondary"
-                disabled={kcBusy || !kcTarget}
-                onClick={() => runKc(kcStop)}
-              >
-                Stop
-              </button>
-            </div>
+              <label>Window title match</label>
+              <input
+                value={lcTitle}
+                onChange={(event) => setLcTitle(event.target.value)}
+                placeholder="Kiro Crew (blank = try Kiro Crew / Agentic)"
+              />
+              <div className="actions" style={{ marginTop: 6 }}>
+                <button disabled={lcBusy} onClick={() => runLc(lcBind)}>
+                  Bind window
+                </button>
+              </div>
 
-            <div className="lcd" style={{ marginTop: 14 }}>
-              <span>BOUND SESSION</span>
-              <strong>{kcTarget || "-- (bind first)"}</strong>
-            </div>
+              <div className="lcd" style={{ marginTop: 14 }}>
+                <span>FOCUS</span>
+                <strong>
+                  {lcBound ? "BOUND" : "-- (bind first)"}
+                  {lcResult ? ` · ${lcResult}` : ""}
+                </strong>
+              </div>
 
-            <label style={{ marginTop: 18 }}>Message</label>
-            <input
-              value={kcMessage}
-              onChange={(event) => setKcMessage(event.target.value)}
-              placeholder="Ask the agent to do something…"
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !kcBusy) runKc(kcSend);
-              }}
-            />
-            <div className="actions" style={{ marginTop: 6 }}>
-              <button disabled={kcBusy || !kcTarget} onClick={() => runKc(kcSend)}>
-                Send
-              </button>
-              <button
-                className="secondary"
-                disabled={kcBusy || !kcTarget}
-                onClick={() => runKc(kcRead)}
-              >
-                Read reply
-              </button>
-            </div>
+              <label style={{ marginTop: 18 }}>Text / command</label>
+              <input
+                value={lcText}
+                onChange={(event) => setLcText(event.target.value)}
+                placeholder="Type text to inject, or a command-bar command…"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !lcBusy) runLc(lcCommandBar);
+                }}
+              />
+              <div className="actions" style={{ marginTop: 6 }}>
+                <button disabled={lcBusy} onClick={() => runLc(lcSendText)}>
+                  Send text
+                </button>
+                <button disabled={lcBusy} onClick={() => runLc(lcCommandBar)}>
+                  Command bar (Ctrl+K)
+                </button>
+              </div>
 
-            <label style={{ marginTop: 18 }}>Last reply</label>
-            <div className="terminal" style={{ minHeight: 120, whiteSpace: "pre-wrap" }}>
-              {kcReply || "No reply yet. Send a message, then read the reply."}
-            </div>
+              <label style={{ marginTop: 18 }}>Quick chords</label>
+              <div className="actions" style={{ marginTop: 6, flexWrap: "wrap" }}>
+                {["enter", "esc", "up", "down", "left", "right"].map((name) => (
+                  <button
+                    key={name}
+                    className="secondary"
+                    disabled={lcBusy}
+                    onClick={() => runLc(() => lcChord(name))}
+                  >
+                    {name.toUpperCase()}
+                  </button>
+                ))}
+              </div>
 
-            {kcError && <div className="error-banner" style={{ marginTop: 14 }}>{kcError}</div>}
-          </Panel>
+              {lcError && <div className="error-banner" style={{ marginTop: 14 }}>{lcError}</div>}
+            </Panel>
+
+            <Panel title="Session Control — route A (legacy, HTTP)">
+              <p className="hint">
+                Route A · session-control API on <code>127.0.0.1:5476</code>. Superseded by
+                Local Control above for the control path; kept for direct session bind / send / read.
+              </p>
+
+              <label>Agent name</label>
+              <input
+                value={kcAgent}
+                onChange={(event) => setKcAgent(event.target.value)}
+                placeholder="kirocrew"
+              />
+              <div className="actions" style={{ marginTop: 6 }}>
+                <button disabled={kcBusy} onClick={() => runKc(kcBind)}>
+                  Bind session
+                </button>
+                <button
+                  className="secondary"
+                  disabled={kcBusy || !kcTarget}
+                  onClick={() => runKc(kcStop)}
+                >
+                  Stop
+                </button>
+              </div>
+
+              <div className="lcd" style={{ marginTop: 14 }}>
+                <span>BOUND SESSION</span>
+                <strong>{kcTarget || "-- (bind first)"}</strong>
+              </div>
+
+              <label style={{ marginTop: 18 }}>Message</label>
+              <input
+                value={kcMessage}
+                onChange={(event) => setKcMessage(event.target.value)}
+                placeholder="Ask the agent to do something…"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !kcBusy) runKc(kcSend);
+                }}
+              />
+              <div className="actions" style={{ marginTop: 6 }}>
+                <button disabled={kcBusy || !kcTarget} onClick={() => runKc(kcSend)}>
+                  Send
+                </button>
+                <button
+                  className="secondary"
+                  disabled={kcBusy || !kcTarget}
+                  onClick={() => runKc(kcRead)}
+                >
+                  Read reply
+                </button>
+              </div>
+
+              <label style={{ marginTop: 18 }}>Last reply</label>
+              <div className="terminal" style={{ minHeight: 120, whiteSpace: "pre-wrap" }}>
+                {kcReply || "No reply yet. Send a message, then read the reply."}
+              </div>
+
+              {kcError && <div className="error-banner" style={{ marginTop: 14 }}>{kcError}</div>}
+            </Panel>
+          </>
         )}
 
         {activeView === "logs" && (
@@ -523,7 +646,7 @@ function viewTitle(view: string): string {
     case "input":
       return "Live Input";
     case "kirocrew":
-      return "Kiro Crew Control";
+      return "Local Control";
     case "logs":
       return "Event Stream";
     default:
