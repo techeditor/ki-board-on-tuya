@@ -25,6 +25,7 @@
 #include "tuya_iot_dp.h"
 #include "netmgr.h"
 #include "tuya_authorize.h"
+#include "board_com_api.h"
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
 #include "netconn_wifi.h"
 #endif
@@ -132,7 +133,20 @@ OPERATE_RET ak_cloud_init(void)
 #endif
 
     s_iot_ready = true;
-    PR_NOTICE("cloud: tuya_iot_init + netmgr up (PID=%s)", TUYA_PRODUCT_ID);
+
+    /* Register the board's onboard peripherals — critically the audio codec
+     * ("audio_codec"), which ai_chat_init (called later from ak_asr_init) needs
+     * for mic capture; without it ai_chat fails with "audio driver audio_codec
+     * not exist" and K4 does nothing. Button/LED registration inside are
+     * #if defined(BUTTON_NAME/LED_NAME) — the profile leaves those unset, so only
+     * audio registers and ak_input / the WS2812 are untouched. Requires
+     * CONFIG_ENABLE_AUDIO_CODECS=y in the build profile. */
+    OPERATE_RET hw = board_register_hardware();
+    if (hw != OPRT_OK) {
+        PR_ERR("cloud: board_register_hardware failed: %d (mic may be unavailable)", hw);
+    }
+
+    PR_NOTICE("cloud: tuya_iot_init + netmgr + board HW up (PID=%s)", TUYA_PRODUCT_ID);
     return OPRT_OK;
 }
 
