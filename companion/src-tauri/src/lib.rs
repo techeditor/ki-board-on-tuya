@@ -205,7 +205,9 @@ mod app {
         port_name: Option<String>,
     ) -> Result<(), String> {
         let shared = state.inner();
-        // Tear down any existing connection first.
+        // Tear down any existing connection first. `transport.disconnect()` now
+        // sets the transport's stop flag so its background reader thread exits
+        // and releases the OS port before we open a new one.
         {
             let mut inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
             if let Some(mut existing) = inner.transport.take() {
@@ -213,7 +215,11 @@ mod app {
             }
             inner.kind = TransportKind::None;
             inner.endpoint.clear();
-            inner.connection_id = inner.connection_id.wrapping_add(1);
+            // NOTE: the generation counter is bumped exactly once per connect,
+            // in the install block below. Bumping it here too (as before) made
+            // `connection_id` advance by 2 per connect, desyncing the value the
+            // freshly spawned reader is gated on from the app state and letting
+            // event delivery break after a reconnect.
         }
 
         let (line_tx, line_rx) = mpsc::channel::<String>();
@@ -245,6 +251,10 @@ mod app {
     fn disconnect_device(state: State<Shared>) -> Result<(), String> {
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
         if let Some(mut transport) = inner.transport.take() {
+            // Sets the transport stop flag so the low-level serial reader thread
+            // exits and releases the OS port; dropping `transport` here closes
+            // the port handle we held. The app-level board reader then sees
+            // `transport.is_none()` on its next liveness check and also exits.
             transport.disconnect();
         }
         inner.kind = TransportKind::None;

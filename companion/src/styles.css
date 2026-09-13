@@ -265,16 +265,42 @@ h2 {
   margin-top: 16px;
 }
 
-.key-grid {
+.input-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.nav-cluster {
+  flex: 0 0 auto;
+}
+
+.cluster-label {
+  margin: 0 0 6px;
+}
+
+/* Compact five-key row: K1 K2 K3 K4(2x) K5. Tiles are intentionally small so
+   the whole physical layout reads at a glance. K4 (PTT) spans two columns. */
+.key-row {
+  flex: 1 1 320px;
+  min-width: 0;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  align-content: start;
 }
 
 .key-card {
   border: 2px solid var(--border);
   background: var(--panel-2);
-  padding: 12px;
+  padding: 8px;
+  grid-column: span 1;
+}
+
+.key-card.wide {
+  grid-column: span 2;
 }
 
 .key-screen {
@@ -285,9 +311,14 @@ h2 {
   background: linear-gradient(145deg, rgba(139, 92, 246, 0.9), rgba(88, 166, 255, 0.78));
   color: var(--text);
   font-weight: 700;
-  font-size: 20px;
+  font-size: 16px;
   overflow-wrap: anywhere;
   text-align: center;
+}
+
+/* The wide PTT key keeps a keycap-like shape rather than a tall square. */
+.key-card.wide .key-screen {
+  aspect-ratio: 2 / 1;
 }
 
 .key-card.hit .key-screen {
@@ -296,19 +327,19 @@ h2 {
 }
 
 .key-map {
-  margin-top: 10px;
+  margin-top: 8px;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .nav-pad {
   display: grid;
-  grid-template-columns: repeat(3, 56px);
-  grid-template-rows: repeat(3, 56px);
-  gap: 8px;
+  grid-template-columns: repeat(3, 44px);
+  grid-template-rows: repeat(3, 44px);
+  gap: 6px;
   justify-content: start;
-  margin-top: 8px;
+  margin-top: 0;
 }
 
 .nav-cell {
@@ -316,7 +347,7 @@ h2 {
   place-items: center;
   border: 2px solid var(--border);
   background: var(--panel-2);
-  font-size: 13px;
+  font-size: 11px;
   color: var(--muted);
 }
 
@@ -366,9 +397,12 @@ h2 {
     border-bottom: 3px solid var(--border-strong);
   }
 
-  .lcd-grid,
-  .key-grid {
+  .lcd-grid {
     grid-template-columns: 1fr;
+  }
+
+  .input-row {
+    flex-direction: column;
   }
 
   .topbar {

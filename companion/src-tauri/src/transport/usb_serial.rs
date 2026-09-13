@@ -18,6 +18,8 @@ use serde::Serialize;
 use serde_json::Value;
 use serialport::{SerialPort, SerialPortType};
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -40,6 +42,11 @@ pub struct SerialPortInfo {
 pub struct UsbSerialTransport {
     endpoint: String,
     port: Box<dyn SerialPort>,
+    /// Shared stop flag. `disconnect()` (or dropping the transport) sets it so
+    /// the background reader thread exits its blocking read loop and releases
+    /// its cloned port handle — otherwise the OS serial port stays open and
+    /// board frames keep arriving after a "disconnect".
+    stop: Arc<AtomicBool>,
 }
 
 impl UsbSerialTransport {
@@ -69,11 +76,13 @@ impl UsbSerialTransport {
         let reader = port
             .try_clone()
             .map_err(|err| format!("clone serial port failed: {err}"))?;
-        spawn_reader(reader, lines);
+        let stop = Arc::new(AtomicBool::new(false));
+        spawn_reader(reader, lines, stop.clone());
 
         Ok(Self {
             endpoint: selected,
             port,
+            stop,
         })
     }
 }
@@ -96,7 +105,19 @@ impl BoardTransport for UsbSerialTransport {
     }
 
     fn disconnect(&mut self) {
+        // Signal the background reader thread to exit its read loop; it will
+        // drop its cloned port handle on the way out. Flushing here is a
+        // courtesy so any pending write lands before the port closes.
+        self.stop.store(true, Ordering::SeqCst);
         let _ = self.port.flush();
+    }
+}
+
+impl Drop for UsbSerialTransport {
+    fn drop(&mut self) {
+        // Ensure the reader thread stops even if the transport is dropped
+        // without an explicit `disconnect()` (e.g. replaced on reconnect).
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
 
@@ -154,11 +175,16 @@ pub fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 }
 
 /// Read bytes off the port, reassemble complete lines, and forward them.
-fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender) {
+/// Exits (dropping the cloned port) as soon as `stop` is set, or when the
+/// receiver on the other end of `lines` is dropped.
+fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender, stop: Arc<AtomicBool>) {
     thread::spawn(move || {
         let mut acc = LineAccumulator::new();
         let mut chunk = [0u8; 512];
         loop {
+            if stop.load(Ordering::SeqCst) {
+                return; // disconnect requested -> release the cloned port
+            }
             match reader.read(&mut chunk) {
                 Ok(0) => thread::sleep(Duration::from_millis(20)),
                 Ok(n) => {
@@ -169,7 +195,7 @@ fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender) {
                     }
                 }
                 Err(ref err) if err.kind() == std::io::ErrorKind::TimedOut => {
-                    // Idle read timeout is normal; keep polling.
+                    // Idle read timeout is normal; loop back to re-check `stop`.
                 }
                 Err(_) => thread::sleep(Duration::from_millis(50)),
             }

@@ -43,16 +43,17 @@ const defaultStatus: Status = {
 };
 
 // Our 5 mechanical keys (k1..k5) with their phase-1 default intents. This is a
-// reference mapping placeholder — remapping UI lands in a later pass.
-const KEY_MAP: { id: string; label: string; intent: string }[] = [
+// reference mapping placeholder — remapping UI lands in a later pass. `wide`
+// marks K4 as the double-width push-to-talk key in the INPUT layout.
+const KEY_MAP: { id: string; label: string; intent: string; wide?: boolean }[] = [
   { id: "k1", label: "K1", intent: "Voice (push-to-talk)" },
   { id: "k2", label: "K2", intent: "Send / Enter" },
   { id: "k3", label: "K3", intent: "Cancel / Esc" },
-  { id: "k4", label: "K4", intent: "Backspace" },
+  { id: "k4", label: "K4", intent: "PTT (hold to talk)", wide: true },
   { id: "k5", label: "K5", intent: "Unassigned" },
 ];
 
-// 3×3 grid positions for the 5-way navigation switch.
+// 3×3 grid positions for the compact 5-way navigation cluster.
 const NAV_LAYOUT: (string | null)[] = [
   null, "up", null,
   "left", "center", "right",
@@ -68,8 +69,16 @@ function App() {
   const [lastKey, setLastKey] = useState("");
   const [lastNav, setLastNav] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
-  const [activeView, setActiveView] = useState<"device" | "input" | "logs">("device");
+  const [activeView, setActiveView] = useState<"device" | "input" | "kirocrew" | "logs">("device");
   const [uiError, setUiError] = useState("");
+
+  // FP-4 Kiro Crew panel state.
+  const [kcAgent, setKcAgent] = useState("kirocrew");
+  const [kcTarget, setKcTarget] = useState("");
+  const [kcMessage, setKcMessage] = useState("");
+  const [kcReply, setKcReply] = useState("");
+  const [kcError, setKcError] = useState("");
+  const [kcBusy, setKcBusy] = useState(false);
 
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
@@ -113,6 +122,59 @@ function App() {
     await invoke("send_config", { voiceEngine: engine }).catch(() => undefined);
   }
 
+  // ── FP-4 Kiro Crew session control (route A) ──────────────────────────────
+  // Wraps a kc_* invoke with local busy/error handling. Arg names match the
+  // #[tauri::command] signatures in src-tauri/src/lib.rs exactly:
+  //   kc_create(title, agent) -> String       kc_send(message, target?)
+  //   kc_read(target?) -> String              kc_stop(target?)
+  async function runKc(action: () => Promise<void>) {
+    setKcBusy(true);
+    try {
+      setKcError("");
+      await action();
+    } catch (error) {
+      setKcError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setKcBusy(false);
+    }
+  }
+
+  async function kcBind() {
+    const agent = kcAgent.trim();
+    if (!agent) {
+      setKcError("Enter an agent name before binding a session.");
+      return;
+    }
+    const id = await invoke<string>("kc_create", {
+      title: `Board control · ${agent}`,
+      agent,
+    });
+    setKcTarget(id);
+    setKcReply("");
+  }
+
+  async function kcSend() {
+    const message = kcMessage.trim();
+    if (!message) {
+      setKcError("Type a message before sending.");
+      return;
+    }
+    // Pass the bound target explicitly; the backend also falls back to it.
+    await invoke("kc_send", { message, target: kcTarget || null });
+    setKcMessage("");
+  }
+
+  async function kcRead() {
+    const reply = await invoke<string>("kc_read", { target: kcTarget || null });
+    setKcReply(reply);
+  }
+
+  async function kcStop() {
+    await invoke("kc_stop", { target: kcTarget || null });
+    setKcTarget("");
+    setKcReply("");
+  }
+
   useEffect(() => {
     refreshRuntime().catch(() => undefined);
     const timer = window.setInterval(() => {
@@ -152,13 +214,13 @@ function App() {
           <h1>Agentic Keyboard</h1>
           <p>Companion · T5AI-Core</p>
         </div>
-        {(["device", "input", "logs"] as const).map((view) => (
+        {(["device", "input", "kirocrew", "logs"] as const).map((view) => (
           <button
             key={view}
             className={activeView === view ? "nav active" : "nav"}
             onClick={() => setActiveView(view)}
           >
-            {view.toUpperCase()}
+            {view === "kirocrew" ? "KIRO CREW" : view.toUpperCase()}
           </button>
         ))}
         <div className="sidebar-footer">
@@ -249,32 +311,104 @@ function App() {
               Highlights the last key / direction reported by the board. Default intents shown are a
               placeholder for the remapping UI.
             </p>
-            <div className="key-grid" style={{ marginTop: 14 }}>
-              {KEY_MAP.map((key) => (
-                <div className={lastKey === key.id ? "key-card hit" : "key-card"} key={key.id}>
-                  <div className="key-screen">{key.label}</div>
-                  <div className="key-map">{key.intent}</div>
+            <div className="input-row">
+              <div className="nav-cluster">
+                <label className="cluster-label">5-WAY NAV</label>
+                <div className="nav-pad">
+                  {NAV_LAYOUT.map((dir, index) => (
+                    <div
+                      key={index}
+                      className={
+                        dir === null
+                          ? "nav-cell"
+                          : lastNav === dir
+                            ? "nav-cell dir hit"
+                            : "nav-cell dir"
+                      }
+                    >
+                      {dir ? dir.toUpperCase() : ""}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </div>
+
+              <div className="key-row">
+                {KEY_MAP.map((key) => (
+                  <div
+                    className={
+                      (lastKey === key.id ? "key-card hit" : "key-card") +
+                      (key.wide ? " wide" : "")
+                    }
+                    key={key.id}
+                  >
+                    <div className="key-screen">{key.label}</div>
+                    <div className="key-map">{key.intent}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Panel>
+        )}
+
+        {activeView === "kirocrew" && (
+          <Panel title="Kiro Crew Control">
+            <p className="hint">
+              Route A · session-control API on <code>127.0.0.1:5476</code>. Bind an agent session,
+              then send messages as agent turns and read replies.
+            </p>
+
+            <label>Agent name</label>
+            <input
+              value={kcAgent}
+              onChange={(event) => setKcAgent(event.target.value)}
+              placeholder="kirocrew"
+            />
+            <div className="actions" style={{ marginTop: 6 }}>
+              <button disabled={kcBusy} onClick={() => runKc(kcBind)}>
+                Bind session
+              </button>
+              <button
+                className="secondary"
+                disabled={kcBusy || !kcTarget}
+                onClick={() => runKc(kcStop)}
+              >
+                Stop
+              </button>
             </div>
 
-            <label style={{ marginTop: 20 }}>5-way navigation</label>
-            <div className="nav-pad">
-              {NAV_LAYOUT.map((dir, index) => (
-                <div
-                  key={index}
-                  className={
-                    dir === null
-                      ? "nav-cell"
-                      : lastNav === dir
-                        ? "nav-cell dir hit"
-                        : "nav-cell dir"
-                  }
-                >
-                  {dir ? dir.toUpperCase() : ""}
-                </div>
-              ))}
+            <div className="lcd" style={{ marginTop: 14 }}>
+              <span>BOUND SESSION</span>
+              <strong>{kcTarget || "-- (bind first)"}</strong>
             </div>
+
+            <label style={{ marginTop: 18 }}>Message</label>
+            <input
+              value={kcMessage}
+              onChange={(event) => setKcMessage(event.target.value)}
+              placeholder="Ask the agent to do something…"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !kcBusy) runKc(kcSend);
+              }}
+            />
+            <div className="actions" style={{ marginTop: 6 }}>
+              <button disabled={kcBusy || !kcTarget} onClick={() => runKc(kcSend)}>
+                Send
+              </button>
+              <button
+                className="secondary"
+                disabled={kcBusy || !kcTarget}
+                onClick={() => runKc(kcRead)}
+              >
+                Read reply
+              </button>
+            </div>
+
+            <label style={{ marginTop: 18 }}>Last reply</label>
+            <div className="terminal" style={{ minHeight: 120, whiteSpace: "pre-wrap" }}>
+              {kcReply || "No reply yet. Send a message, then read the reply."}
+            </div>
+
+            {kcError && <div className="error-banner" style={{ marginTop: 14 }}>{kcError}</div>}
           </Panel>
         )}
 
@@ -308,6 +442,8 @@ function viewTitle(view: string): string {
   switch (view) {
     case "input":
       return "Live Input";
+    case "kirocrew":
+      return "Kiro Crew Control";
     case "logs":
       return "Event Stream";
     default:
