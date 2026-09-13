@@ -88,6 +88,17 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
     case TUYA_EVENT_TIMESTAMP_SYNC:
         tal_event_publish("app.time.sync", NULL);
         break;
+    case TUYA_EVENT_RESET:
+        /* App-initiated unbind / factory reset requested (matches FP-3). Device
+         * application data is cleared by the SDK; nothing extra to persist here. */
+        PR_NOTICE("cloud: device reset requested (type=%d)", (int)event->value.asInteger);
+        break;
+    case TUYA_EVENT_RESET_COMPLETE:
+        /* Reset finished — reboot so the device comes back up unprovisioned and
+         * re-enters pairing (matches FP-3's tal_system_reset). */
+        PR_NOTICE("cloud: device reset complete — rebooting");
+        tal_system_reset();
+        break;
     default:
         break;
     }

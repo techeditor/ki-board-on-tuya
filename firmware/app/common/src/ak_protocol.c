@@ -35,6 +35,12 @@ int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text)
                     (unsigned)seq, text);
 }
 
+int ak_proto_asr_error(char *buf, size_t size, uint32_t seq, const char *code)
+{
+    return snprintf(buf, size, "{\"v\":1,\"seq\":%u,\"type\":\"asr\",\"payload\":{\"error\":\"%s\"}}\n",
+                    (unsigned)seq, code);
+}
+
 int ak_proto_voice_source(char *buf, size_t size, uint32_t seq, const char *source)
 {
     return snprintf(buf, size,

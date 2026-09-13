@@ -33,6 +33,7 @@
 #include <string.h>
 
 static ak_asr_text_cb s_on_text   = NULL;
+static ak_asr_error_cb s_on_error = NULL;
 static bool           s_ai_ready   = false; /* ai_chat_init succeeded */
 /* When true the board does NOT speak the AI's TTS reply: the recognized text is
  * routed to the PC / Kiro instead, so the keyboard stays silent. Local alert
@@ -73,9 +74,15 @@ static void __ai_event_cb(AI_NOTIFY_EVENT_T *event)
         break;
     case AI_USER_EVT_ASR_ERROR:
         PR_WARN("ak_asr: cloud ASR error");
+        if (s_on_error != NULL) {
+            s_on_error("asr_error");
+        }
         break;
     case AI_USER_EVT_ASR_EMPTY:
         PR_NOTICE("ak_asr: cloud ASR returned empty (no speech recognized)");
+        if (s_on_error != NULL) {
+            s_on_error("asr_empty");
+        }
         break;
     case AI_USER_EVT_TTS_START:
     case AI_USER_EVT_TTS_DATA:
@@ -92,9 +99,10 @@ static void __ai_event_cb(AI_NOTIFY_EVENT_T *event)
     }
 }
 
-OPERATE_RET ak_asr_init(ak_asr_text_cb on_text)
+OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error)
 {
-    s_on_text = on_text;
+    s_on_text  = on_text;
+    s_on_error = on_error;
 
     AI_CHAT_MODE_CFG_T cfg = {
         .default_mode = AI_CHAT_MODE_HOLD, /* MANUAL VAD; capture driven by us */
@@ -150,9 +158,10 @@ void ak_asr_stop(void)
 
 #else /* !AK_ASR_BOARD_CLOUD — stub */
 
-OPERATE_RET ak_asr_init(ak_asr_text_cb on_text)
+OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error)
 {
     (void)on_text;
+    (void)on_error;
     return OPRT_OK;
 }
 

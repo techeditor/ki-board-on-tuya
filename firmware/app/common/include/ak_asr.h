@@ -31,9 +31,15 @@
  *  a result. The callback runs on the ASR/event thread; keep it short. */
 typedef void (*ak_asr_text_cb)(const char *text);
 
+/** Called when cloud ASR fails to yield text: code is "asr_error" (recognition
+ *  error) or "asr_empty" (no speech). The app emits it as an `asr` error frame
+ *  so the PC knows the press produced nothing, vs a silent drop. */
+typedef void (*ak_asr_error_cb)(const char *code);
+
 /** Bring up the board-side cloud ASR backend (no-op in the stub). Register the
- *  recognized-text callback. Returns OPRT_OK in the stub. */
-OPERATE_RET ak_asr_init(ak_asr_text_cb on_text);
+ *  recognized-text callback and the error callback (either may be NULL).
+ *  Returns OPRT_OK in the stub. */
+OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error);
 
 /** True only when a real cloud ASR backend is compiled in AND ready (authorized
  *  + networked). The stub always returns false. */

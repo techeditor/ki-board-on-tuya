@@ -210,6 +210,19 @@ static void on_asr_text(const char *text)
     transport_write_frame(frame, ak_proto_asr(frame, sizeof(frame), s_sequence, text));
 }
 
+/* Cloud-ASR failure callback: forward "asr_error" / "asr_empty" to the PC as an
+ * `asr` error frame so a press that produced no text is visible, not silently
+ * dropped. Registered with ak_asr_init; no-op path when the stub is compiled. */
+static void on_asr_error(const char *code)
+{
+    char frame[FRAME_BUFFER_SIZE];
+    if (code == NULL || code[0] == '\0') {
+        return;
+    }
+    s_sequence++;
+    transport_write_frame(frame, ak_proto_asr_error(frame, sizeof(frame), s_sequence, code));
+}
+
 /* Wi-Fi provisioning status callback: report state to the PC as a wifi_status
  * frame. Registered with ak_wifi_init; the stub reports "failed" immediately. */
 static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
@@ -535,7 +548,7 @@ static void user_main(void)
         /* Board-side cloud ASR backend (stub unless AK_ASR_BOARD_CLOUD is set).
          * Registers the recognized-text callback that emits `asr` frames. Only
          * reached once the IoT context exists, so ai_chat_init cannot fault. */
-        ak_asr_init(on_asr_text);
+        ak_asr_init(on_asr_text, on_asr_error);
     }
     PR_NOTICE("Voice source: %s (cloud backend %s)", ak_voice_source_str(s_voice_source),
               ak_asr_available() ? "ready" : "stub/off");

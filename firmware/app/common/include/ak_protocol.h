@@ -21,6 +21,7 @@ int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state);
    The PC forwards it to Kiro Crew. `text` must already be a JSON-safe ASCII
    single line (caller sanitizes). */
 int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text);
+int ak_proto_asr_error(char *buf, size_t size, uint32_t seq, const char *code);
 /* Board -> PC: report the board's CURRENT voice routing ("cloud" = board mic +
    Tuya cloud ASR, "system" = PC's own ASR). Sent on change and on hello, so the
    companion UI reflects a board-side switch. */
