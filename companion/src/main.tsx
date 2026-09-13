@@ -14,6 +14,7 @@ type Status = {
   endpoint: string;
   firmware_version: string;
   last_error: string;
+  control_enabled?: boolean;
 };
 
 type SerialPortInfo = {
@@ -53,6 +54,7 @@ const defaultStatus: Status = {
   endpoint: "",
   firmware_version: "",
   last_error: "",
+  control_enabled: false,
 };
 
 // Our 5 mechanical keys (k1..k5) with their phase-1 default intents. This is a
@@ -82,6 +84,11 @@ function App() {
   const [selectedBle, setSelectedBle] = useState("");
   const [bleScanning, setBleScanning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  // Raw board-frame JSON stream, shown when the Logs "raw" toggle is on. The
+  // `logs` array is the human-readable/detailed view ([RX] key k4 …); `logsRaw`
+  // is the untouched JSON object per board-event.
+  const [logsRaw, setLogsRaw] = useState<string[]>([]);
+  const [logsShowRaw, setLogsShowRaw] = useState(false);
   const [voiceEngine, setVoiceEngine] = useState<"system" | "third_party">("system");
   const [lastKey, setLastKey] = useState("");
   const [lastNav, setLastNav] = useState("");
@@ -170,6 +177,15 @@ function App() {
   async function clearLogs() {
     await invoke("clear_logs");
     setLogs([]);
+    setLogsRaw([]);
+  }
+
+  // Enable/disable routing board keys to Kiro Crew control. Default OFF so the
+  // INPUT view only reflects trigger state; the board never drives Kiro Crew
+  // until the user explicitly turns this on.
+  async function toggleControl(enabled: boolean) {
+    await invoke("set_control_enabled", { enabled });
+    setStatus((s) => ({ ...s, control_enabled: enabled }));
   }
 
   async function selectVoiceEngine(engine: "system" | "third_party") {
@@ -322,13 +338,20 @@ function App() {
 
     const unlistenBoard = listen<BoardEvent>("board-event", (event) => {
       const payload = event.payload;
+      setLogsRaw((items) => [JSON.stringify(payload), ...items].slice(0, 200));
       if (payload.kind === "key" && payload.id) {
         if (payload.action === "down" || payload.action === "long") {
           setLastKey(payload.id);
+        } else if (payload.action === "up") {
+          // Release clears the highlight so the INPUT view reflects only the
+          // current physical trigger state, not the last-pressed key.
+          setLastKey((cur) => (cur === payload.id ? "" : cur));
         }
       } else if (payload.kind === "nav" && payload.dir) {
         if (payload.action === "down" || payload.action === "long") {
           setLastNav(payload.dir);
+        } else if (payload.action === "up") {
+          setLastNav((cur) => (cur === payload.dir ? "" : cur));
         }
       } else if (payload.kind === "voice") {
         setVoiceActive(payload.state === "start");
@@ -472,9 +495,13 @@ function App() {
                   </button>
                 </div>
                 <p className="hint warn-text">
-                  BLE GATT · service <code>0x1910</code>, notify <code>0x2B10</code>, write
-                  <code> 0x2B11</code>. Scan (~4s) finds boards advertising <code>AK-KB</code>; the
-                  companion greets only after notify subscription is live.
+                  BLE GATT · current firmware exposes Tuya command service{" "}
+                  <code>0xFD50</code> (notify <code>0x0002</code> board→PC, write
+                  <code> 0x0001</code> PC→board); older builds use{" "}
+                  <code>0x1910</code>/<code>0x2B10</code>/<code>0x2B11</code> and the
+                  companion accepts either. Scan (~4s) finds boards advertising{" "}
+                  <code>AK-KB</code>; the companion greets only after notify
+                  subscription is live.
                 </p>
               </>
             )}
@@ -512,6 +539,31 @@ function App() {
             <p className="hint">
               Highlights the last key / direction reported by the board. Default intents shown are a
               placeholder for the remapping UI.
+            </p>
+            <div className="lcd" style={{ marginTop: 6 }}>
+              <span>KIRO CREW CONTROL</span>
+              <strong className={status.control_enabled ? "good-text" : ""}>
+                {status.control_enabled ? "ENABLED — keys drive Kiro Crew" : "DISABLED — trigger check only"}
+              </strong>
+            </div>
+            <div className="actions" style={{ marginTop: 6 }}>
+              <button
+                className={status.control_enabled ? "secondary" : ""}
+                onClick={() => runAction(() => toggleControl(false))}
+              >
+                Disable control
+              </button>
+              <button
+                className={status.control_enabled ? "" : "secondary"}
+                onClick={() => runAction(() => toggleControl(true))}
+              >
+                Enable control
+              </button>
+            </div>
+            <p className="hint">
+              Default is <strong>disabled</strong>: pressing keys only checks the trigger state here
+              and never drives Kiro Crew. Enable to let board keys/nav control the local Kiro Crew
+              window.
             </p>
             <div className="input-row">
               <div className="nav-cluster">
@@ -750,12 +802,35 @@ function App() {
         {activeView === "logs" && (
           <Panel title="Event Stream">
             <div className="actions" style={{ marginTop: 0 }}>
+              <button
+                className={logsShowRaw ? "secondary" : ""}
+                onClick={() => setLogsShowRaw(false)}
+              >
+                Detailed
+              </button>
+              <button
+                className={logsShowRaw ? "" : "secondary"}
+                onClick={() => setLogsShowRaw(true)}
+              >
+                Raw JSON
+              </button>
               <button className="secondary" onClick={() => runAction(clearLogs)}>Clear</button>
             </div>
+            <p className="hint">
+              {logsShowRaw
+                ? "Raw board-frame JSON, one object per line (as received over the transport)."
+                : "Human-readable event log ([RX] key/nav/voice, [KC-CTL], [INFO]/[ERROR])."}
+            </p>
             <div className="log">
-              {logs.length === 0
-                ? "No events yet. Connect the board to see key / nav / voice frames."
-                : logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)}
+              {logsShowRaw ? (
+                logsRaw.length === 0
+                  ? "No frames yet. Connect the board to see raw JSON frames."
+                  : logsRaw.map((line, index) => <div key={`raw-${index}`}>{line}</div>)
+              ) : logs.length === 0 ? (
+                "No events yet. Connect the board to see key / nav / voice frames."
+              ) : (
+                logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)
+              )}
             </div>
           </Panel>
         )}
