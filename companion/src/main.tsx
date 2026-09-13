@@ -113,6 +113,11 @@ function App() {
   const [wifiPass, setWifiPass] = useState("");
   const [wifiStatus, setWifiStatus] = useState("");
   const [wifiBusy, setWifiBusy] = useState(false);
+  // Device license (UUID/AuthKey) provisioning.
+  const [licUuid, setLicUuid] = useState("");
+  const [licAuthkey, setLicAuthkey] = useState("");
+  const [licStatus, setLicStatus] = useState("");
+  const [licBusy, setLicBusy] = useState(false);
   const [lastKey, setLastKey] = useState("");
   const [lastNav, setLastNav] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
@@ -265,6 +270,25 @@ function App() {
       setUiError(error instanceof Error ? error.message : String(error));
     } finally {
       setWifiBusy(false);
+    }
+  }
+
+  async function sendLicense() {
+    if (!licUuid.trim() || !licAuthkey.trim()) {
+      setUiError("UUID and AuthKey are both required.");
+      return;
+    }
+    setLicBusy(true);
+    try {
+      setUiError("");
+      setLicStatus("writing…");
+      await invoke("send_license", { uuid: licUuid.trim(), authkey: licAuthkey.trim() });
+      setLicStatus("sent, waiting for board…");
+    } catch (error) {
+      setLicStatus("");
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLicBusy(false);
     }
   }
 
@@ -451,6 +475,11 @@ function App() {
       setWifiStatus(ssid ? `${state} · ${ssid}` : state);
     });
 
+    // The board reports device-license provisioning result.
+    const unlistenLicense = listen<string>("license-status", (event) => {
+      setLicStatus(event.payload);
+    });
+
     // Recover the sink token/running state on mount (survives a UI reload).
     invoke<string>("status_token")
       .then((token) => {
@@ -478,6 +507,7 @@ function App() {
       unlistenStatus.then((fn) => fn());
       unlistenVoiceSource.then((fn) => fn());
       unlistenWifi.then((fn) => fn());
+      unlistenLicense.then((fn) => fn());
     };
   }, []);
 
@@ -664,6 +694,36 @@ function App() {
             <p className="hint">
               Connect the board first (USB/BLE), then send WiFi credentials — the board joins the
               AP over its own radio (needs the cloud-ASR firmware profile; 2.4GHz only).
+            </p>
+
+            <label style={{ marginTop: 14 }}>Device license (UUID / AuthKey)</label>
+            <input
+              value={licUuid}
+              onChange={(event) => setLicUuid(event.target.value)}
+              placeholder="UUID (20 chars)"
+            />
+            <input
+              type="password"
+              value={licAuthkey}
+              onChange={(event) => setLicAuthkey(event.target.value)}
+              placeholder="AuthKey (32 chars)"
+              style={{ marginTop: 6 }}
+            />
+            <div className="actions" style={{ marginTop: 6 }}>
+              <button disabled={licBusy} onClick={() => runAction(sendLicense)}>
+                Write license
+              </button>
+            </div>
+            <div className="lcd" style={{ marginTop: 6 }}>
+              <span>LICENSE</span>
+              <strong className={licStatus.startsWith("written") ? "good-text" : ""}>
+                {licStatus || "-- (not written)"}
+              </strong>
+            </div>
+            <p className="hint">
+              Writes the per-device UUID/AuthKey to the board's persistent storage (needs the
+              cloud-ASR profile). The PID is compile-time (product-wide). The secret only travels
+              to the board — it is never stored or echoed by the companion.
             </p>
           </Panel>
         )}

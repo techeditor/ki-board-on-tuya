@@ -86,6 +86,16 @@ pub fn wifi_payload(ssid: &str, pass: &str) -> Value {
     })
 }
 
+/// PC -> board: provision the device license (UUID + AuthKey). Written to the
+/// board's persistent storage; PID stays compile-time.
+pub fn license_payload(uuid: &str, authkey: &str) -> Value {
+    serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "type": "license",
+        "payload": { "uuid": uuid, "authkey": authkey }
+    })
+}
+
 /// PC -> board: acknowledge a board event by its sequence number.
 pub fn ack_payload(seq: u64) -> Value {
     serde_json::json!({
@@ -205,6 +215,12 @@ pub struct WifiStatusPayload {
     pub ssid: String,
 }
 
+/// `license_status` payload: device-license provisioning result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LicenseStatusPayload {
+    pub state: String,
+}
+
 // ─────────────────────── Payload structs (PC -> board) ───────────────────────
 
 /// `display` payload.
@@ -273,6 +289,8 @@ pub enum Inbound {
     VoiceSource { seq: Option<u64>, payload: VoiceSourcePayload },
     /// The board's Wi-Fi provisioning/connection status.
     WifiStatus { seq: Option<u64>, payload: WifiStatusPayload },
+    /// The board's device-license provisioning result.
+    LicenseStatus { seq: Option<u64>, payload: LicenseStatusPayload },
     HelloAck(HelloAckPayload),
     Ping,
     Pong,
@@ -324,6 +342,9 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "wifi_status" => serde_json::from_value::<WifiStatusPayload>(payload)
             .ok()
             .map(|p| Inbound::WifiStatus { seq, payload: p }),
+        "license_status" => serde_json::from_value::<LicenseStatusPayload>(payload)
+            .ok()
+            .map(|p| Inbound::LicenseStatus { seq, payload: p }),
         "hello_ack" => serde_json::from_value::<HelloAckPayload>(payload)
             .ok()
             .map(Inbound::HelloAck),
@@ -549,6 +570,26 @@ mod tests {
             Inbound::WifiStatus {
                 seq: Some(13),
                 payload: WifiStatusPayload { state: "connected".into(), ssid: "MyAP".into() },
+            }
+        );
+    }
+
+    #[test]
+    fn license_payload_and_status_roundtrip() {
+        let p = license_payload("uuid123", "authkey456");
+        assert_eq!(p["type"], "license");
+        assert_eq!(p["payload"]["uuid"], "uuid123");
+        assert_eq!(p["payload"]["authkey"], "authkey456");
+
+        let ls = decode_line(
+            r#"{"v":1,"seq":14,"type":"license_status","payload":{"state":"written"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ls,
+            Inbound::LicenseStatus {
+                seq: Some(14),
+                payload: LicenseStatusPayload { state: "written".into() },
             }
         );
     }

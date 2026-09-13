@@ -58,6 +58,9 @@ pub fn describe_inbound(frame: &Inbound) -> String {
         Inbound::WifiStatus { seq, payload } => {
             format!("wifi_status {} {}{}", payload.state, payload.ssid, seq_suffix(*seq))
         }
+        Inbound::LicenseStatus { seq, payload } => {
+            format!("license_status {}{}", payload.state, seq_suffix(*seq))
+        }
         Inbound::HelloAck(ack) => format!(
             "hello_ack fw={} transport={} caps=[{}]",
             ack.fw,
@@ -103,6 +106,9 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
         }),
         Inbound::WifiStatus { seq, payload } => json!({
             "kind": "wifi_status", "seq": seq, "state": payload.state, "ssid": payload.ssid
+        }),
+        Inbound::LicenseStatus { seq, payload } => json!({
+            "kind": "license_status", "seq": seq, "state": payload.state
         }),
         Inbound::HelloAck(ack) => json!({
             "kind": "hello_ack", "fw": ack.fw,
@@ -409,6 +415,18 @@ mod app {
             return Err("SSID is required".to_string());
         }
         write_board(state.inner(), &protocol::wifi_payload(ssid.trim(), &pass))
+    }
+
+    /// Provision the device license (UUID + AuthKey) on the board. The board
+    /// persists it via tuya_authorize_write and reports back a license_status
+    /// frame (surfaced as a 'license-status' event). The secret only travels
+    /// board-ward; it is never stored by the companion or echoed back.
+    #[tauri::command]
+    fn send_license(state: State<Shared>, uuid: String, authkey: String) -> Result<(), String> {
+        if uuid.trim().is_empty() || authkey.trim().is_empty() {
+            return Err("UUID and AuthKey are both required".to_string());
+        }
+        write_board(state.inner(), &protocol::license_payload(uuid.trim(), authkey.trim()))
     }
 
     /// FP-5: choose which ASR handles a board voice event. `cloud` = board mic +
@@ -806,6 +824,12 @@ mod app {
             log_line(app, format!("[WIFI] {} {}", payload.state, payload.ssid));
         }
 
+        // Device-license provisioning result -> UI (no secret is carried).
+        if let Inbound::LicenseStatus { payload, .. } = &frame {
+            let _ = app.emit("license-status", payload.state.clone());
+            log_line(app, format!("[LICENSE] {}", payload.state));
+        }
+
         // FP-5: on a voice-start edge, if the active source is the PC's own ASR,
         // activate OS dictation (Win+H). Board-mic (cloud) source is a no-op here.
         // GATED on `control_enabled` (same gate as route B): while control is
@@ -907,6 +931,7 @@ mod app {
                 send_led,
                 send_config,
                 send_wifi,
+                send_license,
                 set_voice_source,
                 kc_bind_window,
                 kc_send_text,
