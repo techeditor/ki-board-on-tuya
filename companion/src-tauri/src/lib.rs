@@ -53,6 +53,12 @@ pub fn describe_inbound(frame: &Inbound) -> String {
         Inbound::Macro { seq, payload } => {
             format!("macro {}{}", payload.name, seq_suffix(*seq))
         }
+        Inbound::Asr { seq, payload } => {
+            format!("asr {:?}{}", payload.text, seq_suffix(*seq))
+        }
+        Inbound::VoiceSource { seq, payload } => {
+            format!("voice_source {}{}", payload.source, seq_suffix(*seq))
+        }
         Inbound::HelloAck(ack) => format!(
             "hello_ack fw={} transport={} caps=[{}]",
             ack.fw,
@@ -89,6 +95,12 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
         }),
         Inbound::Macro { seq, payload } => json!({
             "kind": "macro", "seq": seq, "name": payload.name
+        }),
+        Inbound::Asr { seq, payload } => json!({
+            "kind": "asr", "seq": seq, "text": payload.text
+        }),
+        Inbound::VoiceSource { seq, payload } => json!({
+            "kind": "voice_source", "seq": seq, "source": payload.source
         }),
         Inbound::HelloAck(ack) => json!({
             "kind": "hello_ack", "fw": ack.fw,
@@ -728,9 +740,32 @@ mod app {
         if let Inbound::Key { seq: Some(seq), .. }
         | Inbound::Nav { seq: Some(seq), .. }
         | Inbound::Voice { seq: Some(seq), .. }
-        | Inbound::Macro { seq: Some(seq), .. } = &frame
+        | Inbound::Macro { seq: Some(seq), .. }
+        | Inbound::Asr { seq: Some(seq), .. } = &frame
         {
             let _ = write_board(state, &protocol::ack_payload(*seq));
+        }
+
+        // The board reports its current voice routing (cloud/system) on change
+        // and on hello — mirror it into companion state and push to the UI so
+        // the selector reflects a board-side switch.
+        if let Inbound::VoiceSource { payload, .. } = &frame {
+            let src = VoiceSource::parse(&payload.source);
+            if let Ok(mut inner) = state.inner.lock() {
+                inner.voice_source = src;
+            }
+            let _ = app.emit("voice-source", src.as_str());
+            log_line(app, format!("[VOICE] board voice source = {}", src.as_str()));
+        }
+
+        // Board-side (cloud) ASR recognized text -> forward to the bound Kiro
+        // Crew session as a new agent turn (same path as the macro/dictation
+        // text). This is the FP-3 cloud-ASR result path.
+        if let Inbound::Asr { payload, .. } = &frame {
+            let text = payload.text.trim();
+            if !text.is_empty() {
+                forward_asr_to_session(app, state, text);
+            }
         }
 
         // FP-5: on a voice-start edge, if the active source is the PC's own ASR,

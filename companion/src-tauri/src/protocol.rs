@@ -175,6 +175,18 @@ pub struct MacroPayload {
     pub name: String,
 }
 
+/// `asr` payload: recognized speech text from the board-side (Tuya cloud) ASR.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsrPayload {
+    pub text: String,
+}
+
+/// `voice_source` payload: the board's current voice routing (`cloud`/`system`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceSourcePayload {
+    pub source: String,
+}
+
 // ─────────────────────── Payload structs (PC -> board) ───────────────────────
 
 /// `display` payload.
@@ -237,6 +249,10 @@ pub enum Inbound {
     Nav { seq: Option<u64>, payload: NavPayload },
     Voice { seq: Option<u64>, payload: VoicePayload },
     Macro { seq: Option<u64>, payload: MacroPayload },
+    /// Recognized speech text from the board-side (Tuya cloud) ASR.
+    Asr { seq: Option<u64>, payload: AsrPayload },
+    /// The board's current voice routing, reported on change / on hello.
+    VoiceSource { seq: Option<u64>, payload: VoiceSourcePayload },
     HelloAck(HelloAckPayload),
     Ping,
     Pong,
@@ -279,6 +295,12 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "macro" => serde_json::from_value::<MacroPayload>(payload)
             .ok()
             .map(|p| Inbound::Macro { seq, payload: p }),
+        "asr" => serde_json::from_value::<AsrPayload>(payload)
+            .ok()
+            .map(|p| Inbound::Asr { seq, payload: p }),
+        "voice_source" => serde_json::from_value::<VoiceSourcePayload>(payload)
+            .ok()
+            .map(|p| Inbound::VoiceSource { seq, payload: p }),
         "hello_ack" => serde_json::from_value::<HelloAckPayload>(payload)
             .ok()
             .map(Inbound::HelloAck),
@@ -463,6 +485,30 @@ mod tests {
     }
 
     // ── Decoding: tolerant / bad frames ──────────────────────
+
+    #[test]
+    fn decode_asr_and_voice_source() {
+        let asr = decode_line(r#"{"v":1,"seq":11,"type":"asr","payload":{"text":"hello world"}}"#)
+            .unwrap();
+        assert_eq!(
+            asr,
+            Inbound::Asr {
+                seq: Some(11),
+                payload: AsrPayload { text: "hello world".into() },
+            }
+        );
+        let vs = decode_line(
+            r#"{"v":1,"seq":12,"type":"voice_source","payload":{"source":"cloud"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            vs,
+            Inbound::VoiceSource {
+                seq: Some(12),
+                payload: VoiceSourcePayload { source: "cloud".into() },
+            }
+        );
+    }
 
     #[test]
     fn unknown_type_is_surfaced_not_dropped() {
