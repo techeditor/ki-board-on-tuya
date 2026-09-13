@@ -26,7 +26,53 @@
 #include "tal_api.h"
 #include "tkl_output.h"
 
-#if AK_TRANSPORT_UART
+#if AK_TRANSPORT_DUAL
+/* DUAL: UART0 + BLE GATT at the same time. Every frame goes to BOTH backends —
+ * ak_uart_write always writes UART0; ak_ble_gatt_write NOTIFYs only while a
+ * central is subscribed and drops otherwise — so "send on the connected link"
+ * falls out naturally. Reads poll both and merge into the one ak_rx assembler. */
+#include "ak_ble_gatt.h"
+#include "ak_uart.h"
+#define AK_TRANSPORT_NAME "dual"
+/* BLE still greets on notify-subscribe; UART greets immediately (both fire). */
+#define AK_TRANSPORT_GREET_ON_SUBSCRIBE 1
+
+static OPERATE_RET ak_transport_init(void)
+{
+    OPERATE_RET ru = ak_uart_init();
+    OPERATE_RET rb = ak_ble_gatt_init();
+    /* Succeed if at least one link came up; warn on a partial failure. */
+    if (ru != OPRT_OK) {
+        PR_WARN("dual: UART init failed: %d", ru);
+    }
+    if (rb != OPRT_OK) {
+        PR_WARN("dual: BLE init failed: %d", rb);
+    }
+    return (ru == OPRT_OK || rb == OPRT_OK) ? OPRT_OK : ru;
+}
+
+static int ak_transport_write(const void *data, uint32_t length)
+{
+    /* Write to both; report the UART count (BLE silently drops when unsubscribed
+     * so its short-write is not an error worth surfacing). */
+    int wu = ak_uart_write(data, length);
+    (void)ak_ble_gatt_write(data, length);
+    return wu;
+}
+
+static int ak_transport_read(uint8_t *data, uint32_t length)
+{
+    /* Prefer UART bytes this tick; if none, drain BLE. The caller feeds whatever
+     * it gets into the single ak_rx line assembler, so alternating sources are
+     * fine as long as complete lines are not interleaved (they are not: the PC
+     * talks over exactly one link at a time). */
+    int n = ak_uart_read(data, length);
+    if (n > 0) {
+        return n;
+    }
+    return ak_ble_gatt_read(data, length);
+}
+#elif AK_TRANSPORT_UART
 #include "ak_uart.h"
 #define ak_transport_init  ak_uart_init
 #define ak_transport_write ak_uart_write
@@ -165,7 +211,17 @@ static void ak_status_wrap(uint16_t x, uint16_t y, const char *s, uint16_t fg, u
  * `out` must hold at least 28 bytes. Returns the title-bar color. */
 static uint16_t ak_link_header(char *out, uint32_t out_len)
 {
-#if AK_TRANSPORT_UART
+#if AK_TRANSPORT_DUAL
+    /* Show both links. Green if EITHER is up (USB greeted or BLE live). */
+    const char *usb = s_pc_connected ? "USB" : "usb";
+    ak_ble_link_state_t bs = ak_ble_gatt_link_state();
+    const char *ble = (bs == AK_BLE_LINK_LIVE) ? "BLE"
+                    : (bs == AK_BLE_LINK_CONNECTED) ? "ble*"
+                    : "adv";
+    (void)snprintf(out, out_len, "Companion: %s | %s", usb, ble);
+    bool up = s_pc_connected || (bs == AK_BLE_LINK_LIVE);
+    return up ? AK_COL_GREEN : AK_COL_ORANGE;
+#elif AK_TRANSPORT_UART
     if (s_pc_connected) {
         (void)snprintf(out, out_len, "Companion: USB Connected");
         return AK_COL_GREEN;
@@ -307,7 +363,11 @@ static void user_main(void)
     last_heartbeat = now;
 
     ak_rx_reader_init(&s_rx);
-#if !AK_TRANSPORT_GREET_ON_SUBSCRIBE
+#if AK_TRANSPORT_DUAL
+    /* DUAL: UART0 is up immediately, so greet now over both (BLE drops it until
+     * subscribed); BLE additionally greets on notify-subscribe in the loop. */
+    send_hello_ack();
+#elif !AK_TRANSPORT_GREET_ON_SUBSCRIBE
     /* Wired transports are up as soon as init returns: greet immediately. */
     send_hello_ack();
 #else

@@ -40,7 +40,9 @@ target_include_directories(${EXAMPLE_LIB}
 # sets exactly one CONFIG_AK_TRANSPORT_* = y; translate it into the app-level
 # C macro that ak_features.h / tuya_app_main.c switch on. Absent any of these
 # (the default TUYA_T5AI_CORE.config), ak_features.h defaults to UART.
-if (CONFIG_AK_TRANSPORT_BLE_GATT STREQUAL "y")
+if (CONFIG_AK_TRANSPORT_DUAL STREQUAL "y")
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_TRANSPORT_DUAL=1 AK_TRANSPORT_UART=1 AK_TRANSPORT_BLE_GATT=1)
+elseif (CONFIG_AK_TRANSPORT_BLE_GATT STREQUAL "y")
     target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_TRANSPORT_UART=0 AK_TRANSPORT_BLE_GATT=1)
 elseif (CONFIG_AK_TRANSPORT_BLE_HID STREQUAL "y")
     target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_TRANSPORT_UART=0 AK_TRANSPORT_BLE_HID=1)

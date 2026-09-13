@@ -9,6 +9,11 @@ config AK_TRANSPORT_BLE_GATT
     default n
     select ENABLE_BLUETOOTH
 
+config AK_TRANSPORT_DUAL
+    bool "Use UART0 AND BLE GATT together (send/read on whichever link is up)"
+    default n
+    select ENABLE_BLUETOOTH
+
 config AK_TRANSPORT_BLE_HID
     bool "Use the BLE HID transport backend (standard keyboard, no JSONL)"
     default n

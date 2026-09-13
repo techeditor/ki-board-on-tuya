@@ -19,7 +19,17 @@
 #ifndef AK_FEATURES_H
 #define AK_FEATURES_H
 
-/* ---- Transport backend (exactly one enabled) ---- */
+/* ---- Transport backend ----
+ * Normally exactly one of UART / BLE_GATT / BLE_HID is enabled. The DUAL
+ * profile is the exception: it runs UART0 AND BLE GATT at the same time, so
+ * the board sends every frame on both and reads from both — the active link
+ * (USB plugged in, or a BLE central subscribed) is whichever one is up. A
+ * build profile sets CONFIG_AK_TRANSPORT_DUAL=y -> CMakeLists translates it to
+ * -DAK_TRANSPORT_DUAL=1 -DAK_TRANSPORT_UART=1 -DAK_TRANSPORT_BLE_GATT=1.
+ */
+#ifndef AK_TRANSPORT_DUAL
+#define AK_TRANSPORT_DUAL 0
+#endif
 #ifndef AK_TRANSPORT_UART
 #define AK_TRANSPORT_UART 1 /* phase 1: UART0 / CH340C, JSONL protocol v1 */
 #endif
@@ -43,8 +53,15 @@
 #define AK_ENABLE_DISPLAY 1
 #endif
 
+#if AK_TRANSPORT_DUAL
+/* DUAL = UART0 + BLE GATT together; BLE HID is incompatible with it. */
+#if (AK_TRANSPORT_UART != 1) || (AK_TRANSPORT_BLE_GATT != 1) || AK_TRANSPORT_BLE_HID
+#error "AK_TRANSPORT_DUAL requires UART=1 and BLE_GATT=1 and BLE_HID=0"
+#endif
+#else
 #if (AK_TRANSPORT_UART + AK_TRANSPORT_BLE_GATT + AK_TRANSPORT_BLE_HID) != 1
 #error "Select exactly one AK_TRANSPORT_* backend in the build profile"
+#endif
 #endif
 
 #endif /* AK_FEATURES_H */
