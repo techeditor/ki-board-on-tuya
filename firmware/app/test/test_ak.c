@@ -152,6 +152,12 @@ static void test_protocol(void)
               "{\"v\":1,\"seq\":12,\"type\":\"voice_source\",\"payload\":{\"source\":\"cloud\"}}\n",
               "voice_source frame");
 
+    ak_proto_wifi_status(buf, sizeof(buf), 13, "connected", "MyAP");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":13,\"type\":\"wifi_status\",\"payload\":{\"state\":\"connected\","
+              "\"ssid\":\"MyAP\"}}\n",
+              "wifi_status frame");
+
     ak_proto_hello_ack(buf, sizeof(buf), "0.1.0", "uart");
     CHECK_STR(buf,
               "{\"v\":1,\"type\":\"hello_ack\",\"payload\":{\"fw\":\"0.1.0\",\"transport\":\"uart\","

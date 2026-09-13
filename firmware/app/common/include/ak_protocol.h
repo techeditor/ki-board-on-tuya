@@ -25,6 +25,10 @@ int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text);
    Tuya cloud ASR, "system" = PC's own ASR). Sent on change and on hello, so the
    companion UI reflects a board-side switch. */
 int ak_proto_voice_source(char *buf, size_t size, uint32_t seq, const char *source);
+/* Board -> PC: report Wi-Fi provisioning/connection status. `state` is one of
+   "connecting" / "connected" / "failed" / "disconnected"; `ssid` is the target
+   AP (may be empty). Sent when a wifi config frame is applied and on change. */
+int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state, const char *ssid);
 
 /* Handshake / heartbeat. */
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport);

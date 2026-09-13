@@ -42,6 +42,14 @@ int ak_proto_voice_source(char *buf, size_t size, uint32_t seq, const char *sour
                     (unsigned)seq, source);
 }
 
+int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state, const char *ssid)
+{
+    return snprintf(buf, size,
+                    "{\"v\":1,\"seq\":%u,\"type\":\"wifi_status\",\"payload\":{\"state\":\"%s\","
+                    "\"ssid\":\"%s\"}}\n",
+                    (unsigned)seq, state, ssid ? ssid : "");
+}
+
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport)
 {
     return snprintf(buf, size,

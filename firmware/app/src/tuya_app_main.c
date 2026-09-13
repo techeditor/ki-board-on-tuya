@@ -20,6 +20,7 @@
 #include "ak_display.h"
 #include "ak_features.h"
 #include "ak_asr.h"
+#include "ak_wifi.h"
 #include "ak_input.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
@@ -206,6 +207,17 @@ static void on_asr_text(const char *text)
     }
     s_sequence++;
     transport_write_frame(frame, ak_proto_asr(frame, sizeof(frame), s_sequence, text));
+}
+
+/* Wi-Fi provisioning status callback: report state to the PC as a wifi_status
+ * frame. Registered with ak_wifi_init; the stub reports "failed" immediately. */
+static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
+{
+    char frame[FRAME_BUFFER_SIZE];
+    s_sequence++;
+    transport_write_frame(frame,
+                          ak_proto_wifi_status(frame, sizeof(frame), s_sequence,
+                                               ak_wifi_state_str(state), ssid));
 }
 
 /* A K4 (PTT) edge -> drive the selected voice path. On the cloud route the
@@ -402,6 +414,19 @@ static void on_rx_line(const char *line)
             send_voice_source();
         }
         send_ack(seq);
+    } else if (strcmp(type, "wifi") == 0) {
+        /* PC provisions Wi-Fi: {"type":"wifi","payload":{"ssid":"..","pass":".."}}.
+         * Apply via ak_wifi (netmgr) so the board connects + cloud-activates;
+         * the connect result comes back asynchronously as a wifi_status frame. */
+        uint32_t seq  = 0;
+        char     ssid[64] = "";
+        char     pass[80] = "";
+        ak_json_uint(line, "seq", &seq);
+        ak_json_str(line, "ssid", ssid, sizeof(ssid));
+        ak_json_str(line, "pass", pass, sizeof(pass));
+        PR_NOTICE("wifi config: ssid=%s (pass %u chars)", ssid, (unsigned)strlen(pass));
+        ak_wifi_connect(ssid, pass);
+        send_ack(seq);
     } else if (strcmp(type, "display") == 0) {
         char agent[32] = "";
         char state[16] = "";
@@ -456,6 +481,11 @@ static void user_main(void)
     ak_asr_init(on_asr_text);
     PR_NOTICE("Voice source: %s (cloud backend %s)", ak_voice_source_str(s_voice_source),
               ak_asr_available() ? "ready" : "stub/off");
+
+    /* Wi-Fi provisioning (netmgr in the cloud profile, stub otherwise). The PC
+     * pushes credentials over a `wifi` frame; results return as wifi_status. */
+    ak_wifi_init(on_wifi_status);
+    PR_NOTICE("Wi-Fi provisioning: %s", ak_wifi_available() ? "ready" : "stub/off");
 
 #if AK_ENABLE_DISPLAY
     /* Status LCD (shared ak_statuslcd + ak_gfx, no LVGL): renders Kiro Crew
