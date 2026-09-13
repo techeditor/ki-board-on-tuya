@@ -301,9 +301,22 @@ mod windows_impl {
         fn ShowWindow(hwnd: HWND, n_cmd_show: i32) -> BOOL;
         fn IsIconic(hwnd: HWND) -> BOOL;
         fn SendMessageW(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize;
+        fn GetForegroundWindow() -> HWND;
+        fn GetWindowThreadProcessId(hwnd: HWND, lp_process_id: *mut u32) -> u32;
+        fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: BOOL) -> BOOL;
+        fn AllowSetForegroundWindow(dw_process_id: u32) -> BOOL;
+        fn BringWindowToTop(hwnd: HWND) -> BOOL;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
     }
 
     const SW_RESTORE: i32 = 9;
+    const SW_SHOW: i32 = 5;
+    // ASFW_ANY — allow any process to set the foreground window.
+    const ASFW_ANY: u32 = 0xFFFF_FFFF;
 
     // --- SendInput helpers (same shape as inject.rs). ---
 
@@ -496,16 +509,52 @@ mod windows_impl {
                     )
                 })?;
 
-            unsafe {
+            // Force the target to the foreground. A bare SetForegroundWindow is
+            // refused by Windows' focus-stealing rules when our process is not the
+            // current foreground owner, so the injected keys would land in whatever
+            // window is actually focused. The reliable path is to attach OUR input
+            // queue AND the current foreground window's input queue to the target's
+            // thread for the duration of the call — Windows then treats us as the
+            // foreground thread and honours SetForegroundWindow. Detach in all cases.
+            let ok = unsafe {
+                let fg = GetForegroundWindow();
+                let target_thread = GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+                let fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
+                let cur_thread = GetCurrentThreadId();
+
+                let attached_cur = target_thread != cur_thread
+                    && AttachThreadInput(cur_thread, target_thread, 1) != 0;
+                let attached_fg = fg_thread != 0
+                    && fg_thread != target_thread
+                    && fg_thread != cur_thread
+                    && AttachThreadInput(fg_thread, target_thread, 1) != 0;
+
+                AllowSetForegroundWindow(ASFW_ANY);
                 if IsIconic(hwnd) != 0 {
                     ShowWindow(hwnd, SW_RESTORE);
+                } else {
+                    ShowWindow(hwnd, SW_SHOW);
                 }
-                if SetForegroundWindow(hwnd) == 0 {
-                    // Non-fatal: foreground can be refused by the OS focus rules,
-                    // but the window handle is valid. Record and continue.
-                    eprintln!("control: SetForegroundWindow refused (window still targeted)");
+                BringWindowToTop(hwnd);
+                let set = SetForegroundWindow(hwnd) != 0;
+
+                if attached_fg {
+                    AttachThreadInput(fg_thread, target_thread, 0);
                 }
+                if attached_cur {
+                    AttachThreadInput(cur_thread, target_thread, 0);
+                }
+                set
+            };
+            if !ok {
+                // Non-fatal: the handle is valid and the attach dance usually still
+                // lands focus even when the return is 0. Record and continue.
+                eprintln!("control: SetForegroundWindow returned 0 (window still targeted)");
             }
+            // Let the target actually receive focus before keys are injected —
+            // SendInput otherwise races the foreground switch and keys are dropped
+            // or land in the previous window.
+            std::thread::sleep(std::time::Duration::from_millis(40));
             self.hwnd = Some(hwnd);
             Ok(())
         }
