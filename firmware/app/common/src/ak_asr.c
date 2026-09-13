@@ -26,6 +26,7 @@
 
 #include "ai_chat_main.h"
 #include "ai_user_event.h"
+#include "ai_audio_player.h"
 #include "netmgr.h"
 #include "tuya_ai_agent.h"
 
@@ -33,6 +34,11 @@
 
 static ak_asr_text_cb s_on_text   = NULL;
 static bool           s_ai_ready   = false; /* ai_chat_init succeeded */
+/* When true the board does NOT speak the AI's TTS reply: the recognized text is
+ * routed to the PC / Kiro instead, so the keyboard stays silent. Local alert
+ * tones (AI_USER_EVT_PLAY_ALERT) use the same player at a different time and are
+ * left untouched. Ported from FP-3 (app_chat_bot.c). */
+static bool           s_mute_ai_reply = true;
 
 /* Copy AI_NOTIFY_TEXT_T into a NUL-terminated buffer and hand to the callback.
  * The full UTF-8 text is preserved (the caller sanitizes for JSON on the wire). */
@@ -56,12 +62,32 @@ static void __ai_event_cb(AI_NOTIFY_EVENT_T *event)
         return;
     }
     switch (event->type) {
+    case AI_USER_EVT_MIC_DATA:
+        /* Mic capture is streaming => K4 push-to-talk is held. (FP-3 emits a
+         * "listening" edge here; the product reflects status via the LCD from
+         * tuya_app_main, so nothing to forward from this layer.) */
+        break;
     case AI_USER_EVT_ASR_OK:
+        /* Recognized text ready -> hand to the app, which emits an `asr` frame. */
         __emit_text((const AI_NOTIFY_TEXT_T *)event->data);
         break;
+    case AI_USER_EVT_ASR_ERROR:
+        PR_WARN("ak_asr: cloud ASR error");
+        break;
+    case AI_USER_EVT_ASR_EMPTY:
+        PR_NOTICE("ak_asr: cloud ASR returned empty (no speech recognized)");
+        break;
+    case AI_USER_EVT_TTS_START:
+    case AI_USER_EVT_TTS_DATA:
+        /* Suppress the AI's spoken reply: the recognized text is routed to the
+         * PC / Kiro, so the board must not talk back. Stop the tone player as the
+         * reply TTS streams. Local alert tones fire on AI_USER_EVT_PLAY_ALERT at a
+         * different time and are left untouched. (Ported from FP-3.) */
+        if (s_mute_ai_reply) {
+            ai_audio_player_stop(AI_AUDIO_PLAYER_ALL);
+        }
+        break;
     default:
-        /* ASR_ERROR / ASR_EMPTY / TTS_* etc.: nothing to forward here. The
-         * board does not speak the reply back in the keyboard use case. */
         break;
     }
 }
