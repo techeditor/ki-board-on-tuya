@@ -307,7 +307,7 @@ h2 {
 .key-screen {
   display: grid;
   place-items: center;
-  aspect-ratio: 1;
+  height: 44px;
   border: 2px solid var(--field);
   background: linear-gradient(145deg, rgba(139, 92, 246, 0.9), rgba(88, 166, 255, 0.78));
   color: var(--text);
@@ -315,11 +315,6 @@ h2 {
   font-size: 11px;
   overflow-wrap: anywhere;
   text-align: center;
-}
-
-/* The wide PTT key keeps a keycap-like shape rather than a tall square. */
-.key-card.wide .key-screen {
-  aspect-ratio: 2 / 1;
 }
 
 .key-card.hit .key-screen {
@@ -348,7 +343,8 @@ h2 {
   place-items: center;
   border: 2px solid var(--border);
   background: var(--panel-2);
-  font-size: 13px;
+  font-size: 11px;
+  font-weight: 700;
   color: var(--muted);
 }
 

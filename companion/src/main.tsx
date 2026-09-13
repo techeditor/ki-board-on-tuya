@@ -102,16 +102,8 @@ function App() {
   const [activeView, setActiveView] = useState<"device" | "input" | "kirocrew" | "logs">("device");
   const [uiError, setUiError] = useState("");
 
-  // FP-4 Kiro Crew panel state.
-  const [kcAgent, setKcAgent] = useState("kirocrew");
-  const [kcTarget, setKcTarget] = useState("");
-  const [kcMessage, setKcMessage] = useState("");
-  const [kcReply, setKcReply] = useState("");
-  const [kcError, setKcError] = useState("");
-  const [kcBusy, setKcBusy] = useState(false);
-
   // FP-4b route B ("Local Control", the hands) state: focus a Kiro Crew window
-  // and inject keystrokes. Independent of the route-A session-control client.
+  // and inject keystrokes.
   const [lcTitle, setLcTitle] = useState("");
   const [lcBound, setLcBound] = useState(false);
   const [lcText, setLcText] = useState("");
@@ -206,59 +198,6 @@ function App() {
     // set_voice_source updates companion state AND mirrors the choice to the
     // board via a config frame. Ignore the "not connected" error when offline.
     await invoke("set_voice_source", { source }).catch(() => undefined);
-  }
-
-  // ── FP-4 Kiro Crew session control (route A) ──────────────────────────────
-  // Wraps a kc_* invoke with local busy/error handling. Arg names match the
-  // #[tauri::command] signatures in src-tauri/src/lib.rs exactly:
-  //   kc_create(title, agent) -> String       kc_send(message, target?)
-  //   kc_read(target?) -> String              kc_stop(target?)
-  async function runKc(action: () => Promise<void>) {
-    setKcBusy(true);
-    try {
-      setKcError("");
-      await action();
-    } catch (error) {
-      setKcError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setKcBusy(false);
-    }
-  }
-
-  async function kcBind() {
-    const agent = kcAgent.trim();
-    if (!agent) {
-      setKcError("Enter an agent name before binding a session.");
-      return;
-    }
-    const id = await invoke<string>("kc_create", {
-      title: `Board control · ${agent}`,
-      agent,
-    });
-    setKcTarget(id);
-    setKcReply("");
-  }
-
-  async function kcSend() {
-    const message = kcMessage.trim();
-    if (!message) {
-      setKcError("Type a message before sending.");
-      return;
-    }
-    // Pass the bound target explicitly; the backend also falls back to it.
-    await invoke("kc_send", { message, target: kcTarget || null });
-    setKcMessage("");
-  }
-
-  async function kcRead() {
-    const reply = await invoke<string>("kc_read", { target: kcTarget || null });
-    setKcReply(reply);
-  }
-
-  async function kcStop() {
-    await invoke("kc_stop", { target: kcTarget || null });
-    setKcTarget("");
-    setKcReply("");
   }
 
   // ── FP-4b route B: Local Control (window focus + keystroke injection) ──────
@@ -848,66 +787,6 @@ function App() {
               </div>
 
               {ssError && <div className="error-banner" style={{ marginTop: 14 }}>{ssError}</div>}
-            </Panel>
-
-            <Panel title="Session Control — route A (legacy, HTTP)">
-              <p className="hint">
-                Route A · session-control API on <code>127.0.0.1:5476</code>. Superseded by
-                Local Control above for the control path; kept for direct session bind / send / read.
-              </p>
-
-              <label>Agent name</label>
-              <input
-                value={kcAgent}
-                onChange={(event) => setKcAgent(event.target.value)}
-                placeholder="kirocrew"
-              />
-              <div className="actions" style={{ marginTop: 6 }}>
-                <button disabled={kcBusy} onClick={() => runKc(kcBind)}>
-                  Bind session
-                </button>
-                <button
-                  className="secondary"
-                  disabled={kcBusy || !kcTarget}
-                  onClick={() => runKc(kcStop)}
-                >
-                  Stop
-                </button>
-              </div>
-
-              <div className="lcd" style={{ marginTop: 14 }}>
-                <span>BOUND SESSION</span>
-                <strong>{kcTarget || "-- (bind first)"}</strong>
-              </div>
-
-              <label style={{ marginTop: 18 }}>Message</label>
-              <input
-                value={kcMessage}
-                onChange={(event) => setKcMessage(event.target.value)}
-                placeholder="Ask the agent to do something…"
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !kcBusy) runKc(kcSend);
-                }}
-              />
-              <div className="actions" style={{ marginTop: 6 }}>
-                <button disabled={kcBusy || !kcTarget} onClick={() => runKc(kcSend)}>
-                  Send
-                </button>
-                <button
-                  className="secondary"
-                  disabled={kcBusy || !kcTarget}
-                  onClick={() => runKc(kcRead)}
-                >
-                  Read reply
-                </button>
-              </div>
-
-              <label style={{ marginTop: 18 }}>Last reply</label>
-              <div className="terminal" style={{ minHeight: 120, whiteSpace: "pre-wrap" }}>
-                {kcReply || "No reply yet. Send a message, then read the reply."}
-              </div>
-
-              {kcError && <div className="error-banner" style={{ marginTop: 14 }}>{kcError}</div>}
             </Panel>
           </>
         )}

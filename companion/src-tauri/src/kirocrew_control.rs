@@ -147,6 +147,19 @@ fn is_trigger(action: KeyAction) -> bool {
 /// | anything else / any `up` edge  | `None`                              |
 pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
     match ev {
+        // Recognized speech text -> type into the chat composer (NO send). Both
+        // the board-side cloud ASR (`asr` frame) and the PC dictation/macro path
+        // (`macro` frame) land here, so BOTH voice routes behave identically:
+        // the text appears in the Kiro Crew composer and the user submits it
+        // with K5 (Enter). No auto-send, so a misrecognition can be reviewed.
+        Inbound::Asr { payload, .. } => {
+            let text = payload.text.trim();
+            if text.is_empty() {
+                ControlAction::None
+            } else {
+                ControlAction::Compose(text.to_string())
+            }
+        }
         // K4's recognized dictation → type into the chat composer (no send).
         Inbound::Macro { payload, .. } => {
             let text = payload.name.trim();
@@ -712,6 +725,18 @@ mod tests {
             route_input(&mac("summarize the file"), &ctx),
             ControlAction::Compose("summarize the file".into())
         );
+    }
+
+    #[test]
+    fn asr_text_routes_to_compose() {
+        // Cloud ASR text is unified with the macro path: type into the composer
+        // (no send), so both voice routes behave the same and K5 submits.
+        let ctx = ControlCtx::with_default_jumps();
+        let asr = Inbound::Asr {
+            seq: Some(9),
+            payload: crate::protocol::AsrPayload { text: "hello there".into() },
+        };
+        assert_eq!(route_input(&asr, &ctx), ControlAction::Compose("hello there".into()));
     }
 
     #[test]
