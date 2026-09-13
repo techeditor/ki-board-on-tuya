@@ -139,6 +139,7 @@ pub fn run() {
 mod app {
     use crate::pc_asr::{self, VoiceAction, VoiceSource};
     use crate::protocol::{self, Inbound};
+    use crate::hook_install;
     use crate::kirocrew_control::{Chord, ControlAction, ControlRouter, KiroCrewController};
     use crate::bind_store::BindStore;
     use crate::status_sink::{DisplayState as StatusDisplay, StatusSink, DEFAULT_STATUS_PORT};
