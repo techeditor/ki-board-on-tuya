@@ -147,6 +147,16 @@ static void test_protocol(void)
               "{\"v\":1,\"type\":\"hello_ack\",\"payload\":{\"fw\":\"0.1.0\",\"transport\":\"uart\","
               "\"capabilities\":[\"uart\",\"keymap\",\"voice_state\"]}}\n",
               "hello_ack frame");
+
+    ak_proto_status(buf, sizeof(buf), "ble_gatt_link", "ready");
+    CHECK_STR(buf,
+              "{\"v\":1,\"type\":\"status\",\"payload\":{\"probe\":\"ble_gatt_link\",\"state\":\"ready\"}}\n",
+              "status frame");
+
+    ak_proto_log(buf, sizeof(buf), 5, "ble", "central connected");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":5,\"type\":\"log\",\"payload\":{\"tag\":\"ble\",\"msg\":\"central connected\"}}\n",
+              "log frame");
 }
 
 static char g_lines[8][AK_RX_LINE_MAX];

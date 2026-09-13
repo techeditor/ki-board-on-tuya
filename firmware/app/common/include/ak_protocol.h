@@ -24,4 +24,9 @@ int ak_proto_ping(char *buf, size_t size, uint32_t seq, uint32_t uptime_ms);
 int ak_proto_pong(char *buf, size_t size);
 int ak_proto_ack(char *buf, size_t size, uint32_t seq);
 
+/* Generic probe feedback: a lifecycle state line and a free-form log line.
+   Used by bring-up / feature-probe firmware to report on UART0 (COM6). */
+int ak_proto_status(char *buf, size_t size, const char *probe, const char *state);
+int ak_proto_log(char *buf, size_t size, uint32_t seq, const char *tag, const char *msg);
+
 #endif /* AK_PROTOCOL_H */

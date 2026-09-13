@@ -52,3 +52,17 @@ int ak_proto_ack(char *buf, size_t size, uint32_t seq)
 {
     return snprintf(buf, size, "{\"v\":1,\"type\":\"ack\",\"payload\":{\"seq\":%u}}\n", (unsigned)seq);
 }
+
+int ak_proto_status(char *buf, size_t size, const char *probe, const char *state)
+{
+    return snprintf(buf, size,
+                    "{\"v\":1,\"type\":\"status\",\"payload\":{\"probe\":\"%s\",\"state\":\"%s\"}}\n",
+                    probe, state);
+}
+
+int ak_proto_log(char *buf, size_t size, uint32_t seq, const char *tag, const char *msg)
+{
+    return snprintf(buf, size,
+                    "{\"v\":1,\"seq\":%u,\"type\":\"log\",\"payload\":{\"tag\":\"%s\",\"msg\":\"%s\"}}\n",
+                    (unsigned)seq, tag, msg);
+}

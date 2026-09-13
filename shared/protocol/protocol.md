@@ -144,6 +144,19 @@ Companion 发：
 {"v":1,"type":"ack","payload":{"seq":12}}
 ```
 
+### status / log（探针反馈，board → PC）
+
+Bring-up / feature-probe 固件用这两种帧在 **UART0 (COM6)** 上报告自身状态与事件，
+便于在串口监控 / Companion 里判断行为（不依赖 LCD 或 UART1 调试日志）。
+
+```json
+{"v":1,"type":"status","payload":{"probe":"ble_gatt_link","state":"ready"}}
+{"v":1,"seq":5,"type":"log","payload":{"tag":"ble","msg":"central connected"}}
+```
+
+- `status`：探针生命周期状态（如 `ready` / `advertising` / `connected`）。
+- `log`：探针自定义事件；`msg` 为纯文本，发送方需避免内嵌 `"` / 换行以保持单行 JSON。
+
 ## Kiro CLI Hook → Companion
 
 Hook 脚本把 `agentSpawn` / `userPromptSubmit` / `stop` / `postToolUse` 转成
