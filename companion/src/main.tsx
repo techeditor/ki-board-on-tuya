@@ -51,8 +51,18 @@ type KcStatus = {
   forwarded?: boolean;
 };
 
-// FP-4b M4 (§3.2): the three per-key chat NUMBERS (K1-K3). Each key jumps to a
-// chat number (1..9) via Kiro Crew's "Alt+N = Jump to chat N" shortcut —
+// FP-4b: one-click global hook install status, mirroring the Rust
+// hook_install::HookStatus / AgentHookState.
+type AgentHookState = { agent: string; installed_events: number };
+type HookStatus = {
+  command: string;
+  agents_dir: string;
+  agents: AgentHookState[];
+  fully_installed: boolean;
+  any_installed: boolean;
+};
+
+// FP-4b M4 (§3.2): the three per-key chat NUMBERS (K1-K3). Each key jumps to a// chat number (1..9) via Kiro Crew's "Alt+N = Jump to chat N" shortcut —
 // client-side, no page reload. The number is user-configurable per key. This
 // mirrors the Rust `bind_store::BindStore.chats: Vec<u8>` (index 0 = K1).
 type ChatNumbers = number[];
@@ -151,6 +161,8 @@ function App() {
   // FP-4b Route STATUS (option A): the pinned "watched chat". "" = follow all
   // sessions. Non-empty = only that session's status drives the board LCD.
   const [pinnedSession, setPinnedSession] = useState("");
+  // FP-4b: one-click global hook install state.
+  const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
 
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
@@ -415,6 +427,23 @@ function App() {
     setPinnedSession("");
   }
 
+  // FP-4b: one-click global hook install/remove/status. `exe: null` lets the
+  // backend default to this running companion's own path.
+  async function hookRefresh() {
+    const st = await invoke<HookStatus>("kc_hook_status", { exe: null });
+    setHookStatus(st);
+  }
+
+  async function hookInstall() {
+    const st = await invoke<HookStatus>("kc_hook_install", { exe: null });
+    setHookStatus(st);
+  }
+
+  async function hookRemove() {
+    const st = await invoke<HookStatus>("kc_hook_remove", { exe: null });
+    setHookStatus(st);
+  }
+
   useEffect(() => {
     refreshRuntime().catch(() => undefined);
     const timer = window.setInterval(() => {
@@ -498,6 +527,11 @@ function App() {
     // Recover the pinned "watched chat" on mount (survives a UI reload).
     invoke<string>("kc_get_pinned")
       .then((sid) => setPinnedSession(sid || ""))
+      .catch(() => undefined);
+
+    // Load the global hook install status on mount.
+    invoke<HookStatus>("kc_hook_status", { exe: null })
+      .then(setHookStatus)
       .catch(() => undefined);
 
     return () => {
@@ -918,6 +952,59 @@ function App() {
                 <code> 127.0.0.1:5477/status</code> and mirrors each agent's state to the board
                 LCD as a <code>display</code> frame. The hook is a mode of this very binary
                 (<code>companion --hook</code>), gated by a per-run token.
+              </p>
+
+              <label style={{ marginTop: 8 }}>Global hook (all local Kiro agents)</label>
+              <p className="hint" style={{ marginTop: 4 }}>
+                One click wires <code>companion --hook</code> into the
+                <em> agentSpawn / postToolUse / stop</em> events of EVERY agent under{" "}
+                <code>{hookStatus?.agents_dir ?? "~/.kiro/agents"}</code>, so status flows to the
+                board without editing any JSON by hand. Hand-authored hooks are left untouched.
+              </p>
+              <div className="lcd" style={{ marginTop: 6 }}>
+                <span>HOOK</span>
+                <strong className={hookStatus?.fully_installed ? "good-text" : ""}>
+                  {!hookStatus
+                    ? "-- (checking)"
+                    : hookStatus.agents.length === 0
+                    ? "NO AGENTS FOUND"
+                    : hookStatus.fully_installed
+                    ? `INSTALLED · ${hookStatus.agents.length} agent(s)`
+                    : hookStatus.any_installed
+                    ? `PARTIAL · ${hookStatus.agents.filter((a) => a.installed_events === 3).length}/${hookStatus.agents.length} fully wired`
+                    : "NOT INSTALLED"}
+                </strong>
+              </div>
+              <div className="actions" style={{ marginTop: 6 }}>
+                <button
+                  disabled={!hookStatus || hookStatus.agents.length === 0}
+                  onClick={() => runSs(hookInstall)}
+                >
+                  Install hook (all agents)
+                </button>
+                <button
+                  className="secondary"
+                  disabled={!hookStatus?.any_installed}
+                  onClick={() => runSs(hookRemove)}
+                >
+                  Remove hook
+                </button>
+                <button className="secondary" onClick={() => runSs(hookRefresh)}>
+                  Refresh
+                </button>
+              </div>
+              {hookStatus && hookStatus.agents.length > 0 && (
+                <div className="log" style={{ marginTop: 6 }}>
+                  {hookStatus.agents.map((a) => (
+                    <div key={a.agent}>
+                      {`${a.installed_events === 3 ? "✓" : a.installed_events > 0 ? "◐" : "·"} ${a.agent} — ${a.installed_events}/3`}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="hint" style={{ marginTop: 4, opacity: 0.7 }}>
+                Note: a Kiro Crew upgrade/rebuild can rewrite agent specs and drop these entries —
+                if status ever falls back to NOT INSTALLED after an update, click Install again.
               </p>
 
               <div className="actions" style={{ marginTop: 6 }}>

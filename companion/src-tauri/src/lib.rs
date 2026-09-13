@@ -19,6 +19,7 @@ pub mod asr;
 pub mod inject;
 pub mod kirocrew_control;
 pub mod bind_store;
+pub mod hook_install;
 pub mod pc_asr;
 pub mod protocol;
 pub mod status_sink;
@@ -729,6 +730,58 @@ mod app {
         Ok(())
     }
 
+    // ─────── FP-4b Route STATUS — one-click global hook install/remove ───────
+
+    /// Resolve the hook command: the UI may pass an explicit companion exe path
+    /// (e.g. the user browsed to `companion.exe`); empty falls back to THIS
+    /// running executable.
+    fn resolve_hook_command(exe: Option<String>) -> String {
+        let exe = exe
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(hook_install::current_exe_path);
+        hook_install::hook_command(&exe)
+    }
+
+    /// Report per-agent hook install status (does not modify anything). `exe`
+    /// optional — only affects the `command` string echoed back.
+    #[tauri::command]
+    fn kc_hook_status(exe: Option<String>) -> Result<hook_install::HookStatus, String> {
+        hook_install::status(&resolve_hook_command(exe))
+    }
+
+    /// One-click: inject `companion --hook` into agentSpawn/postToolUse/stop of
+    /// EVERY local Kiro agent (idempotent). Returns the post-install status.
+    #[tauri::command]
+    fn kc_hook_install(
+        app: AppHandle,
+        exe: Option<String>,
+    ) -> Result<hook_install::HookStatus, String> {
+        let command = resolve_hook_command(exe);
+        let st = hook_install::install(&command)?;
+        log_line(
+            &app,
+            format!(
+                "[KC-HOOK] installed into {} agent(s) · {}",
+                st.agents.len(),
+                command
+            ),
+        );
+        Ok(st)
+    }
+
+    /// One-click: remove the companion `--hook` entry from every local Kiro
+    /// agent (leaves hand-authored hooks intact). Returns the post-remove status.
+    #[tauri::command]
+    fn kc_hook_remove(
+        app: AppHandle,
+        exe: Option<String>,
+    ) -> Result<hook_install::HookStatus, String> {
+        let st = hook_install::remove(&resolve_hook_command(exe))?;
+        log_line(&app, format!("[KC-HOOK] removed from {} agent(s)", st.agents.len()));
+        Ok(st)
+    }
+
     /// Compact human-readable description of a routed control action for logs.
     fn describe_control_action(action: &ControlAction) -> String {
         match action {
@@ -947,6 +1000,9 @@ mod app {
                 kc_get_pinned,
                 kc_pin_session,
                 kc_unpin_session,
+                kc_hook_status,
+                kc_hook_install,
+                kc_hook_remove,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");
