@@ -22,6 +22,7 @@
 #include "ak_input.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
+#include "ak_statuslcd.h"
 #include "tal_api.h"
 #include "tkl_output.h"
 
@@ -114,6 +115,65 @@ static void send_ack(uint32_t seq)
     transport_write_frame(frame, ak_proto_ack(frame, sizeof(frame), seq));
 }
 
+#if AK_ENABLE_DISPLAY
+/* Map a Kiro Crew agent state string to a title-bar color. */
+static uint16_t ak_status_color(const char *state)
+{
+    if (strcmp(state, "running") == 0) {
+        return AK_COL_GREEN;
+    } else if (strcmp(state, "tool") == 0) {
+        return AK_COL_ORANGE;
+    } else if (strcmp(state, "idle") == 0) {
+        return AK_COL_GRAY;
+    } else if (strcmp(state, "received") == 0) {
+        return AK_COL_CYAN;
+    }
+    return AK_COL_DKBLUE;
+}
+
+/* Word-blind wrap of ASCII text into the content area; non-ASCII -> '.'. */
+static void ak_status_wrap(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t max_lines)
+{
+    const uint16_t cols   = 36; /* ~ (320-12)/8 chars per line at scale 1 */
+    const uint16_t line_h = 10;
+    char           buf[40];
+    uint16_t       col = 0, ln = 0;
+
+    for (const char *p = s; *p && ln < max_lines; ++p) {
+        unsigned char c = (unsigned char)*p;
+        buf[col++]      = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+        if (col >= cols) {
+            buf[col] = '\0';
+            ak_gfx_text(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
+            col = 0;
+            ln++;
+        }
+    }
+    if (col > 0 && ln < max_lines) {
+        buf[col] = '\0';
+        ak_gfx_text(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
+    }
+}
+
+/* Render a Kiro Crew agent-status screen from a `display` frame. */
+static void ak_render_status(const char *agent, const char *state, const char *text)
+{
+    if (!ak_statuslcd_ready()) {
+        return;
+    }
+    uint16_t color = ak_status_color(state);
+    char     line[48];
+
+    ak_statuslcd_title("Kiro Crew", color);
+    (void)snprintf(line, sizeof(line), "agent: %s", agent[0] ? agent : "-");
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 2, line, AK_COL_WHITE, AK_COL_BLACK, 1);
+    (void)snprintf(line, sizeof(line), "state: %s", state[0] ? state : "-");
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 16, line, color, AK_COL_BLACK, 1);
+    ak_status_wrap(6, AK_STATUSLCD_CONTENT_Y + 34, text, AK_COL_YELLOW, 14);
+    ak_statuslcd_flush();
+}
+#endif /* AK_ENABLE_DISPLAY */
+
 /* Handle one inbound JSONL line (PC -> board). Unknown types are ignored. */
 static void on_rx_line(const char *line)
 {
@@ -132,9 +192,14 @@ static void on_rx_line(const char *line)
     } else if (strcmp(type, "display") == 0) {
         char agent[32] = "";
         char state[16] = "";
+        char text[128] = "";
         ak_json_str(line, "agent_name", agent, sizeof(agent));
         ak_json_str(line, "state", state, sizeof(state));
-        PR_NOTICE("display: agent=%s state=%s", agent, state); /* LCD render in Task 9 */
+        ak_json_str(line, "text", text, sizeof(text));
+        PR_NOTICE("display: agent=%s state=%s", agent, state);
+#if AK_ENABLE_DISPLAY
+        ak_render_status(agent, state, text);
+#endif
     }
     /* ack / pong / unknown: ignore per protocol */
 }
@@ -171,9 +236,13 @@ static void user_main(void)
     }
 
 #if AK_ENABLE_DISPLAY
-    rt = ak_display_init();
+    /* Status LCD (shared ak_statuslcd + ak_gfx, no LVGL): renders Kiro Crew
+       agent status from inbound `display` frames. Falls back to headless. */
+    rt = ak_statuslcd_init();
     if (rt != OPRT_OK) {
-        PR_WARN("display init failed: %d (continuing headless)", rt);
+        PR_WARN("status LCD init failed: %d (continuing headless)", rt);
+    } else {
+        ak_render_status("-", "idle", "waiting for Kiro Crew");
     }
 #endif
 
