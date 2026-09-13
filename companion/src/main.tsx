@@ -278,7 +278,7 @@ function App() {
               USB/UART is physically trusted — no pairing. The companion greets the board on connect.
             </p>
             <div className="actions">
-              <button onClick={() => runAction(connect)}>Connect</button>
+              <button className="secondary" onClick={() => runAction(connect)}>Connect</button>
               <button className="secondary" onClick={() => runAction(disconnect)}>Disconnect</button>
               <button className="secondary" onClick={() => runAction(refreshRuntime)}>Refresh</button>
             </div>
