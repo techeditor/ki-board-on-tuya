@@ -20,6 +20,7 @@
 #include "ak_display.h"
 #include "ak_features.h"
 #include "ak_asr.h"
+#include "ak_cloud.h"
 #include "ak_wifi.h"
 #include "ak_input.h"
 #include "ak_protocol.h"
@@ -496,9 +497,36 @@ static void user_main(void)
         return;
     }
 
-    /* Board-side cloud ASR backend (stub unless AK_ASR_BOARD_CLOUD is set).
-     * Registers the recognized-text callback that emits `asr` frames. */
-    ak_asr_init(on_asr_text);
+#if AK_ENABLE_DISPLAY
+    /* Status LCD FIRST — before any AI / Wi-Fi bring-up. The board-side cloud
+     * ASR (ai_chat_init) and netmgr can block or fault at boot when the device
+     * is not yet provisioned (no License / no Wi-Fi), so initializing them
+     * before the display would leave the screen black. Bring the LCD up and
+     * paint the boot screen first; the display must never depend on the cloud
+     * stack. (shared ak_statuslcd + ak_gfx, no LVGL; headless fallback.) */
+    rt = ak_statuslcd_init();
+    if (rt != OPRT_OK) {
+        PR_WARN("status LCD init failed: %d (continuing headless)", rt);
+    } else {
+        ak_render_status("-", "idle", "waiting for Kiro Crew");
+    }
+#endif
+
+    /* Tuya IoT / cloud bring-up (stub unless AK_ASR_BOARD_CLOUD is set). MUST run
+     * BEFORE ak_asr_init: ai_chat_init needs an initialized IoT / AI-service
+     * context (tuya_iot_init + netmgr), or it dereferences a NULL handle and
+     * hard-faults at boot (the black-screen crash). No-op on the v1/BLE profiles. */
+    OPERATE_RET cloud_rt = ak_cloud_init();
+    if (cloud_rt != OPRT_OK) {
+        PR_ERR("cloud init failed: %d — skipping ai_chat_init to avoid a fault; "
+               "board-side cloud ASR unavailable (keyboard still works)",
+               cloud_rt);
+    } else {
+        /* Board-side cloud ASR backend (stub unless AK_ASR_BOARD_CLOUD is set).
+         * Registers the recognized-text callback that emits `asr` frames. Only
+         * reached once the IoT context exists, so ai_chat_init cannot fault. */
+        ak_asr_init(on_asr_text);
+    }
     PR_NOTICE("Voice source: %s (cloud backend %s)", ak_voice_source_str(s_voice_source),
               ak_asr_available() ? "ready" : "stub/off");
 
@@ -507,16 +535,13 @@ static void user_main(void)
     ak_wifi_init(on_wifi_status);
     PR_NOTICE("Wi-Fi provisioning: %s", ak_wifi_available() ? "ready" : "stub/off");
 
-#if AK_ENABLE_DISPLAY
-    /* Status LCD (shared ak_statuslcd + ak_gfx, no LVGL): renders Kiro Crew
-       agent status from inbound `display` frames. Falls back to headless. */
-    rt = ak_statuslcd_init();
-    if (rt != OPRT_OK) {
-        PR_WARN("status LCD init failed: %d (continuing headless)", rt);
-    } else {
-        ak_render_status("-", "idle", "waiting for Kiro Crew");
+    /* Start the Tuya IoT task (tuya_iot_start + a dedicated tuya_iot_yield loop)
+     * once everything is initialized. No-op on v1/BLE; runs off the input/RX
+     * loop so key latency is unaffected. Skipped implicitly if cloud init failed
+     * (ak_cloud_start returns an error, logged and non-fatal). */
+    if (cloud_rt == OPRT_OK && ak_cloud_start() != OPRT_OK) {
+        PR_ERR("cloud start failed; device will not reach the Tuya cloud");
     }
-#endif
 
     now            = tal_system_get_millisecond();
     last_heartbeat = now;
