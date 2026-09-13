@@ -120,7 +120,7 @@ mod app {
     use crate::protocol::{self, Inbound};
     use crate::kirocrew::KiroCrewClient;
     use crate::kirocrew_control::{Chord, ControlAction, ControlRouter, KiroCrewController};
-    use crate::bind_store::{self, BindStore};
+    use crate::bind_store::BindStore;
     use crate::status_sink::{DisplayState as StatusDisplay, StatusSink, DEFAULT_STATUS_PORT};
     use crate::transport::ble_gatt::{self, BleDeviceInfo, BleGattTransport};
     use crate::transport::usb_serial::{self, SerialPortInfo, UsbSerialTransport};
@@ -536,24 +536,33 @@ mod app {
 
     /// M4: bind slot `slot` (1-based) to `url` (+ optional `label`, defaulting to
     /// the parsed slug) and persist. Mirrors a long-press bind from the UI.
+    /// M4: bind slot `slot` (1-based) from the UI. The primary field is the
+    /// conversation `label` (its title — client-side command-bar focus, no
+    /// reload); an optional `url` is kept as the manual navigate fallback. At
+    /// least one of the two must be non-empty. When only a URL is given, the
+    /// label is derived from its `/chat/<slug>`. Persists the slot.
     #[tauri::command]
     fn kc_bind_set(
         state: State<Shared>,
         slot: u8,
-        url: String,
         label: Option<String>,
+        url: Option<String>,
     ) -> Result<(), String> {
-        let url = url.trim().to_string();
-        if url.is_empty() {
-            return Err("url is empty".to_string());
-        }
-        // Prefer an explicit label; else derive the slug from the URL.
         let label = label
             .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .or_else(|| crate::bind_store::parse_chat_slug(&url).map(|(_, slug)| slug));
+            .filter(|l| !l.is_empty());
+        let url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        if label.is_none() && url.is_none() {
+            return Err("provide a conversation title (label) and/or a URL".to_string());
+        }
+        // If only a URL was given, derive the label from its /chat/<slug>.
+        let label = label.or_else(|| {
+            url.as_deref()
+                .and_then(crate::bind_store::parse_chat_slug)
+                .map(|(_, slug)| slug)
+        });
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        inner.kc_binds.set(slot, Some(url), label);
+        inner.kc_binds.set(slot, url, label);
         inner.kc_binds.save()
     }
 
@@ -702,48 +711,58 @@ mod app {
         }
     }
 
-    /// M4 short-press: focus the conversation bound to slot `n`. Bound slot ->
-    /// navigate the window to its `/chat/<slug>` URL; empty slot -> create a new
-    /// chat (Alt+Shift+N) per §3.2 "empty slot -> new session".
+    /// M4 short-press: focus the conversation bound to slot `n`. A slot with a
+    /// non-empty LABEL (the conversation title) -> `command_bar(label)`, the
+    /// CLIENT-SIDE command bar (Ctrl+K + type + Enter) which navigates in-app
+    /// with NO page reload (the SPA is history/pushState, so address-bar nav
+    /// reloads but its own Command Bar does not). A slot with only a URL (manual
+    /// fallback) -> `navigate_url(url)`. An empty slot -> new chat (Alt+Shift+N)
+    /// per §3.2 "empty slot -> new session".
     fn focus_slot(_app: &AppHandle, state: &Shared, n: u8) -> Result<(), String> {
-        let url = state
-            .inner
-            .lock()
-            .map_err(|_| "state lock poisoned".to_string())?
-            .kc_binds
-            .get(n)
-            .and_then(|s| s.url.clone())
-            .filter(|u| !u.trim().is_empty());
+        let (label, url) = {
+            let inner = state.inner.lock().map_err(|_| "state lock poisoned".to_string())?;
+            let slot = inner.kc_binds.get(n).cloned().unwrap_or_default();
+            let label = slot
+                .label
+                .filter(|l| !l.trim().is_empty());
+            let url = slot.url.filter(|u| !u.trim().is_empty());
+            (label, url)
+        };
 
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        match url {
-            Some(u) => inner.kc_controller.navigate_url(&u),
+        match (label, url) {
+            // Primary path: focus by conversation title via the command bar.
+            (Some(label), _) => inner.kc_controller.command_bar(&label),
+            // Manual fallback: a URL-only slot navigates the address bar.
+            (None, Some(u)) => inner.kc_controller.navigate_url(&u),
             // Empty slot: create a new chat instead.
-            None => inner.kc_controller.chord(Chord::NewChat),
+            (None, None) => inner.kc_controller.chord(Chord::NewChat),
         }
     }
 
     /// M4 long-press: bind the CURRENT conversation to slot `n`. Capture the
-    /// window's address-bar URL, parse a `/chat/<slug>` out of it, persist it to
-    /// the slot (label = slug), and emit a `display` frame confirming the bind
-    /// so the board LCD shows `K<n> -> <label>` (M3 renders it).
+    /// window's title, strip the app/browser suffix down to the conversation
+    /// title, persist it to the slot as the LABEL (url = None — focus goes
+    /// through the client-side command bar by title, no reload), and emit a
+    /// `display` frame confirming the bind so the board LCD shows `K<n> -> <label>`
+    /// (M3 renders it).
     fn bind_slot(app: &AppHandle, state: &Shared, n: u8) -> Result<(), String> {
         let captured = {
             let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-            inner.kc_controller.capture_current_url()?
+            inner.kc_controller.capture_current_title()?
         };
-        let text = captured.ok_or_else(|| {
-            "no URL captured (is a browser window with an address bar focused?)".to_string()
+        let raw = captured.ok_or_else(|| {
+            "no window title captured (is a Kiro Crew window focused?)".to_string()
         })?;
-        let (url, label) = bind_store::parse_chat_slug(&text)
-            .ok_or_else(|| format!("no /chat/<slug> in captured text {text:?}"))?;
+        let label = crate::kirocrew_control::strip_conversation_title(&raw);
+        if label.trim().is_empty() {
+            return Err(format!("stripped title is empty (raw {raw:?})"));
+        }
 
-        // Persist the bind.
+        // Persist the bind: store the title as the label, leave url = None.
         {
             let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-            inner
-                .kc_binds
-                .set(n, Some(url.clone()), Some(label.clone()));
+            inner.kc_binds.set(n, None, Some(label.clone()));
             inner.kc_binds.save()?;
         }
 
@@ -753,7 +772,7 @@ mod app {
             state,
             &protocol::display_payload(&label, "bound", &format!("K{n} -> {label}")),
         );
-        log_line(app, format!("[KC-CTL] bound K{n} -> {label} ({url})"));
+        log_line(app, format!("[KC-CTL] bound K{n} -> {label}"));
         Ok(())
     }
 

@@ -48,12 +48,6 @@ getrandom = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri = { version = "2", features = [] }
-# FP-4b M4 (T13): clipboard read for `capture_current_url()` (Ctrl+L/A/C then
-# read the address-bar text). Only the #[cfg(windows)] controller calls it, so
-# it is a Windows-only dependency — the Linux CI host neither builds nor links
-# a clipboard backend, and the non-Windows stub returns Ok(None). Pinned to the
-# current 3.6 line (uses clipboard-win on Windows).
-arboard = "=3.6.1"
 
 [dev-dependencies]
 env_logger = "0.11"

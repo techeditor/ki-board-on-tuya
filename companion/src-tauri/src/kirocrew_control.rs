@@ -93,13 +93,14 @@ pub enum ControlAction {
     /// the user reviews and submits with K5. This is the K4 voice path.
     Compose(String),
     /// M4 (§3.2): short-press a slot key (K1-K3) — focus the conversation bound
-    /// to that 1-based slot (navigate the window to its `/chat/<slug>` URL), or
-    /// create a new chat when the slot is empty. Stateful IO, executed in
-    /// `lib.rs` against the bind store + controller, not in the pure router.
+    /// to that 1-based slot via the CLIENT-SIDE command bar by its title (no
+    /// page reload), or create a new chat when the slot is empty. Stateful IO,
+    /// executed in `lib.rs` against the bind store + controller, not in the pure
+    /// router.
     FocusSlot(u8),
     /// M4 (§3.2): long-press a slot key (K1-K3) — bind the CURRENT conversation
-    /// to that 1-based slot (capture its URL, persist, LCD-confirm). Stateful IO,
-    /// executed in `lib.rs`.
+    /// to that 1-based slot (capture its window title, strip the suffix, persist,
+    /// LCD-confirm). Stateful IO, executed in `lib.rs`.
     BindSlot(u8),
     /// Nothing to do for this event (e.g. a key *up*, a ping, an ack).
     None,
@@ -245,6 +246,36 @@ impl ControlRouter {
     }
 }
 
+// ─────────────────────── strip_conversation_title (pure) ───────────────────────
+
+/// Reduce a raw OS window title to just the conversation title.
+///
+/// A browser/app window title carries an app + browser suffix after the chat
+/// name, e.g. `"My chat - Kiro Crew - Google Chrome"` or `"Planning · Kiro Crew"`.
+/// We take the segment BEFORE the first of these separators — `" - "`, `" -- "`,
+/// `" | "`, `" · "` (space-padded), or a bare `"·"` — and trim it. That drops the
+/// suffix and leaves the chat title, which is what the client-side command bar
+/// matches on (M4: focus by TITLE, no reload). A title with no separator (e.g.
+/// `"Kiro Crew"`) is returned trimmed as-is.
+pub fn strip_conversation_title(raw: &str) -> String {
+    // Padded separators are tried first (most specific); the bare middot last so
+    // it only fires when no padded form matched.
+    const PADDED: &[&str] = &[" -- ", " - ", " | ", " · "];
+    let mut cut = raw.len();
+    for sep in PADDED {
+        if let Some(pos) = raw.find(sep) {
+            cut = cut.min(pos);
+        }
+    }
+    if cut == raw.len() {
+        // No padded separator — fall back to a bare middot boundary.
+        if let Some(pos) = raw.find('·') {
+            cut = pos;
+        }
+    }
+    raw[..cut].trim().to_string()
+}
+
 // ─────────────────────── KiroCrewController (T1) ───────────────────────
 
 /// Default window-title substrings tried in order when none is configured.
@@ -280,8 +311,6 @@ mod windows_impl {
     const VK_K: u16 = 0x4B; // 'K'
     const VK_N: u16 = 0x4E; // 'N'
     const VK_L: u16 = 0x4C; // 'L' — focus browser address bar (Ctrl+L)
-    const VK_A: u16 = 0x41; // 'A' — select all (Ctrl+A)
-    const VK_C: u16 = 0x43; // 'C' — copy (Ctrl+C)
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -558,27 +587,33 @@ mod windows_impl {
             inject_chord(keys)
         }
 
-        /// M4: capture the focused window's current address-bar URL. Focus the
-        /// window, Ctrl+L (address bar), Ctrl+A (select all), Ctrl+C (copy),
-        /// read the clipboard, then Esc (defocus the address bar without
-        /// navigating). Returns the clipboard text (the caller parses a
-        /// `/chat/<slug>` out of it); `Ok(None)` when the clipboard is empty.
-        pub fn capture_current_url(&mut self) -> Result<Option<String>, String> {
+        /// M4: capture the focused window's current title text. Focus the
+        /// window, then read its title via GetWindowTextLengthW/GetWindowTextW.
+        /// Returns the RAW window title (the caller strips the app/browser
+        /// suffix with [`super::strip_conversation_title`]); `Ok(None)` when the
+        /// title is empty. Reads only — never navigates or touches the clipboard,
+        /// so it cannot trigger a page reload.
+        pub fn capture_current_title(&mut self) -> Result<Option<String>, String> {
             self.focus()?;
-            ctrl_tap(VK_L)?;
-            // Small settle so the address bar has focus before select/copy.
-            std::thread::sleep(std::time::Duration::from_millis(60));
-            ctrl_tap(VK_A)?;
-            ctrl_tap(VK_C)?;
-            // Let the copy land on the clipboard before reading it.
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            let text = read_clipboard();
-            // Esc so we leave the address bar as we found it (no navigation).
-            let _ = tap(VK_ESCAPE);
-            match text {
-                Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
-                Ok(_) => Ok(None),
-                Err(e) => Err(e),
+            let hwnd = self
+                .hwnd
+                .ok_or_else(|| "control: no window resolved after focus".to_string())?;
+            let title = unsafe {
+                let len = GetWindowTextLengthW(hwnd);
+                if len <= 0 {
+                    return Ok(None);
+                }
+                let mut buf = vec![0u16; (len as usize) + 1];
+                let copied = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+                if copied <= 0 {
+                    return Ok(None);
+                }
+                String::from_utf16_lossy(&buf[..copied as usize])
+            };
+            if title.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(title))
             }
         }
 
@@ -590,19 +625,6 @@ mod windows_impl {
             std::thread::sleep(std::time::Duration::from_millis(60));
             type_text_raw(url)?;
             tap(VK_RETURN)
-        }
-    }
-
-    /// Read the system clipboard as text via `arboard` (cross-platform crate;
-    /// only the Windows controller calls it here). An empty clipboard yields
-    /// `Ok(String::new())`; a backend error is surfaced as `Err`.
-    fn read_clipboard() -> Result<String, String> {
-        let mut cb = arboard::Clipboard::new().map_err(|e| format!("clipboard: {e}"))?;
-        match cb.get_text() {
-            Ok(t) => Ok(t),
-            // arboard returns ContentNotAvailable for a non-text/empty clipboard.
-            Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
-            Err(e) => Err(format!("clipboard read: {e}")),
         }
     }
 
@@ -657,8 +679,8 @@ mod stub_impl {
             Err("control: windows only".to_string())
         }
 
-        /// Stub: no window system to read a URL from — capture nothing.
-        pub fn capture_current_url(&mut self) -> Result<Option<String>, String> {
+        /// Stub: no window system to read a title from — capture nothing.
+        pub fn capture_current_title(&mut self) -> Result<Option<String>, String> {
             Ok(None)
         }
 
@@ -721,11 +743,12 @@ impl KiroCrewController {
         self.backend.chord(keys)
     }
 
-    /// M4: capture the focused window's address-bar URL (Ctrl+L/A/C + clipboard
-    /// read + Esc). `Ok(None)` when the clipboard is empty; on non-Windows the
-    /// stub returns `Ok(None)`.
-    pub fn capture_current_url(&mut self) -> Result<Option<String>, String> {
-        self.backend.capture_current_url()
+    /// M4: capture the focused window's title (raw). `Ok(None)` when the title
+    /// is empty; on non-Windows the stub returns `Ok(None)`. The caller strips
+    /// the app/browser suffix with [`strip_conversation_title`]. Reads only — no
+    /// navigation, so it cannot reload the SPA.
+    pub fn capture_current_title(&mut self) -> Result<Option<String>, String> {
+        self.backend.capture_current_title()
     }
 
     /// M4: navigate the focused window to `url` (Ctrl+L + type + Enter). On
@@ -786,6 +809,49 @@ mod tests {
             seq: None,
             payload: MacroPayload { name: name.into() },
         }
+    }
+
+    // ── strip_conversation_title ───────────────────────────────
+
+    #[test]
+    fn strip_title_drops_browser_and_app_suffix() {
+        // " - " padded dash (Chrome/Edge tab title).
+        assert_eq!(
+            strip_conversation_title("My chat - Kiro Crew - Google Chrome"),
+            "My chat"
+        );
+        // " · " padded middot (app title style).
+        assert_eq!(strip_conversation_title("Planning · Kiro Crew"), "Planning");
+        // Bare middot (no surrounding spaces).
+        assert_eq!(strip_conversation_title("Planning·Kiro Crew"), "Planning");
+        // " -- " em-dash-ish separator, tried before " - ".
+        assert_eq!(
+            strip_conversation_title("Deep dive -- Kiro Crew"),
+            "Deep dive"
+        );
+        // " | " pipe separator.
+        assert_eq!(
+            strip_conversation_title("Roadmap | Kiro Crew | Firefox"),
+            "Roadmap"
+        );
+    }
+
+    #[test]
+    fn strip_title_returns_trimmed_when_no_separator() {
+        assert_eq!(strip_conversation_title("Kiro Crew"), "Kiro Crew");
+        assert_eq!(strip_conversation_title("  Kiro Crew  "), "Kiro Crew");
+        assert_eq!(strip_conversation_title(""), "");
+    }
+
+    #[test]
+    fn strip_title_takes_the_first_separator_only() {
+        // A chat title that itself contains a dash inside a word is fine — only
+        // the space-padded separator splits, so "pre-flight" survives until the
+        // padded " - " before the suffix.
+        assert_eq!(
+            strip_conversation_title("pre-flight review - Kiro Crew - Chrome"),
+            "pre-flight review"
+        );
     }
 
     // ── Chord parsing ──────────────────────────────────────────

@@ -1,16 +1,19 @@
 //! FP-4b Milestone 4 — per-conversation bind store (§3.2).
 //!
-//! Three key slots (K1-K3) each hold an optional bound Kiro Crew conversation:
-//! its navigable `url` (`/chat/<slug>?sid=<slug>`) and a human `label` (the
-//! slug). Short-pressing a slot focuses its conversation by navigating the Kiro
-//! Crew window to that URL (stable across sidebar reordering, unlike `Alt+N`);
-//! long-pressing binds the CURRENT conversation to the slot.
+//! Three key slots (K1-K3) each hold an optional bound Kiro Crew conversation.
+//! The PRIMARY handle is `label` — the conversation's TITLE — which the focus
+//! path types into the SPA's CLIENT-SIDE command bar (Ctrl+K), navigating in-app
+//! with NO page reload (the dashboard SPA is history/pushState, so address-bar
+//! navigation reloads, but its own Command Bar does not). `url` is retained as
+//! an optional manual navigate fallback (`/chat/<slug>?sid=<slug>`). Short-press
+//! a slot focuses its conversation; long-press binds the CURRENT conversation
+//! (captured from the window title).
 //!
 //! This module is **pure + cross-platform**: it (de)serializes and persists the
 //! store to `config_dir/ak-companion/binds.json` (reusing the `dirs` crate the
 //! status-sink handoff already uses), and provides a pure `parse_chat_slug`
-//! that extracts a `/chat/<slug>` URL out of arbitrary pasted/clipboard text.
-//! No Tauri / Windows deps, so it `cargo test`s on the Linux host.
+//! that extracts a `/chat/<slug>` URL out of arbitrary text (used by the manual
+//! URL fallback). No Tauri / Windows deps, so it `cargo test`s on the Linux host.
 //!
 //! Design ref: `.kiro/specs/feature-probes-kirocrew-local-control/design.md`
 //! ("Milestone 4 — per-conversation binding").
@@ -22,22 +25,28 @@ use serde::{Deserialize, Serialize};
 /// Number of bindable slots (K1, K2, K3).
 pub const SLOT_COUNT: usize = 3;
 
-/// One bind slot. Empty (`url == None`) means "unbound" — a short press then
-/// falls back to creating a new chat (design M4: "empty slot -> new session").
+/// One bind slot. The PRIMARY handle is `label` — the conversation TITLE, used
+/// for client-side command-bar focus (no reload). `url` is an optional manual
+/// navigate fallback. Empty (both `None`/blank) means "unbound" — a short press
+/// then falls back to creating a new chat (design M4: "empty slot -> new session").
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slot {
     /// Navigable conversation URL, e.g. `http://127.0.0.1:5476/chat/<slug>?sid=<slug>`.
+    /// Optional manual fallback; the primary focus path uses `label` instead.
     #[serde(default)]
     pub url: Option<String>,
-    /// Human label shown on the board LCD / UI (the chat slug).
+    /// The conversation TITLE — typed into the client-side command bar to focus
+    /// the conversation (no reload), and shown on the board LCD / UI.
     #[serde(default)]
     pub label: Option<String>,
 }
 
 impl Slot {
-    /// Is this slot bound to a conversation?
+    /// Is this slot bound to a conversation? True when EITHER the label (title,
+    /// the primary focus handle) or the url (manual fallback) is non-empty.
     pub fn is_bound(&self) -> bool {
-        self.url.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false)
+        let non_empty = |o: &Option<String>| o.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        non_empty(&self.label) || non_empty(&self.url)
     }
 }
 
@@ -214,6 +223,20 @@ mod tests {
 
         s.clear(2);
         assert!(!s.get(2).unwrap().is_bound());
+    }
+
+    #[test]
+    fn label_only_slot_is_bound() {
+        // Title-primary bind: label set, url None -> still bound (command-bar path).
+        let mut s = BindStore::new();
+        s.set(1, None, Some("My chat".into()));
+        let slot = s.get(1).expect("slot 1");
+        assert!(slot.is_bound());
+        assert!(slot.url.is_none());
+        assert_eq!(slot.label.as_deref(), Some("My chat"));
+        // Blank label/url is NOT bound.
+        s.set(3, Some("  ".into()), Some("  ".into()));
+        assert!(!s.get(3).unwrap().is_bound());
     }
 
     #[test]

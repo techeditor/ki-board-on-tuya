@@ -49,7 +49,9 @@ type KcStatus = {
 };
 
 // FP-4b M4 (§3.2): one per-conversation bind slot (K1-K3), mirrors the Rust
-// `bind_store::Slot`. Empty (url null) = unbound; short-press then makes a new chat.
+// `bind_store::Slot`. `label` = conversation TITLE (primary, client-side
+// command-bar focus, no reload); `url` = optional manual navigate fallback.
+// Both empty = unbound; short-press then makes a new chat.
 type BindSlot = {
   url: string | null;
   label: string | null;
@@ -121,9 +123,10 @@ function App() {
   const [lcBusy, setLcBusy] = useState(false);
 
   // FP-4b M4 (§3.2): the three per-conversation bind slots (K1-K3). `bindEdit`
-  // holds the per-slot edit field (a /chat/<slug> URL to Set). Short-press a
-  // slot focuses its conversation; long-press (or "Bind current") binds the
-  // current window's conversation.
+  // holds the per-slot edit field (a conversation TITLE to Set; a /chat/<slug>
+  // URL is accepted as a manual fallback). Short-press a slot focuses its
+  // conversation via the client-side command bar (no reload); long-press (or
+  // "Bind current") binds the current window's conversation.
   const [binds, setBinds] = useState<BindSlot[]>([]);
   const [bindEdit, setBindEdit] = useState<Record<number, string>>({});
   const [bindError, setBindError] = useState("");
@@ -316,7 +319,7 @@ function App() {
 
   // ── FP-4b M4: per-conversation bind slots (§3.2) ──────────────────────────
   // Arg names match the #[tauri::command] signatures in src-tauri/src/lib.rs:
-  //   kc_bind_get() -> Slot[]        kc_bind_set(slot, url, label?)
+  //   kc_bind_get() -> Slot[]        kc_bind_set(slot, label?, url?)
   //   kc_bind_clear(slot)            kc_bind_current(slot)
   async function runBind(action: () => Promise<void>) {
     setBindBusy(true);
@@ -335,12 +338,21 @@ function App() {
   }
 
   async function bindSet(slot: number) {
-    const url = (bindEdit[slot] || "").trim();
-    if (!url) {
-      setBindError(`Enter a /chat/<slug> URL for slot ${slot} before Set.`);
+    const title = (bindEdit[slot] || "").trim();
+    if (!title) {
+      setBindError(`Enter a conversation title for slot ${slot} before Set.`);
       return;
     }
-    await invoke("kc_bind_set", { slot, url, label: null });
+    // Title-primary: store the conversation title as the label (client-side
+    // command-bar focus, no reload). url stays null unless the manual fallback
+    // is used. A pasted /chat/<slug> URL still works — the backend keeps it as
+    // the url fallback and derives the label from the slug.
+    const looksLikeUrl = title.includes("/chat/");
+    await invoke("kc_bind_set", {
+      slot,
+      label: looksLikeUrl ? null : title,
+      url: looksLikeUrl ? title : null,
+    });
     await refreshBinds();
   }
 
@@ -351,7 +363,7 @@ function App() {
   }
 
   async function bindCurrent(slot: number) {
-    // Mirrors a physical long-press: capture the focused window's URL and bind.
+    // Mirrors a physical long-press: capture the focused window's title and bind.
     await invoke("kc_bind_current", { slot });
     await refreshBinds();
   }
@@ -671,17 +683,19 @@ function App() {
           <>
             <Panel title="Bindings — K1–K3 conversations (§3.2)">
               <p className="hint">
-                Bind a specific Kiro Crew <strong>conversation</strong> to each slot key.
-                <strong> Short-press</strong> a board key (K1–K3) to focus its conversation
-                (navigates to <code>/chat/&lt;slug&gt;</code>, stable across sidebar reordering);
-                <strong> long-press</strong> to bind the current conversation. An empty slot's
-                short-press creates a new chat. Requires <em>Bind window</em> below to be set and
-                a browser window with an address bar focused.
+                Bind a specific Kiro Crew <strong>conversation</strong> to each slot key by its
+                <strong> title</strong>. <strong>Short-press</strong> a board key (K1–K3) to focus
+                its conversation via the <strong>client-side Command Bar</strong> (typed by title —
+                <em> no page reload</em>, unlike address-bar navigation which reloads the SPA);
+                <strong> long-press</strong> to bind the current conversation (its window title is
+                captured and stripped). An empty slot's short-press creates a new chat. A
+                <code> /chat/&lt;slug&gt;</code> URL is still accepted as a manual navigate fallback.
+                Requires <em>Bind window</em> below to be set.
               </p>
 
               {[1, 2, 3].map((slot) => {
                 const s = binds[slot - 1];
-                const bound = !!(s && s.url && s.url.trim());
+                const bound = !!(s && ((s.label && s.label.trim()) || (s.url && s.url.trim())));
                 return (
                   <div key={slot} style={{ marginTop: slot === 1 ? 6 : 16 }}>
                     <div className="lcd">
@@ -692,11 +706,11 @@ function App() {
                     </div>
                     <input
                       style={{ marginTop: 6 }}
-                      value={bindEdit[slot] ?? (s?.url ?? "")}
+                      value={bindEdit[slot] ?? (s?.label ?? s?.url ?? "")}
                       onChange={(event) =>
                         setBindEdit((prev) => ({ ...prev, [slot]: event.target.value }))
                       }
-                      placeholder="http://127.0.0.1:5476/chat/<slug>?sid=<slug>"
+                      placeholder="Conversation title (or a /chat/<slug> URL for manual fallback)"
                     />
                     <div className="actions" style={{ marginTop: 6, flexWrap: "wrap" }}>
                       <button disabled={bindBusy} onClick={() => runBind(() => bindSet(slot))}>
