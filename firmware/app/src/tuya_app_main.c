@@ -395,6 +395,16 @@ static void on_rx_line(const char *line)
         }
     } else if (strcmp(type, "ping") == 0) {
         send_pong();
+    } else if (strcmp(type, "bye") == 0) {
+        /* The PC companion is disconnecting gracefully. Plain UART gives no
+         * hardware disconnect edge, so this frame is how the board learns the
+         * link is going down -> flip the header to "USB Disconnected". */
+        if (s_pc_connected) {
+            s_pc_connected = false;
+#if AK_ENABLE_DISPLAY
+            ak_refresh_link_header();
+#endif
+        }
     } else if (strcmp(type, "config") == 0) {
         uint32_t seq = 0;
         ak_json_uint(line, "seq", &seq);

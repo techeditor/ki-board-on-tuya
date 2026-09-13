@@ -39,6 +39,13 @@ pub fn hello_payload() -> Value {
     })
 }
 
+/// Companion -> board graceful disconnect. Plain UART has no hardware
+/// disconnect signal, so the board cannot otherwise tell the companion closed
+/// the port; this lets it flip its link header to "USB Disconnected".
+pub fn bye_payload() -> Value {
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "bye" })
+}
+
 /// Companion -> board keepalive request.
 pub fn ping_payload() -> Value {
     serde_json::json!({ "v": PROTOCOL_VERSION, "type": "ping" })

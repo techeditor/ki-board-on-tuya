@@ -372,6 +372,12 @@ mod app {
     #[tauri::command]
     fn disconnect_device(state: State<Shared>) -> Result<(), String> {
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        // Best-effort graceful goodbye BEFORE we drop the transport: plain UART
+        // has no hardware disconnect signal, so without this the board's link
+        // header would stay "USB Connected" forever after we close the port.
+        if let Some(transport) = inner.transport.as_mut() {
+            let _ = transport.write_json(&protocol::bye_payload());
+        }
         if let Some(mut transport) = inner.transport.take() {
             // Sets the transport stop flag so the low-level serial reader thread
             // exits and releases the OS port; dropping `transport` here closes
