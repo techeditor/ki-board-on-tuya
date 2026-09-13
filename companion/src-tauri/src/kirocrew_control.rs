@@ -573,8 +573,12 @@ mod windows_impl {
 
         /// Focus the composer (Alt+Enter), then type — no Enter (K5 submits).
         pub fn compose(&mut self, text: &str) -> Result<(), String> {
+            // Focus the window only, then type. This previously injected Alt+Enter
+            // to "focus the composer", but that chord SUBMITS in Kiro Crew — so it
+            // auto-sent whatever was already in the composer. Rely on the composer
+            // being the default focused control; typing never submits, and the user
+            // still submits explicitly with K5 (Enter).
             self.focus()?;
-            alt_tap(VK_RETURN)?; // Alt+Enter = focus text input
             type_text_raw(text)
         }
 

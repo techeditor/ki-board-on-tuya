@@ -675,13 +675,19 @@ mod app {
                 .map(|inner| (inner.control_enabled, inner.voice_source))
                 .unwrap_or((false, VoiceSource::Cloud));
             if enabled && pc_asr::route_voice(source, payload.state) == VoiceAction::Activate {
-                // Focus the Kiro Crew window first so OS dictation types into
-                // its composer (parity with the cloud route's Compose, which
-                // Alt+Enter-focuses the input). Best-effort; activation still
-                // fires if focusing fails (user may already be focused).
-                let _ = exec_control_action(app, state, &ControlAction::Chord(Chord::FocusInput));
+                // Bring the Kiro Crew WINDOW to the foreground so OS dictation
+                // types into it. Do NOT inject Alt+Enter here: that chord SUBMITS
+                // the composer in Kiro Crew, so using it to "focus" auto-sent the
+                // text left from the previous dictation (confirmed off-by-one on
+                // hardware — each K4 press submitted the prior utterance). Window
+                // focus alone is enough (the composer is the default focused
+                // control) and can never submit. Best-effort; Win+H still fires if
+                // focus fails (the user may already be on the window).
+                if let Ok(mut inner) = state.inner.lock() {
+                    let _ = inner.kc_controller.focus();
+                }
                 match pc_asr::activator().activate() {
-                    Ok(()) => log_line(app, "[PC-ASR] focused composer + activated OS dictation (Win+H)"),
+                    Ok(()) => log_line(app, "[PC-ASR] focused window + activated OS dictation (Win+H)"),
                     Err(e) => log_line(app, format!("[PC-ASR] activate failed: {e}")),
                 }
             }
