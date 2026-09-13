@@ -19,4 +19,13 @@ config AK_TRANSPORT_BLE_HID
     default n
     select ENABLE_BLUETOOTH
 
+config AK_ASR_BOARD_CLOUD
+    bool "Enable board-side Tuya cloud ASR (ai_chat HOLD; needs Wi-Fi + PID+AI agent)"
+    default n
+    select ENABLE_AI_COMPONENTS
+
+config TUYA_PRODUCT_ID
+    string "product ID (bound to an AI agent) for cloud ASR"
+    default ""
+
 endmenu

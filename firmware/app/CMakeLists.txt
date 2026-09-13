@@ -48,3 +48,8 @@ elseif (CONFIG_AK_TRANSPORT_BLE_GATT STREQUAL "y")
 elseif (CONFIG_AK_TRANSPORT_BLE_HID STREQUAL "y")
     target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_TRANSPORT_UART=0 AK_TRANSPORT_BLE_HID=1)
 endif()
+
+# Board-side cloud ASR (ai_chat). Independent of the transport selection above.
+if (CONFIG_AK_ASR_BOARD_CLOUD STREQUAL "y")
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_ASR_BOARD_CLOUD=1)
+endif()
