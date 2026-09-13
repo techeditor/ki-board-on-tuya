@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -95,6 +95,15 @@ function App() {
   // is the untouched JSON object per board-event.
   const [logsRaw, setLogsRaw] = useState<string[]>([]);
   const [logsShowRaw, setLogsShowRaw] = useState(false);
+  // LOGS pause/resume: while paused the visible list is FROZEN (so the user can
+  // observe and copy without it scrolling); new lines are buffered in refs and
+  // flushed back on resume. A ref mirrors the flag so the once-registered event
+  // listeners read the live value instead of a stale closure.
+  const [logsPaused, setLogsPaused] = useState(false);
+  const logsPausedRef = useRef(false);
+  const logBufRef = useRef<string[]>([]);
+  const rawBufRef = useRef<string[]>([]);
+  const [pausedCount, setPausedCount] = useState(0);
   const [voiceSource, setVoiceSource] = useState<"cloud" | "system">("system");
   const [lastKey, setLastKey] = useState("");
   const [lastNav, setLastNav] = useState("");
@@ -135,7 +144,10 @@ function App() {
   async function refreshRuntime() {
     setStatus(await invoke<Status>("get_status"));
     setPorts(await invoke<SerialPortInfo[]>("list_serial_ports"));
-    setLogs(await invoke<string[]>("get_logs"));
+    // Don't clobber the frozen list while the LOGS view is paused.
+    if (!logsPausedRef.current) {
+      setLogs(await invoke<string[]>("get_logs"));
+    }
   }
 
   async function runAction(action: () => Promise<void>) {
@@ -183,6 +195,32 @@ function App() {
     await invoke("clear_logs");
     setLogs([]);
     setLogsRaw([]);
+    logBufRef.current = [];
+    rawBufRef.current = [];
+    setPausedCount(0);
+  }
+
+  // Toggle LOGS pause. On resume, flush the buffered lines (newest-first) back
+  // onto the head of each list so nothing observed while paused is lost.
+  function toggleLogsPause() {
+    if (logsPausedRef.current) {
+      logsPausedRef.current = false;
+      setLogsPaused(false);
+      if (logBufRef.current.length) {
+        const buf = logBufRef.current;
+        setLogs((items) => [...buf, ...items].slice(0, 200));
+        logBufRef.current = [];
+      }
+      if (rawBufRef.current.length) {
+        const buf = rawBufRef.current;
+        setLogsRaw((items) => [...buf, ...items].slice(0, 200));
+        rawBufRef.current = [];
+      }
+      setPausedCount(0);
+    } else {
+      logsPausedRef.current = true;
+      setLogsPaused(true);
+    }
   }
 
   // Enable/disable routing board keys to Kiro Crew control. Default OFF so the
@@ -318,12 +356,21 @@ function App() {
     }, 1500);
 
     const unlistenLog = listen<string>("companion-log", (event) => {
+      if (logsPausedRef.current) {
+        logBufRef.current = [event.payload, ...logBufRef.current].slice(0, 200);
+        setPausedCount((n) => n + 1);
+        return;
+      }
       setLogs((items) => [event.payload, ...items].slice(0, 200));
     });
 
     const unlistenBoard = listen<BoardEvent>("board-event", (event) => {
       const payload = event.payload;
-      setLogsRaw((items) => [JSON.stringify(payload), ...items].slice(0, 200));
+      if (logsPausedRef.current) {
+        rawBufRef.current = [JSON.stringify(payload), ...rawBufRef.current].slice(0, 200);
+      } else {
+        setLogsRaw((items) => [JSON.stringify(payload), ...items].slice(0, 200));
+      }
       if (payload.kind === "key" && payload.id) {
         if (payload.action === "down" || payload.action === "long") {
           setLastKey(payload.id);
@@ -806,10 +853,21 @@ function App() {
               >
                 Raw JSON
               </button>
+              <button
+                className={logsPaused ? "" : "secondary"}
+                onClick={toggleLogsPause}
+                title={logsPaused ? "继续滚动并补回暂停期间的日志" : "冻结日志便于观察/复制"}
+              >
+                {logsPaused ? `▶ 继续${pausedCount ? ` (+${pausedCount})` : ""}` : "⏸ 暂停"}
+              </button>
               <button className="secondary" onClick={() => runAction(clearLogs)}>Clear</button>
             </div>
             <p className="hint">
-              {logsShowRaw
+              {logsPaused
+                ? `已暂停 — 显示已冻结，可安心选择/复制${
+                    pausedCount ? `；暂停期间缓冲了 ${pausedCount} 条新日志，点"继续"补回` : ""
+                  }。`
+                : logsShowRaw
                 ? "Raw board-frame JSON, one object per line (as received over the transport)."
                 : "Human-readable event log ([RX] key/nav/voice, [KC-CTL], [INFO]/[ERROR])."}
             </p>
