@@ -128,6 +128,13 @@ bool ak_asr_available(void)
 void ak_asr_start(void)
 {
     if (s_ai_ready) {
+#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
+        /* Long-press "start talking" prompt tone (长按提示音). In HOLD mode the SDK
+         * normally plays this from its own button/mode path (ai_chat_main); we drive
+         * capture manually via tuya_ai_input_start (to gate cloud vs system on K4),
+         * which bypasses that path — so play the alert here to match FP-3's UX. */
+        ai_audio_player_alert(AI_AUDIO_ALERT_LONG_KEY_TALK);
+#endif
         /* Begin a capture (force=false: normal agent scode). Recognized text
          * comes back later via __ai_event_cb / AI_USER_EVT_ASR_OK. */
         tuya_ai_input_start(false);

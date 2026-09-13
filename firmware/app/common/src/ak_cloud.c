@@ -26,6 +26,9 @@
 #include "netmgr.h"
 #include "tuya_authorize.h"
 #include "board_com_api.h"
+#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
+#include "ai_audio_player.h"
+#endif
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
 #include "netconn_wifi.h"
 #endif
@@ -67,9 +70,17 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
     switch (event->id) {
     case TUYA_EVENT_BIND_START:
         PR_NOTICE("cloud: bind start (device awaiting Wi-Fi provisioning)");
+#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
+        /* Networking prompt tone (联网提示音) — same as FP-3's BIND_START. */
+        ai_audio_player_alert(AI_AUDIO_ALERT_NETWORK_CFG);
+#endif
         break;
     case TUYA_EVENT_MQTT_CONNECTED:
         PR_NOTICE("cloud: MQTT connected (device online, cloud ASR ready)");
+#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
+        /* "Network connected" prompt once we are actually online. */
+        ai_audio_player_alert(AI_AUDIO_ALERT_NETWORK_CONNECTED);
+#endif
         break;
     case TUYA_EVENT_MQTT_DISCONNECT:
         PR_NOTICE("cloud: MQTT disconnected (device offline)");
