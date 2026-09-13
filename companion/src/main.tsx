@@ -46,6 +46,9 @@ type KcStatus = {
   agent_name: string;
   state: string;
   text: string;
+  // Set by the sink: true when this session is the one currently driving the
+  // board LCD (either nothing is pinned, or this is the pinned session).
+  forwarded?: boolean;
 };
 
 // FP-4b M4 (§3.2): the three per-key chat NUMBERS (K1-K3). Each key jumps to a
@@ -135,6 +138,9 @@ function App() {
   const [ssError, setSsError] = useState("");
   const [ssBusy, setSsBusy] = useState(false);
   const [kcStatuses, setKcStatuses] = useState<Record<string, KcStatus>>({});
+  // FP-4b Route STATUS (option A): the pinned "watched chat". "" = follow all
+  // sessions. Non-empty = only that session's status drives the board LCD.
+  const [pinnedSession, setPinnedSession] = useState("");
 
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
@@ -349,6 +355,18 @@ function App() {
     setSsToken("");
   }
 
+  // Pin one session as the watched chat (only its status drives the board), or
+  // pass "" to unpin and follow every session again.
+  async function pinSession(sessionId: string) {
+    await invoke("kc_pin_session", { sessionId });
+    setPinnedSession(sessionId);
+  }
+
+  async function unpinSession() {
+    await invoke("kc_unpin_session");
+    setPinnedSession("");
+  }
+
   useEffect(() => {
     refreshRuntime().catch(() => undefined);
     const timer = window.setInterval(() => {
@@ -416,6 +434,11 @@ function App() {
     // Load the persisted M4 per-key chat numbers on mount.
     invoke<ChatNumbers>("kc_bind_get")
       .then(setBinds)
+      .catch(() => undefined);
+
+    // Recover the pinned "watched chat" on mount (survives a UI reload).
+    invoke<string>("kc_get_pinned")
+      .then((sid) => setPinnedSession(sid || ""))
       .catch(() => undefined);
 
     return () => {
@@ -822,15 +845,52 @@ function App() {
                 </>
               )}
 
-              <label style={{ marginTop: 18 }}>Live status (per session)</label>
+              <label style={{ marginTop: 18 }}>
+                Watched chat (drives the board LCD)
+              </label>
+              <p className="hint" style={{ marginTop: 4 }}>
+                {pinnedSession
+                  ? `Pinned — only session ${pinnedSession.slice(0, 8)}… updates the board. Click another to switch, or Follow all.`
+                  : "Following ALL sessions — any active chat updates the board. Click one to pin it as the only watched chat."}
+              </p>
+              <div className="actions" style={{ marginTop: 0 }}>
+                <button
+                  className={pinnedSession ? "secondary" : ""}
+                  disabled={!pinnedSession}
+                  onClick={() => runSs(unpinSession)}
+                >
+                  Follow all
+                </button>
+              </div>
               <div className="log">
                 {Object.keys(kcStatuses).length === 0
                   ? "No status yet. Start the sink, then run an agent turn with the hook wired."
-                  : Object.values(kcStatuses).map((s) => (
-                      <div key={s.session_id}>
-                        {`${s.session_id.slice(0, 8)} · ${s.state.toUpperCase()} · ${s.text}`}
-                      </div>
-                    ))}
+                  : Object.values(kcStatuses)
+                      .sort((a, b) =>
+                        a.session_id === pinnedSession
+                          ? -1
+                          : b.session_id === pinnedSession
+                          ? 1
+                          : a.session_id.localeCompare(b.session_id),
+                      )
+                      .map((s) => {
+                        const isPinned = s.session_id === pinnedSession;
+                        const driving = pinnedSession ? isPinned : true;
+                        return (
+                          <div
+                            key={s.session_id}
+                            onClick={() => runSs(() => pinSession(s.session_id))}
+                            title={`Pin ${s.session_id} as the watched chat`}
+                            style={{
+                              cursor: "pointer",
+                              fontWeight: isPinned ? 700 : 400,
+                              opacity: driving ? 1 : 0.5,
+                            }}
+                          >
+                            {`${isPinned ? "📌 " : "   "}${s.session_id.slice(0, 8)} · ${s.state.toUpperCase()} · ${s.text}`}
+                          </div>
+                        );
+                      })}
               </div>
 
               {ssError && <div className="error-banner" style={{ marginTop: 14 }}>{ssError}</div>}

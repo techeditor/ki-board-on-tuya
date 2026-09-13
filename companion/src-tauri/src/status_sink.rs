@@ -134,8 +134,24 @@ pub fn map_hook_event(ev: &HookEvent) -> DisplayState {
     }
 }
 
-// ───────────────────────────── Handoff file ─────────────────────────────
+/// Pure "watched chat" filter (option A). Decide whether a status for
+/// `session_id` should be forwarded to the board LCD, given the currently
+/// pinned session:
+///
+/// * `pinned == None`  → follow every session (forward all).
+/// * `pinned == Some(p)` → forward ONLY the session whose id equals `p`, so a
+///   background chat's activity does not clobber the LCD of the watched chat.
+///
+/// Kept here (cross-platform) rather than in the Windows-gated `app` module so
+/// it builds and unit-tests on the Linux CI host.
+pub fn should_forward(pinned: Option<&str>, session_id: &str) -> bool {
+    match pinned {
+        None => true,
+        Some(p) => p == session_id,
+    }
+}
 
+// ───────────────────────────── Handoff file ─────────────────────────────
 /// The `{port, token}` handoff the GUI writes when the sink starts and the
 /// `--hook` process reads to find the sink. Small and non-secret-at-rest beyond
 /// the ephemeral token (the sink is loopback-only).
@@ -525,8 +541,23 @@ mod tests {
         assert_eq!(d.text, "preToolUse");
     }
 
-    // ── HookEvent deserialization tolerance ──────────────────
+    // ── should_forward "watched chat" filter ─────────────────
 
+    #[test]
+    fn no_pin_forwards_every_session() {
+        assert!(should_forward(None, "sess-A"));
+        assert!(should_forward(None, "sess-B"));
+        assert!(should_forward(None, ""));
+    }
+
+    #[test]
+    fn pin_forwards_only_matching_session() {
+        assert!(should_forward(Some("sess-A"), "sess-A"));
+        assert!(!should_forward(Some("sess-A"), "sess-B"));
+        assert!(!should_forward(Some("sess-A"), ""));
+    }
+
+    // ── HookEvent deserialization tolerance ──────────────────
     #[test]
     fn hook_event_accepts_kiro_key_names() {
         // Raw Kiro hook JSON uses hook_event_name; a slimmed body uses `event`.

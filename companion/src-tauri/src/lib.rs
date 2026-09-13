@@ -170,6 +170,14 @@ mod app {
         /// Last mapped status per Kiro `session_id` (design: keep last-status
         /// per session, emit a `display` frame for it, push to the UI).
         kc_status: HashMap<String, StatusDisplay>,
+        /// FP-4b Route STATUS — "watched chat" filter. `None` = follow every
+        /// session (only the UI live-list keys them apart). `Some(id)` = pin ONE
+        /// Kiro `session_id`: only that session's status is forwarded as a
+        /// `display` frame to the board, so a background chat's activity no
+        /// longer clobbers the LCD. The `kc-status` UI event is ALWAYS pushed
+        /// (pinned or not) so the picker can list every active session and the
+        /// user can choose which one to pin.
+        kc_pinned_session: Option<String>,
         /// FP-4b M4 (§3.2): per-key chat-number store for K1-K3, loaded from
         /// `config_dir/ak-companion/binds.json` at startup. Each key binds to a
         /// chat NUMBER (1..=9); pressing it fires `Alt+N` (jump to chat N). The
@@ -488,18 +496,33 @@ mod app {
     /// to the board (best-effort — ignored when the board is offline), and
     /// emits a `kc-status` UI event.
     fn apply_status(app: &AppHandle, state: &Shared, status: StatusDisplay) {
-        // Record last-status per session.
-        if let Ok(mut inner) = state.inner.lock() {
+        // Record last-status per session, and read the pinned filter under the
+        // same lock so the forward decision is consistent with what the UI shows.
+        let forward = if let Ok(mut inner) = state.inner.lock() {
             inner
                 .kc_status
                 .insert(status.session_id.clone(), status.clone());
+            // Forward to the board only when no session is pinned (follow all)
+            // or the pinned session matches this event's session.
+            crate::status_sink::should_forward(
+                inner.kc_pinned_session.as_deref(),
+                &status.session_id,
+            )
+        } else {
+            // Lock poisoned: fail open so a status still reaches the board.
+            true
+        };
+        // Emit a `display` frame to the board only for the watched session
+        // (reuse the existing encoder). Best-effort — ignored when offline.
+        if forward {
+            let _ = write_board(
+                state,
+                &protocol::display_payload(&status.agent_name, &status.state, &status.text),
+            );
         }
-        // Emit a `display` frame to the board (reuse the existing encoder).
-        let _ = write_board(
-            state,
-            &protocol::display_payload(&status.agent_name, &status.state, &status.text),
-        );
-        // Push to the UI live status list.
+        // Push to the UI live status list ALWAYS (pinned or not) so the picker
+        // can list every active session; carry `forwarded` so the UI can mark
+        // which session is currently driving the board.
         let _ = app.emit(
             "kc-status",
             serde_json::json!({
@@ -507,13 +530,17 @@ mod app {
                 "agent_name": status.agent_name,
                 "state": status.state,
                 "text": status.text,
+                "forwarded": forward,
             }),
         );
         log_line(
             app,
             format!(
-                "[KC-STATUS] {} · {} · {}",
-                status.session_id, status.state, status.text
+                "[KC-STATUS] {} · {} · {}{}",
+                status.session_id,
+                status.state,
+                status.text,
+                if forward { "" } else { " (muted — not pinned)" }
             ),
         );
     }
@@ -575,6 +602,96 @@ mod app {
             .map_err(|_| "state lock poisoned")?
             .status_token
             .clone())
+    }
+
+    // ─────────── FP-4b Route STATUS — "watched chat" pin (option A) ───────────
+
+    /// One row for the UI's active-session picker: a session the sink has seen,
+    /// with its last-known status and whether it is the one currently pinned.
+    #[derive(Serialize)]
+    struct SessionRow {
+        session_id: String,
+        agent_name: String,
+        state: String,
+        text: String,
+        pinned: bool,
+    }
+
+    /// List every session the sink has observed (with last status), so the UI
+    /// can render a picker. The `pinned` flag marks which one is driving the
+    /// board. When nothing is pinned, ALL sessions drive the board (and every
+    /// row's `pinned` is false).
+    #[tauri::command]
+    fn kc_list_sessions(state: State<Shared>) -> Result<Vec<SessionRow>, String> {
+        let inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        let pinned = inner.kc_pinned_session.clone();
+        let mut rows: Vec<SessionRow> = inner
+            .kc_status
+            .values()
+            .map(|s| SessionRow {
+                session_id: s.session_id.clone(),
+                agent_name: s.agent_name.clone(),
+                state: s.state.clone(),
+                text: s.text.clone(),
+                pinned: pinned.as_deref() == Some(s.session_id.as_str()),
+            })
+            .collect();
+        // Stable order: pinned first, then by session id.
+        rows.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(a.session_id.cmp(&b.session_id)));
+        Ok(rows)
+    }
+
+    /// Return the currently pinned session id, or empty string when following
+    /// all sessions.
+    #[tauri::command]
+    fn kc_get_pinned(state: State<Shared>) -> Result<String, String> {
+        Ok(state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .kc_pinned_session
+            .clone()
+            .unwrap_or_default())
+    }
+
+    /// Pin ONE session as the watched chat: only its status is forwarded to the
+    /// board LCD. Immediately pushes that session's last-known status (if any)
+    /// to the board so the LCD reflects the choice without waiting for the next
+    /// hook event. An empty / whitespace id is treated as unpin.
+    #[tauri::command]
+    fn kc_pin_session(app: AppHandle, state: State<Shared>, session_id: String) -> Result<(), String> {
+        let sid = session_id.trim().to_string();
+        if sid.is_empty() {
+            return kc_unpin_session(app, state);
+        }
+        // Set the pin and grab the pinned session's last status under one lock.
+        let last = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.kc_pinned_session = Some(sid.clone());
+            inner.kc_status.get(&sid).cloned()
+        };
+        // Refresh the board now with the pinned session's last status.
+        if let Some(s) = last {
+            let _ = write_board(
+                &state,
+                &protocol::display_payload(&s.agent_name, &s.state, &s.text),
+            );
+        }
+        log_line(&app, format!("[KC-STATUS] pinned session {sid}"));
+        Ok(())
+    }
+
+    /// Clear the pin: go back to following every session (all statuses drive the
+    /// board again).
+    #[tauri::command]
+    fn kc_unpin_session(app: AppHandle, state: State<Shared>) -> Result<(), String> {
+        state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .kc_pinned_session = None;
+        log_line(&app, "[KC-STATUS] unpinned — following all sessions");
+        Ok(())
     }
 
     /// Compact human-readable description of a routed control action for logs.
@@ -744,6 +861,7 @@ mod app {
                 status_sink: None,
                 status_token: String::new(),
                 kc_status: HashMap::new(),
+                kc_pinned_session: None,
                 kc_binds,
             }),
         });
@@ -773,6 +891,10 @@ mod app {
                 status_sink_start,
                 status_sink_stop,
                 status_token,
+                kc_list_sessions,
+                kc_get_pinned,
+                kc_pin_session,
+                kc_unpin_session,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");
