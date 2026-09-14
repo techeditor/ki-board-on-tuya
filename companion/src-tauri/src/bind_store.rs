@@ -37,9 +37,10 @@ fn default_sessions() -> Vec<String> {
     vec![String::new(); SLOT_COUNT]
 }
 
-/// The persisted per-key binding store. `chats[i]` is the chat number,
-/// `aliases[i]` its optional AK label, and `sessions[i]` the Crew session shown
-/// beside that slot in the Companion. All vectors have `SLOT_COUNT` entries.
+/// The persisted Agent Status and per-key binding store. `chats[i]` is the
+/// chat number, `aliases[i]` its optional AK label, and `sessions[i]` the Crew
+/// session shown beside that slot in the Companion. All vectors have
+/// `SLOT_COUNT` entries. `pinned_session` is the optional Agent Status Watch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindStore {
     /// Index 0..=2 maps K1..=K3 to the A/B/C slots.
@@ -51,6 +52,9 @@ pub struct BindStore {
     /// Optional stable Crew session ids used only for Companion presentation.
     #[serde(default = "default_sessions")]
     pub sessions: Vec<String>,
+    /// Optional Agent Status session pinned to the keyboard screen.
+    #[serde(default)]
+    pub pinned_session: String,
 }
 
 impl Default for BindStore {
@@ -59,6 +63,7 @@ impl Default for BindStore {
             chats: default_chats(),
             aliases: default_aliases(),
             sessions: default_sessions(),
+            pinned_session: String::new(),
         }
     }
 }
@@ -98,6 +103,7 @@ impl BindStore {
         for session in &mut self.sessions {
             *session = normalize_session_id(session).unwrap_or_default();
         }
+        self.pinned_session = normalize_session_id(&self.pinned_session).unwrap_or_default();
     }
 
     /// Read the chat number for slot `n` (1-based). Returns `None` for an
@@ -132,9 +138,32 @@ impl BindStore {
         Ok(())
     }
 
+    /// Return every 1-based Chat A/B/C slot associated with `session_id`.
+    /// Empty and unknown ids intentionally produce no board destination.
+    pub fn slots_for_session(&self, session_id: &str) -> Vec<u8> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Vec::new();
+        }
+        self.sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bound)| {
+                (bound == session_id).then_some((index + 1) as u8)
+            })
+            .collect()
+    }
+
     /// Remove only the UI session association for a slot.
     pub fn clear_session(&mut self, n: u8) -> Result<(), String> {
         self.set_session(n, "")
+    }
+
+    /// Persist the Agent Status session watched by the keyboard screen. Empty
+    /// input restores the default behavior of following every session.
+    pub fn set_pinned_session(&mut self, session_id: &str) -> Result<(), String> {
+        self.pinned_session = normalize_session_id(session_id)?;
+        Ok(())
     }
 
     /// Reset slot `n` (1-based) to its default chat number (slot index + 1).
@@ -228,6 +257,7 @@ mod tests {
         assert_eq!(s.chats, vec![1, 2, 3]);
         assert_eq!(s.aliases, vec!["", "", ""]);
         assert_eq!(s.sessions, vec!["", "", ""]);
+        assert_eq!(s.pinned_session, "");
         assert_eq!(s.get(1), Some(1));
         assert_eq!(s.get(2), Some(2));
         assert_eq!(s.get(3), Some(3));
@@ -265,9 +295,14 @@ mod tests {
     fn session_association_round_trips_and_clears() {
         let mut s = BindStore::new();
         s.set_session(2, " dashboard:chat-2 ").unwrap();
+        s.set_session(3, "dashboard:chat-2").unwrap();
         assert_eq!(s.sessions[1], "dashboard:chat-2");
+        assert_eq!(s.slots_for_session(" dashboard:chat-2 "), vec![2, 3]);
+        assert!(s.slots_for_session("").is_empty());
+        assert!(s.slots_for_session("unknown").is_empty());
         s.clear_session(2).unwrap();
         assert_eq!(s.sessions[1], "");
+        assert_eq!(s.slots_for_session("dashboard:chat-2"), vec![3]);
         assert!(s.set_session(4, "other").is_err());
         assert!(s.set_session(1, "bad\nsession").is_err());
     }
@@ -305,10 +340,11 @@ mod tests {
         s.set(3, 8);
         s.set_alias(1, "Plan").unwrap();
         s.set_session(1, "dashboard:chat-4").unwrap();
+        s.set_pinned_session("dashboard:chat-4").unwrap();
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"chats":[4,2,8],"aliases":["Plan","",""],"sessions":["dashboard:chat-4","",""]}"#
+            r#"{"chats":[4,2,8],"aliases":["Plan","",""],"sessions":["dashboard:chat-4","",""],"pinned_session":"dashboard:chat-4"}"#
         );
         let back: BindStore = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
@@ -322,6 +358,7 @@ mod tests {
         assert_eq!(old.chats, vec![5, 2, 3]);
         assert_eq!(old.aliases, vec!["", "", ""]);
         assert_eq!(old.sessions, vec!["", "", ""]);
+        assert_eq!(old.pinned_session, "");
 
         let mut long: BindStore =
             serde_json::from_str(r#"{"chats":[9,8,7,6],"aliases":["One","Two","Three","Four"]}"#)
@@ -348,5 +385,6 @@ mod tests {
         assert_eq!(s.chats, vec![1, 2, 3]);
         assert_eq!(s.aliases, vec!["", "", ""]);
         assert_eq!(s.sessions, vec!["", "", ""]);
+        assert_eq!(s.pinned_session, "");
     }
 }

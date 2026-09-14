@@ -230,8 +230,8 @@ mod app {
         /// Last mapped status per Kiro `session_id` (design: keep last-status
         /// per session, emit a `display` frame for it, push to the UI).
         kc_status: HashMap<String, StatusDisplay>,
-        /// FP-4b Route STATUS — "watched chat" filter. `None` = follow every
-        /// session (only the UI live-list keys them apart). `Some(id)` = pin ONE
+        /// FP-4b Route STATUS — persisted "watched chat" filter. `None` = follow
+        /// every session (only the UI live-list keys them apart). `Some(id)` = pin ONE
         /// Kiro `session_id`: only that session's status is forwarded as a
         /// `display` frame to the board, so a background chat's activity no
         /// longer clobbers the LCD. The `kc-status` UI event is ALWAYS pushed
@@ -465,13 +465,17 @@ mod app {
     #[tauri::command]
     fn send_display(
         state: State<Shared>,
+        chat_slot: u8,
         agent_name: String,
         display_state: String,
         text: String,
     ) -> Result<(), String> {
+        if !(1..=3).contains(&chat_slot) {
+            return Err(format!("chat slot must be 1..=3 (got {chat_slot})"));
+        }
         write_board(
             state.inner(),
-            &protocol::display_payload(&agent_name, &display_state, &text),
+            &protocol::display_payload(chat_slot, &agent_name, &display_state, &text),
         )
     }
 
@@ -708,30 +712,39 @@ mod app {
     /// to the board (best-effort — ignored when the board is offline), and
     /// emits a `kc-status` UI event.
     fn apply_status(app: &AppHandle, state: &Shared, status: StatusDisplay) {
-        // Record last-status per session, and read the pinned filter under the
-        // same lock so the forward decision is consistent with what the UI shows.
-        let forward = if let Ok(mut inner) = state.inner.lock() {
+        // Record last-status per session, then resolve its persisted Chat A/B/C
+        // destination under the same lock as the Watch filter.
+        let (watch_allows, slots) = if let Ok(mut inner) = state.inner.lock() {
             inner
                 .kc_status
                 .insert(status.session_id.clone(), status.clone());
-            // Forward to the board only when no session is pinned (follow all)
-            // or the pinned session matches this event's session.
-            crate::status_sink::should_forward(
+            let watch_allows = crate::status_sink::should_forward(
                 inner.kc_pinned_session.as_deref(),
                 &status.session_id,
-            )
-        } else {
-            // Lock poisoned: fail open so a status still reaches the board.
-            true
-        };
-        // Emit a `display` frame to the board only for the watched session
-        // (reuse the existing encoder). Best-effort — ignored when offline.
-        if forward {
-            let _ = write_board(
-                state,
-                &protocol::display_payload(&status.agent_name, &status.state, &status.text),
             );
+            let slots = inner.kc_binds.slots_for_session(&status.session_id);
+            (watch_allows, slots)
+        } else {
+            // Without a trustworthy binding lookup, fail closed rather than
+            // writing this status into whichever Chat is currently selected.
+            (false, Vec::new())
+        };
+        // One Crew session may intentionally be assigned to multiple slots.
+        // Unbound sessions remain visible in the Companion but never mutate AK.
+        if watch_allows {
+            for chat_slot in &slots {
+                let _ = write_board(
+                    state,
+                    &protocol::display_payload(
+                        *chat_slot,
+                        &status.agent_name,
+                        &status.state,
+                        &status.text,
+                    ),
+                );
+            }
         }
+        let forwarded = watch_allows && !slots.is_empty();
         // Push to the UI live status list ALWAYS (pinned or not) so the picker
         // can list every active session; carry `forwarded` so the UI can mark
         // which session is currently driving the board.
@@ -744,7 +757,7 @@ mod app {
                 "text": status.text,
                 "event": status.event,
                 "detail_text": status.detail_text,
-                "forwarded": forward,
+                "forwarded": forwarded,
             }),
         );
         log_line(
@@ -754,7 +767,13 @@ mod app {
                 status.session_id,
                 status.state,
                 status.text,
-                if forward { "" } else { " (muted — not pinned)" }
+                if !watch_allows {
+                    " (muted — not watched)"
+                } else if slots.is_empty() {
+                    " (not sent — no Chat A/B/C binding)"
+                } else {
+                    ""
+                }
             ),
         );
     }
@@ -882,18 +901,26 @@ mod app {
         if sid.is_empty() {
             return kc_unpin_session(app, state);
         }
-        // Set the pin and grab the pinned session's last status under one lock.
-        let last = {
+        // Persist the pin and resolve the pinned session's bound AK slots under
+        // one lock, together with its last known status.
+        let (last, slots) = {
             let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            let mut next_binds = inner.kc_binds.clone();
+            next_binds.set_pinned_session(&sid)?;
+            next_binds.save()?;
+            let slots = next_binds.slots_for_session(&sid);
+            inner.kc_binds = next_binds;
             inner.kc_pinned_session = Some(sid.clone());
-            inner.kc_status.get(&sid).cloned()
+            (inner.kc_status.get(&sid).cloned(), slots)
         };
-        // Refresh the board now with the pinned session's last status.
+        // Refresh only the pinned session's explicitly bound Chat slot(s).
         if let Some(s) = last {
-            let _ = write_board(
-                &state,
-                &protocol::display_payload(&s.agent_name, &s.state, &s.text),
-            );
+            for chat_slot in slots {
+                let _ = write_board(
+                    &state,
+                    &protocol::display_payload(chat_slot, &s.agent_name, &s.state, &s.text),
+                );
+            }
         }
         log_line(&app, format!("[KC-STATUS] pinned session {sid}"));
         Ok(())
@@ -903,11 +930,13 @@ mod app {
     /// board again).
     #[tauri::command]
     fn kc_unpin_session(app: AppHandle, state: State<Shared>) -> Result<(), String> {
-        state
-            .inner
-            .lock()
-            .map_err(|_| "state lock poisoned")?
-            .kc_pinned_session = None;
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        let mut next_binds = inner.kc_binds.clone();
+        next_binds.set_pinned_session("")?;
+        next_binds.save()?;
+        inner.kc_binds = next_binds;
+        inner.kc_pinned_session = None;
+        drop(inner);
         log_line(&app, "[KC-STATUS] unpinned — following all sessions");
         Ok(())
     }
@@ -1164,6 +1193,8 @@ mod app {
         // jumps to the configured numbers.
         let kc_binds = BindStore::load();
         let jump_chats = kc_binds.chats.clone();
+        let kc_pinned_session = (!kc_binds.pinned_session.is_empty())
+            .then(|| kc_binds.pinned_session.clone());
         let state: Shared = Arc::new(AppState {
             inner: Mutex::new(Inner {
                 transport: None,
@@ -1185,7 +1216,7 @@ mod app {
                 status_sink: None,
                 status_token: String::new(),
                 kc_status: HashMap::new(),
-                kc_pinned_session: None,
+                kc_pinned_session,
                 kc_binds,
             }),
         });

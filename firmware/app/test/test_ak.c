@@ -276,11 +276,14 @@ static void test_rx(void)
     CHECK(ak_json_str(g_lines[0], "type", type, sizeof(type)) && strcmp(type, "ping") == 0, "line 0 type=ping");
     CHECK(ak_json_str(g_lines[1], "type", type, sizeof(type)) && strcmp(type, "hello") == 0, "line 1 type=hello");
 
-    const char *disp = "{\"type\":\"display\",\"agent_name\":\"planner\",\"state\":\"running\",\"seq\":42}";
+    const char *disp = "{\"type\":\"display\",\"payload\":{\"chat_slot\":2,\"agent_name\":\"planner\",\"state\":"
+                       "\"running\"},\"seq\":42}";
     char        agent[32];
-    uint32_t    seq = 0;
+    uint32_t    seq       = 0;
+    uint32_t    chat_slot = 0;
     CHECK(ak_json_str(disp, "agent_name", agent, sizeof(agent)) && strcmp(agent, "planner") == 0,
           "extract agent_name string");
+    CHECK(ak_json_uint(disp, "chat_slot", &chat_slot) && chat_slot == 2U, "extract Chat B slot");
     CHECK(ak_json_uint(disp, "seq", &seq) && seq == 42, "extract seq uint");
     CHECK(!ak_json_str(disp, "missing", type, sizeof(type)), "absent key returns false");
 

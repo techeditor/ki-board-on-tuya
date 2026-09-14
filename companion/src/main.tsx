@@ -97,11 +97,6 @@ function sessionDisplayName(sessionId: string) {
   return firstPart || "Kiro Crew";
 }
 
-function shortSessionId(sessionId: string) {
-  if (sessionId.length <= 14) return sessionId;
-  return `${sessionId.slice(0, 8)}…${sessionId.slice(-4)}`;
-}
-
 const defaultStatus: Status = {
   device_connected: false,
   transport: "none",
@@ -1037,7 +1032,7 @@ function App() {
 
         {activeView === "kirocrew" && (
           <>
-            <Panel title="Bindings — Chat A/B/C">
+            <Panel title="Bind Chats with Keys (Control)">
               <p className="hint">
                 Bind Chat A, B, and C to Kiro Crew chat shortcuts and optionally name each slot.
                 Names are saved when you press Enter or click elsewhere, then shown on the AK;
@@ -1099,7 +1094,7 @@ function App() {
               {bindError && <div className="error-banner" style={{ marginTop: 14 }}>{bindError}</div>}
             </Panel>
 
-            <Panel title="Local Control — the hands (route B)">
+            <Panel title="Bind the Window">
               <p className="hint">
                 Focus a <strong>local</strong> Kiro Crew window and inject keystrokes directly
                 (no HTTP). Board keys route to command-bar / chords through the same backend.
@@ -1160,7 +1155,7 @@ function App() {
               {lcError && <div className="error-banner" style={{ marginTop: 14 }}>{lcError}</div>}
             </Panel>
 
-            <Panel title="Agent Status — the eyes (local hook listener)">
+            <Panel title="Bind Chats with Agent Status (Local Hook Listener)">
               <p className="hint">
                 Receives Kiro Crew <strong>agent hooks</strong> on
                 <code> 127.0.0.1:5477/status</code> and mirrors each agent's state to the board
@@ -1214,41 +1209,51 @@ function App() {
                 idempotent and refreshes the Companion executable path.
               </p>
 
-              <div className="actions" style={{ marginTop: 6 }}>
-                <button disabled={ssBusy || ssRunning} onClick={() => runSs(ssStart)}>
-                  Start status listener
-                </button>
+              <div className="listener-control-row">
                 <button
-                  className="secondary"
-                  disabled={ssBusy || !ssRunning}
-                  onClick={() => runSs(ssStop)}
+                  type="button"
+                  role="switch"
+                  aria-checked={ssRunning}
+                  aria-label={ssRunning ? "Stop status listener" : "Start status listener"}
+                  className="listener-switch"
+                  disabled={ssBusy}
+                  onClick={() => runSs(ssRunning ? ssStop : ssStart)}
                 >
-                  Stop status listener
+                  <span className="listener-switch-action">{ssRunning ? "Stop" : "Start"}</span>
+                  <span className="listener-switch-track" aria-hidden="true">
+                    <span className="listener-switch-thumb" />
+                  </span>
                 </button>
-              </div>
-
-              <div className="lcd" style={{ marginTop: 14 }}>
-                <span>LISTENER</span>
-                <strong>{ssRunning ? "LISTENING · 127.0.0.1:5477" : "-- (start first)"}</strong>
+                <div className="listener-inline-status" aria-live="polite">
+                  <span>LISTENER</span>
+                  <strong className={ssRunning ? "good-text" : ""}>
+                    {ssRunning ? "LISTENING · 127.0.0.1:5477" : "STOPPED"}
+                  </strong>
+                </div>
               </div>
 
               {ssRunning && (
-                <>
-                  <label style={{ marginTop: 18 }}>Token (X-AK-Status-Token)</label>
-                  <input readOnly value={ssToken} onFocus={(e) => e.currentTarget.select()} />
+                <details className="listener-details">
+                  <summary>
+                    Listener details <span>Token &amp; global hook command</span>
+                  </summary>
+                  <div className="listener-details-body">
+                    <label>Token (X-AK-Status-Token)</label>
+                    <input readOnly value={ssToken} onFocus={(e) => e.currentTarget.select()} />
 
-                  <label style={{ marginTop: 18 }}>Global hook command</label>
-                  <div className="terminal" style={{ whiteSpace: "pre-wrap" }}>
-                    {hookStatus?.command ?? '"<path-to-companion.exe>" --hook'}
+                    <label>Global hook command</label>
+                    <div className="terminal" style={{ whiteSpace: "pre-wrap" }}>
+                      {hookStatus?.command ?? '"<path-to-companion.exe>" --hook'}
+                    </div>
+                    <p className="hint">
+                      Each Crew ScriptHook invokes this command for dashboard agent turns. The hook
+                      reads the sink port and token from
+                      <code> %APPDATA%\ak-companion\hook.json</code> (Windows) /
+                      <code> ~/.config/ak-companion/hook.json</code> (else). Starting the sink writes
+                      that handoff file; no token is stored in the Crew hook configuration.
+                    </p>
                   </div>
-                  <p className="hint">
-                    Each Crew ScriptHook invokes this command for dashboard agent turns. The hook
-                    reads the sink port and token from
-                    <code> %APPDATA%\ak-companion\hook.json</code> (Windows) /
-                    <code> ~/.config/ak-companion/hook.json</code> (else). Starting the sink writes
-                    that handoff file; no token is stored in the Crew hook configuration.
-                  </p>
-                </>
+                </details>
               )}
 
               <div className="watched-toolbar">
@@ -1256,7 +1261,7 @@ function App() {
                   <label>Watched chat (shown on the keyboard screen)</label>
                   <p className="hint" style={{ marginTop: 4 }}>
                     {pinnedSession
-                      ? `Watching ${shortSessionId(pinnedSession)} — only this chat appears on the keyboard screen; other chats are hidden.`
+                      ? `Watching ${pinnedSession} — only this chat appears on the keyboard screen; other chats are hidden.`
                       : "Following all sessions — the latest active chat updates the keyboard screen."}
                   </p>
                 </div>
@@ -1311,7 +1316,7 @@ function App() {
                         <div className="watched-compact-row">
                           <div className="watched-session-summary">
                             <strong>{sessionDisplayName(s.session_id)}</strong>
-                            <code>{shortSessionId(s.session_id)}</code>
+                            <code>{s.session_id}</code>
                           </div>
                           <span className={`watched-state state-${s.state.toLowerCase()}`}>
                             {s.state.toUpperCase()}

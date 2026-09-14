@@ -125,6 +125,7 @@ static bool ak_transport_rx_is_usb(void)
 #define USB_LINK_TIMEOUT_MS       7000U
 #define FRAME_BUFFER_SIZE         192U
 #define SYSTEM_INFO_FRAME_BUFFER_SIZE 384U
+#define AK_CHAT_SLOT_COUNT        3U
 #define ASR_FRAME_BUFFER_SIZE     2048U
 #define CORE_INIT_ATTEMPTS        3U
 #define CORE_INIT_RETRY_MS        250U
@@ -612,7 +613,7 @@ static uint16_t ak_status_color(const char *state)
 }
 
 #define LCD_SIDEBAR_W             64U
-#define LCD_SESSION_ROWS          3U
+#define LCD_SESSION_ROWS          AK_CHAT_SLOT_COUNT
 #define LCD_SESSION_ROW_H         67U
 #define LCD_SESSION_ALIAS_CHARS   7U
 #define LCD_SESSION_ALIAS_BYTES   (LCD_SESSION_ALIAS_CHARS + 1U)
@@ -628,11 +629,13 @@ static uint16_t ak_status_color(const char *state)
 #define LCD_STATUS_BAR_Y        (AK_STATUSLCD_H - LCD_STATUS_BAR_H)
 #define LCD_STATUS_TEXT_BYTES   40U
 #define LCD_SESSION_SELECTED_BG AK_RGB565(0x8EU, 0x48U, 0xFFU)
+#define LCD_AGENT_RESPONSE_BG   AK_RGB565(0x6FU, 0x36U, 0xCCU)
 
 typedef struct {
     char    agent[32];
     char    state[16];
     char    history[LCD_HISTORY_CAPACITY][LCD_HISTORY_TEXT_BYTES];
+    bool    history_from_agent[LCD_HISTORY_CAPACITY];
     uint8_t history_count;
 } ak_session_ui_t;
 
@@ -702,9 +705,9 @@ static char ak_history_next_glyph(const char **cursor)
     return (c >= 0x20U && c < 0x7FU) ? (char)c : ' ';
 }
 
-/* Keep the ten most recent text updates for the session currently forwarded
- * by the companion. Oldest entries are discarded first. */
-static void ak_chat_history_add(ak_session_ui_t *session, const char *text)
+/* Keep the ten most recent text updates for each Chat, preserving whether
+ * each entry came from local ASR or Companion Agent output. */
+static void ak_chat_history_add(ak_session_ui_t *session, const char *text, bool from_agent)
 {
     if (session == NULL || text == NULL || text[0] == '\0') {
         return;
@@ -712,21 +715,25 @@ static void ak_chat_history_add(ak_session_ui_t *session, const char *text)
     if (session->history_count == LCD_HISTORY_CAPACITY) {
         memmove(session->history[0], session->history[1],
                 (LCD_HISTORY_CAPACITY - 1U) * LCD_HISTORY_TEXT_BYTES);
+        memmove(&session->history_from_agent[0], &session->history_from_agent[1],
+                (LCD_HISTORY_CAPACITY - 1U) * sizeof(session->history_from_agent[0]));
         session->history_count--;
     }
     (void)snprintf(session->history[session->history_count], LCD_HISTORY_TEXT_BYTES,
                    "%s", text);
+    session->history_from_agent[session->history_count] = from_agent;
     session->history_count++;
 }
 
 typedef struct {
     char text[LCD_CHAT_TEXT_COLS + 1U];
     bool paragraph_start;
+    bool from_agent;
 } ak_history_line_t;
 
 static void ak_history_line_push(ak_history_line_t *lines, uint8_t *count,
                                  const char *text, uint16_t length,
-                                 bool paragraph_start)
+                                 bool paragraph_start, bool from_agent)
 {
     if (*count == LCD_HISTORY_VISIBLE_LINES) {
         memmove(&lines[0], &lines[1],
@@ -736,15 +743,15 @@ static void ak_history_line_push(ak_history_line_t *lines, uint8_t *count,
 
     ak_history_line_t *line = &lines[*count];
     memcpy(line->text, text, length);
-    line->text[length] = '\0';
+    line->text[length]    = '\0';
     line->paragraph_start = paragraph_start;
+    line->from_agent      = from_agent;
     (*count)++;
 }
 
 /* Wrap one history entry at word boundaries. An overlong word is split at the
  * right edge; UTF-8 code points unsupported by the 8x8 font remain one '?'. */
-static void ak_history_wrap_entry(const char *text, ak_history_line_t *lines,
-                                  uint8_t *line_count)
+static void ak_history_wrap_entry(const char *text, bool from_agent, ak_history_line_t *lines, uint8_t *line_count)
 {
     char glyphs[LCD_HISTORY_TEXT_BYTES];
     const char *p = text;
@@ -786,8 +793,7 @@ static void ak_history_wrap_entry(const char *text, ak_history_line_t *lines,
             continue;
         }
 
-        ak_history_line_push(lines, line_count, &glyphs[start], length,
-                             first_line);
+        ak_history_line_push(lines, line_count, &glyphs[start], length, first_line, from_agent);
         first_line = false;
         start = (uint16_t)(start + length);
     }
@@ -799,7 +805,7 @@ static void ak_chat_history_draw(const ak_session_ui_t *session)
     uint8_t line_count = 0U;
 
     for (uint8_t i = 0U; i < session->history_count; i++) {
-        ak_history_wrap_entry(session->history[i], lines, &line_count);
+        ak_history_wrap_entry(session->history[i], session->history_from_agent[i], lines, &line_count);
     }
     if (line_count == 0U) {
         return;
@@ -830,8 +836,8 @@ static void ak_chat_history_draw(const ak_session_ui_t *session)
                 y = (uint16_t)(y + LCD_HISTORY_PARAGRAPH_GAP);
             }
         }
-        ak_gfx_text_thin(LCD_CHAT_X, y, lines[i].text,
-                         AK_COL_WHITE, AK_COL_BLACK, 1);
+        uint16_t bg = lines[i].from_agent ? LCD_AGENT_RESPONSE_BG : AK_COL_BLACK;
+        ak_gfx_text_thin(LCD_CHAT_X, y, lines[i].text, AK_COL_WHITE, bg, 1);
     }
 }
 
@@ -1231,7 +1237,7 @@ static void ak_voice_ui_tick(uint32_t now_ms)
     if (s_asr_result_pending) {
         bool is_error = s_asr_result_is_error;
         if (!is_error) {
-            ak_chat_history_add(&s_sessions[s_selected_session], s_asr_pending_text);
+            ak_chat_history_add(&s_sessions[s_selected_session], s_asr_pending_text, false);
             ak_status_bar_set("ASR input received", AK_COL_GREEN);
         } else if (strcmp(s_asr_pending_text, "asr_empty") == 0) {
             ak_status_bar_set("Warning: no speech", AK_COL_ORANGE);
@@ -1490,19 +1496,27 @@ static void on_rx_line(const char *line)
         send_ack(seq);
         send_system_info_uart();
     } else if (strcmp(type, "display") == 0) {
-        char agent[32] = "";
-        char state[16] = "";
-        char text[128] = "";
+        uint32_t chat_slot = 0U;
+        char     agent[32] = "";
+        char     state[16] = "";
+        char     text[128] = "";
+        if (!ak_json_uint(line, "chat_slot", &chat_slot) || chat_slot < 1U || chat_slot > AK_CHAT_SLOT_COUNT) {
+            PR_WARN("display rejected: chat_slot must be 1..%u", (unsigned)AK_CHAT_SLOT_COUNT);
+            return;
+        }
         ak_json_str(line, "agent_name", agent, sizeof(agent));
         ak_json_str(line, "state", state, sizeof(state));
         ak_json_str(line, "text", text, sizeof(text));
-        PR_NOTICE("display: agent=%s state=%s", agent, state);
+        uint8_t session_index = (uint8_t)(chat_slot - 1U);
+        PR_NOTICE("display: chat=%c agent=%s state=%s", (char)('A' + session_index), agent, state);
 #if AK_ENABLE_DISPLAY
-        ak_session_ui_t *session = &s_sessions[s_selected_session];
+        ak_session_ui_t *session = &s_sessions[session_index];
         snprintf(session->agent, sizeof(session->agent), "%s", agent);
         snprintf(session->state, sizeof(session->state), "%s", state);
-        ak_chat_history_add(session, text);
-        ak_render_status();
+        ak_chat_history_add(session, text, true);
+        if (session_index == s_selected_session) {
+            ak_render_status();
+        }
 #endif
     }
     /* ack / pong / unknown: ignore per protocol */

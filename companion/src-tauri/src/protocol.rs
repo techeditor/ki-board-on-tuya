@@ -56,12 +56,17 @@ pub fn pong_payload() -> Value {
     serde_json::json!({ "v": PROTOCOL_VERSION, "type": "pong" })
 }
 
-/// PC -> board: agent status / text to render on the LCD.
-pub fn display_payload(agent_name: &str, state: &str, text: &str) -> Value {
+/// PC -> board: agent status / text for one Chat A/B/C LCD slot.
+pub fn display_payload(chat_slot: u8, agent_name: &str, state: &str, text: &str) -> Value {
     serde_json::json!({
         "v": PROTOCOL_VERSION,
         "type": "display",
-        "payload": { "agent_name": agent_name, "state": state, "text": text }
+        "payload": {
+            "chat_slot": chat_slot,
+            "agent_name": agent_name,
+            "state": state,
+            "text": text
+        }
     })
 }
 
@@ -498,9 +503,10 @@ mod tests {
     #[test]
     fn pc_to_board_encoders_carry_type_and_version() {
         assert_eq!(pong_payload()["type"], "pong");
-        let display = display_payload("planner", "running", "thinking…");
+        let display = display_payload(2, "planner", "running", "thinking…");
         assert_eq!(display["v"], PROTOCOL_VERSION);
         assert_eq!(display["type"], "display");
+        assert_eq!(display["payload"]["chat_slot"], 2);
         assert_eq!(display["payload"]["agent_name"], "planner");
         assert_eq!(display["payload"]["state"], "running");
         assert_eq!(led_payload("on", "green")["payload"]["color"], "green");

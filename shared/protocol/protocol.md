@@ -135,12 +135,15 @@ Companion 发：
 {"v":1,"type":"led","payload":{"state":"on","color":"green"}}
 ```
 
-### display（Agent 状态 / 文本上屏）
+### display（指定 Chat 的 Agent 状态 / 文本上屏）
 
 ```json
-{"v":1,"type":"display","payload":{"agent_name":"planner","state":"running","text":"..."}}
+{"v":1,"type":"display","payload":{"chat_slot":1,"agent_name":"planner","state":"running","text":"..."}}
 ```
 
+- `chat_slot`：必填，`1` / `2` / `3` 分别对应 Chat A / B / C（物理键 K1 / K2 / K3）。
+- AK 必须把 `agent_name`、`state` 和 `text` 写入 `chat_slot` 指定槽位的独立状态与历史；不得写入当前选中的其他槽位。缺失或超出 `1..3` 的帧必须拒绝。
+- Companion 根据持久化的 Crew session 关联解析目标槽位；未绑定 Chat A/B/C 的 session 只保留在 Companion 列表，不发送到 AK。
 - `state`：`idle` / `running` / `error`
 - 对应 Kiro CLI hook 的 `agentSpawn` / `userPromptSubmit` / `stop` / `postToolUse`
 

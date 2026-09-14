@@ -420,6 +420,107 @@ h2 {
   line-height: 1.5;
 }
 
+.listener-control-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+button.listener-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 104px;
+  border-color: var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+button.listener-switch[aria-checked="true"] {
+  border-color: var(--accent-hover);
+}
+
+.listener-switch-action {
+  min-width: 40px;
+  text-align: left;
+}
+
+.listener-switch-track {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  border: 2px solid var(--border-strong);
+  background: var(--field);
+}
+
+.listener-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  background: var(--subtle);
+}
+
+button.listener-switch[aria-checked="true"] .listener-switch-track {
+  border-color: var(--accent-hover);
+  background: var(--accent);
+}
+
+button.listener-switch[aria-checked="true"] .listener-switch-thumb {
+  left: 18px;
+  background: var(--accent-ink);
+}
+
+.listener-inline-status {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 8px;
+}
+
+.listener-inline-status > span {
+  color: var(--success);
+  font-size: 10px;
+}
+
+.listener-inline-status strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.listener-details {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+.listener-details summary {
+  padding: 8px 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.listener-details summary span {
+  margin-left: 6px;
+  color: var(--subtle);
+  font-weight: 400;
+  text-transform: none;
+}
+
+.listener-details[open] summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.listener-details-body {
+  padding: 2px 10px 10px;
+}
+
 .watched-toolbar {
   display: flex;
   align-items: flex-end;
@@ -498,8 +599,11 @@ button.watched-tab.active {
 }
 
 .watched-session-summary code {
+  min-width: 0;
   color: var(--subtle);
   font-size: 10px;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .watched-state {
