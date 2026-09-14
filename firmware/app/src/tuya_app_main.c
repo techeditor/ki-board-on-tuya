@@ -27,6 +27,7 @@
 #include "ak_session_icons.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
+#include "ak_settings.h"
 #include "ak_statuslcd.h"
 #include "ak_voice_route.h"
 #include "tal_api.h"
@@ -180,6 +181,11 @@ static uint32_t            s_voice_ui_state_since_ms;
 static char                s_asr_pending_text[ASR_TRANSCRIPT_MAX];
 static volatile bool       s_asr_result_pending;
 static volatile bool       s_asr_result_is_error;
+
+static ak_settings_model_t s_settings;
+static bool                s_settings_active;
+static bool                s_settings_confirmed;
+static bool                s_center_long_consumed;
 #endif
 
 /* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
@@ -205,29 +211,44 @@ static void ak_voice_ui_set_state(ak_voice_ui_state_t state);
 static void ak_voice_ui_queue_result(const char *text, bool is_error);
 static void ak_voice_ui_tick(uint32_t now_ms);
 static void ak_select_session_key(const char *id);
+static void ak_render_status(void);
+static void ak_settings_draw(void);
+static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
+                                      ak_input_event_t event, uint32_t held_ms);
 #endif
 
-/* Input event -> key/nav JSONL frame on the active transport. */
-static void on_input_event(ak_input_kind_t kind, const char *id, ak_input_event_t event, uint32_t held_ms)
+static void ak_emit_input_frame(ak_input_kind_t kind, const char *id,
+                                ak_input_event_t event, uint32_t held_ms)
 {
-    char        frame[FRAME_BUFFER_SIZE];
-    const char *action = ak_input_event_str(event);
-    int         length;
+    char frame[FRAME_BUFFER_SIZE];
+    int length;
 
+    s_sequence++;
+    if (kind == AK_INPUT_KIND_KEY) {
+        length = ak_proto_key(frame, sizeof(frame), s_sequence, id,
+                              ak_input_event_str(event), held_ms);
+    } else {
+        length = ak_proto_nav(frame, sizeof(frame), s_sequence, id,
+                              ak_input_event_str(event), held_ms);
+    }
+    transport_write_frame(frame, length);
+    PR_DEBUG("input %s %s held=%ums", id, ak_input_event_str(event), held_ms);
+}
+
+/* Input event -> local settings UI or JSONL frame on the active transport. */
+static void on_input_event(ak_input_kind_t kind, const char *id,
+                           ak_input_event_t event, uint32_t held_ms)
+{
 #if AK_ENABLE_DISPLAY
+    if (ak_settings_consume_input(kind, id, event, held_ms)) {
+        return;
+    }
     if (kind == AK_INPUT_KIND_KEY && event == AK_INPUT_EVENT_DOWN) {
         ak_select_session_key(id);
     }
 #endif
 
-    s_sequence++;
-    if (kind == AK_INPUT_KIND_KEY) {
-        length = ak_proto_key(frame, sizeof(frame), s_sequence, id, action, held_ms);
-    } else {
-        length = ak_proto_nav(frame, sizeof(frame), s_sequence, id, action, held_ms);
-    }
-    transport_write_frame(frame, length);
-    PR_DEBUG("input %s %s held=%ums", id, action, held_ms);
+    ak_emit_input_frame(kind, id, event, held_ms);
 
     /* K4 = push-to-talk. Cloud consumes DOWN/LONG/UP as one latched HOLD
      * interaction; system still uses immediate DOWN/UP Windows dictation. */
@@ -669,6 +690,189 @@ static uint16_t ak_link_header(char *out, uint32_t out_len)
 #endif
 }
 
+#define LCD_SETTINGS_ROW_X 12U
+#define LCD_SETTINGS_ROW_W 296U
+#define LCD_SETTINGS_BAR_W 272U
+
+static void ak_settings_outline(uint16_t x, uint16_t y, uint16_t w,
+                                uint16_t h, uint16_t color)
+{
+    ak_gfx_fill_rect(x, y, w, 1U, color);
+    ak_gfx_fill_rect(x, (uint16_t)(y + h - 1U), w, 1U, color);
+    ak_gfx_fill_rect(x, y, 1U, h, color);
+    ak_gfx_fill_rect((uint16_t)(x + w - 1U), y, 1U, h, color);
+}
+
+static void ak_settings_value_row(uint16_t y, ak_settings_item_t item,
+                                  const char *label, uint8_t value)
+{
+    bool selected = s_settings.selected == item;
+    uint16_t bg = selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
+    uint16_t fg = selected ? AK_COL_WHITE : AK_COL_CYAN;
+    char value_text[12];
+
+    ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, 48U, bg);
+    if (!selected) {
+        ak_settings_outline(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, 48U,
+                            AK_COL_GRAY);
+    }
+    ak_gfx_text_thin(24U, (uint16_t)(y + 8U), label,
+                     selected ? AK_COL_WHITE : AK_COL_GRAY, bg, 1);
+    (void)snprintf(value_text, sizeof(value_text), "< %3u%% >", value);
+    ak_gfx_text_thin(232U, (uint16_t)(y + 8U), value_text, fg, bg, 1);
+    if (selected && s_settings_confirmed) {
+        ak_gfx_text_thin(160U, (uint16_t)(y + 8U), "Applied",
+                         AK_COL_WHITE, bg, 1);
+    }
+
+    ak_gfx_fill_rect(24U, (uint16_t)(y + 31U), LCD_SETTINGS_BAR_W, 6U,
+                     selected ? AK_COL_BLACK : AK_COL_GRAY);
+    ak_gfx_fill_rect(24U, (uint16_t)(y + 31U),
+                     (uint16_t)((uint32_t)LCD_SETTINGS_BAR_W * value / 100U),
+                     6U, selected ? AK_COL_WHITE : LCD_SESSION_SELECTED_BG);
+}
+
+static void ak_settings_draw(void)
+{
+    if (!ak_statuslcd_ready()) {
+        return;
+    }
+
+    ak_gfx_clear(AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, LCD_SESSION_SELECTED_BG);
+    ak_gfx_text(6U, 7U, "Settings", AK_COL_BLACK,
+                LCD_SESSION_SELECTED_BG, 1);
+    ak_gfx_text_thin(16U, 27U, "Device Settings", AK_COL_GRAY,
+                     AK_COL_BLACK, 1);
+
+    ak_settings_value_row(42U, AK_SETTINGS_ITEM_VOLUME, "Volume",
+                          s_settings.volume);
+    ak_settings_value_row(98U, AK_SETTINGS_ITEM_BRIGHTNESS, "Brightness",
+                          s_settings.brightness);
+
+    bool exit_selected = s_settings.selected == AK_SETTINGS_ITEM_EXIT;
+    uint16_t exit_bg = exit_selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
+    ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, 158U, LCD_SETTINGS_ROW_W, 38U,
+                     exit_bg);
+    if (!exit_selected) {
+        ak_settings_outline(LCD_SETTINGS_ROW_X, 158U, LCD_SETTINGS_ROW_W, 38U,
+                            AK_COL_GRAY);
+    }
+    ak_gfx_text_thin(136U, 173U, "Exit",
+                     exit_selected ? AK_COL_WHITE : AK_COL_GRAY, exit_bg, 1);
+
+    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 33U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U,
+                     LCD_SESSION_SELECTED_BG);
+    ak_gfx_text_thin(4U, 213U, "Up/Down Select  Left/Right Adjust",
+                     AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, 227U, "Center Confirm", AK_COL_GRAY,
+                     AK_COL_BLACK, 1);
+    ak_statuslcd_flush();
+}
+
+static OPERATE_RET ak_settings_apply_selected(void)
+{
+    if (s_settings.selected == AK_SETTINGS_ITEM_VOLUME) {
+        return ak_asr_set_volume(s_settings.volume);
+    }
+    if (s_settings.selected == AK_SETTINGS_ITEM_BRIGHTNESS) {
+        return ak_statuslcd_set_brightness(s_settings.brightness);
+    }
+    return OPRT_OK;
+}
+
+/* The center DOWN edge is delayed: a short release is replayed to the companion,
+ * while a LONG opens settings without leaking a false center click to the PC. */
+static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
+                                      ak_input_event_t event, uint32_t held_ms)
+{
+    if (!s_settings_active) {
+        if (kind != AK_INPUT_KIND_NAV || strcmp(id, "center") != 0) {
+            return false;
+        }
+        if (event == AK_INPUT_EVENT_DOWN) {
+            s_center_long_consumed = false;
+            return true;
+        }
+        if (event == AK_INPUT_EVENT_LONG) {
+            s_center_long_consumed = true;
+            s_settings_active = true;
+            s_settings_confirmed = false;
+            ak_settings_draw();
+            return true;
+        }
+        if (event == AK_INPUT_EVENT_UP) {
+            if (s_center_long_consumed) {
+                s_center_long_consumed = false;
+                return true;
+            }
+            ak_emit_input_frame(AK_INPUT_KIND_NAV, "center",
+                                AK_INPUT_EVENT_DOWN, 0U);
+            return false;
+        }
+        return true;
+    }
+
+    /* Settings is modal: prevent K1-K5/PTT and nav events from reaching the
+     * companion or changing the hidden work screen. */
+    if (kind != AK_INPUT_KIND_NAV) {
+        return true;
+    }
+    if (strcmp(id, "center") == 0) {
+        if (event == AK_INPUT_EVENT_DOWN) {
+            s_center_long_consumed = false;
+        } else if (event == AK_INPUT_EVENT_LONG) {
+            s_center_long_consumed = true;
+        } else if (event == AK_INPUT_EVENT_UP) {
+            if (s_center_long_consumed) {
+                s_center_long_consumed = false;
+                return true;
+            }
+            ak_settings_result_t result =
+                ak_settings_handle(&s_settings, AK_SETTINGS_ACTION_CONFIRM);
+            if (result == AK_SETTINGS_RESULT_EXIT) {
+                s_settings_active = false;
+                s_settings_confirmed = false;
+                ak_render_status();
+                return true;
+            }
+            s_settings_confirmed = ak_settings_apply_selected() == OPRT_OK;
+            ak_settings_draw();
+        }
+        return true;
+    }
+    if (event != AK_INPUT_EVENT_DOWN) {
+        return true;
+    }
+
+    ak_settings_action_t action;
+    if (strcmp(id, "up") == 0) {
+        action = AK_SETTINGS_ACTION_UP;
+    } else if (strcmp(id, "down") == 0) {
+        action = AK_SETTINGS_ACTION_DOWN;
+    } else if (strcmp(id, "left") == 0) {
+        action = AK_SETTINGS_ACTION_LEFT;
+    } else if (strcmp(id, "right") == 0) {
+        action = AK_SETTINGS_ACTION_RIGHT;
+    } else {
+        return true;
+    }
+
+    ak_settings_result_t result = ak_settings_handle(&s_settings, action);
+    s_settings_confirmed = false;
+    if (result == AK_SETTINGS_RESULT_CHANGED) {
+        OPERATE_RET rt = ak_settings_apply_selected();
+        if (rt != OPRT_OK) {
+            PR_WARN("settings apply failed: item=%d rt=%d",
+                    (int)s_settings.selected, rt);
+        }
+    }
+    ak_settings_draw();
+    (void)held_ms;
+    return true;
+}
+
 static void ak_draw_session_sidebar(void)
 {
     static const char labels[LCD_SESSION_ROWS] = {'A', 'B', 'C'};
@@ -698,6 +902,10 @@ static void ak_draw_session_sidebar(void)
 static void ak_render_status(void)
 {
     if (!ak_statuslcd_ready()) {
+        return;
+    }
+    if (s_settings_active) {
+        ak_settings_draw();
         return;
     }
     const ak_session_ui_t *session = &s_sessions[s_selected_session];
@@ -1005,6 +1213,10 @@ static void user_main(void)
     }
     ak_dclick_init(&s_ptt_dclick);
     ak_voice_route_init(&s_voice_route);
+#if AK_ENABLE_DISPLAY
+    ak_settings_init(&s_settings);
+    s_settings.volume = ak_asr_get_volume();
+#endif
 
 #if AK_ENABLE_DISPLAY
     /* Status LCD FIRST — before any AI / Wi-Fi bring-up. The board-side cloud
@@ -1072,6 +1284,9 @@ static void user_main(void)
         OPERATE_RET asr_rt = ak_asr_init(on_asr_text, on_asr_error);
         (void)asr_rt;
 #if AK_ENABLE_DISPLAY
+        if (asr_rt == OPRT_OK) {
+            s_settings.volume = ak_asr_get_volume();
+        }
         ak_status_bar_set(asr_rt == OPRT_OK ? "ASR initialized"
                                             : "Warning: ASR init failed",
                           asr_rt == OPRT_OK ? AK_COL_GREEN : AK_COL_RED);

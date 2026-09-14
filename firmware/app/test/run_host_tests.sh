@@ -12,6 +12,7 @@ gcc -std=c11 -Wall -Wextra -Werror \
     -I "${app}/common/include" \
     "${app}/common/src/ak_input_fsm.c" \
     "${app}/common/src/ak_voice_route.c" \
+    "${app}/common/src/ak_settings.c" \
     "${app}/common/src/ak_protocol.c" \
     "${app}/common/src/ak_rx.c" \
     "${here}/test_ak.c" \

@@ -37,6 +37,9 @@ OPERATE_RET ak_statuslcd_init(void);
 /** @brief Whether the panel opened successfully and drawing is usable. */
 bool ak_statuslcd_ready(void);
 
+/** @brief Set the PWM backlight brightness, clamped to 0..100 percent. */
+OPERATE_RET ak_statuslcd_set_brightness(uint8_t brightness);
+
 /** @brief Push the bound frame buffer to the panel. */
 void ak_statuslcd_flush(void);
 

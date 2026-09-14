@@ -51,8 +51,9 @@
 #define AK_LCD_SPI_MOSI_PIN TUYA_GPIO_NUM_16
 #define AK_LCD_DC_PIN       TUYA_GPIO_NUM_17
 #define AK_LCD_RST_PIN      TUYA_GPIO_NUM_6
-/* v1.2: backlight moved P5 -> P8 (J2.16, PWM2). Plain GPIO switch for now. */
+/* v1.2: P8/J2.16 is PWM2 and drives the high-active LCD backlight. */
 #define AK_LCD_BACKLIGHT_PIN TUYA_GPIO_NUM_8
+#define AK_LCD_BACKLIGHT_PWM TUYA_PWM_NUM_2
 /*
  * P7 is defined as an LCD power enable, but on the v1.0 schematic LCD VCC is
  * wired directly to 3.3V and P7 forms no actual switch (v1.2 change-scope open

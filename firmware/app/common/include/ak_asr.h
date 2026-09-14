@@ -27,6 +27,8 @@
 
 #include "tuya_cloud_types.h"
 
+#define AK_ASR_DEFAULT_VOLUME 70U
+
 /** Called with a NUL-terminated recognized-text string when cloud ASR yields
  *  a result. The callback runs on the ASR/event thread; keep it short. */
 typedef void (*ak_asr_text_cb)(const char *text);
@@ -44,6 +46,11 @@ OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error);
 /** True only when a real cloud ASR backend is compiled in AND ready (authorized
  *  + networked). The stub always returns false. */
 bool ak_asr_available(void);
+
+/** Set/get board audio output volume as a percentage (0..100). The stub keeps
+ *  the value so the settings UI behaves consistently without cloud ASR. */
+OPERATE_RET ak_asr_set_volume(uint8_t volume);
+uint8_t ak_asr_get_volume(void);
 
 /** Push-to-talk edges. In the stub these are no-ops. With the real backend,
  *  `start` begins a HOLD-mode capture and `stop` ends it; the recognized text

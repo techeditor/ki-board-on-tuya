@@ -10,6 +10,8 @@
 #include "ak_features.h"
 #include "tal_api.h"
 
+static uint8_t s_volume = AK_ASR_DEFAULT_VOLUME;
+
 #if AK_ASR_BOARD_CLOUD
 
 /* ── Real backend (Tuya cloud ASR) ──────────────────────────────────────────
@@ -107,7 +109,7 @@ OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error)
 
     AI_CHAT_MODE_CFG_T cfg = {
         .default_mode = AI_CHAT_MODE_HOLD, /* MANUAL VAD; capture driven by us */
-        .default_vol  = 70,
+        .default_vol  = AK_ASR_DEFAULT_VOLUME,
         .evt_cb       = __ai_event_cb,
     };
     OPERATE_RET rt = ai_chat_init(&cfg);
@@ -224,3 +226,27 @@ void ak_asr_play_availability_prompt(bool cloud_available)
 }
 
 #endif /* AK_ASR_BOARD_CLOUD */
+
+OPERATE_RET ak_asr_set_volume(uint8_t volume)
+{
+    s_volume = volume > 100U ? 100U : volume;
+#if AK_ASR_BOARD_CLOUD
+    if (s_ai_ready) {
+        return ai_chat_set_volume(s_volume);
+    }
+#endif
+    return OPRT_OK;
+}
+
+uint8_t ak_asr_get_volume(void)
+{
+#if AK_ASR_BOARD_CLOUD
+    if (s_ai_ready) {
+        int volume = ai_chat_get_volume();
+        if (volume >= 0 && volume <= 100) {
+            s_volume = (uint8_t)volume;
+        }
+    }
+#endif
+    return s_volume;
+}

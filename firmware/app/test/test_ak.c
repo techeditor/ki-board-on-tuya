@@ -12,6 +12,7 @@
 #include "ak_input_fsm.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
+#include "ak_settings.h"
 #include "ak_voice_route.h"
 
 static int g_failures = 0;
@@ -287,6 +288,46 @@ static void test_dclick(void)
     CHECK(!dclick_short_press(&dc, &t, 50), "short press after long: only re-arms");
 }
 
+static void test_settings(void)
+{
+    printf("test_settings\n");
+    ak_settings_model_t settings;
+
+    ak_settings_init(&settings);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_VOLUME, "settings starts on volume");
+    CHECK(settings.volume == 70U, "default volume is 70 percent");
+    CHECK(settings.brightness == 100U, "default brightness is 100 percent");
+
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_LEFT) ==
+              AK_SETTINGS_RESULT_CHANGED && settings.volume == 60U,
+          "left lowers volume by ten");
+    for (unsigned i = 0; i < 8U; i++) {
+        ak_settings_handle(&settings, AK_SETTINGS_ACTION_LEFT);
+    }
+    CHECK(settings.volume == 0U, "volume clamps at zero");
+
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_BRIGHTNESS, "down selects brightness");
+    for (unsigned i = 0; i < 12U; i++) {
+        ak_settings_handle(&settings, AK_SETTINGS_ACTION_LEFT);
+    }
+    CHECK(settings.brightness == AK_SETTINGS_BRIGHTNESS_MIN,
+          "brightness keeps a visible ten-percent minimum");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
+              AK_SETTINGS_RESULT_CONFIRMED,
+          "center confirms a value");
+
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_EXIT, "down selects exit");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
+              AK_SETTINGS_RESULT_EXIT,
+          "center confirms exit");
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_VOLUME, "selection wraps downward");
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_UP);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_EXIT, "selection wraps upward");
+}
+
 static void test_voice_route(void)
 {
     printf("test_voice_route\n");
@@ -327,6 +368,7 @@ int main(void)
     test_long_press();
     test_debounce_bounce();
     test_dclick();
+    test_settings();
     test_voice_route();
     test_protocol();
     test_rx();
