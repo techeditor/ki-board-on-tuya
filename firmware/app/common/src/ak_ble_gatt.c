@@ -6,7 +6,7 @@
  * ble_gatt_link probe (firmware/feature-probes/ble_gatt_link):
  *
  *   - advertise local name "Agentic Keyboard-XXXXXX" + service UUID,
- *   - use Tuya's built-in BLE common service (chars 0x2B10 notify / 0x2B11 write),
+ *   - use Tuya's built-in BLE common service selected by TAL,
  *   - NOTIFY JSONL frames via tal_ble_server_common_send() only while subscribed,
  *   - receive companion writes in TAL_BLE_EVT_WRITE_REQ -> write_report.report
  *     and push them into an internal RX ring the app drains via ak_ble_gatt_read.
@@ -32,9 +32,12 @@
 #define BLE_NAME_PREFIX          "Agentic Keyboard-"
 #define BLE_NAME_SUFFIX_HEX_LEN  6U
 #define BLE_NAME_MAX_LEN         ((sizeof(BLE_NAME_PREFIX) - 1U) + BLE_NAME_SUFFIX_HEX_LEN)
-#define SERVER_MTU               247U
-#define ADV_MAINTAIN_INTERVAL_MS 1000U
-#define INVALID_BLE_HANDLE       0xFFFFU
+#define SERVER_MTU                 247U
+#define ATT_DEFAULT_MTU             23U
+#define ATT_NOTIFICATION_OVERHEAD   3U
+#define ATT_DEFAULT_PAYLOAD         (ATT_DEFAULT_MTU - ATT_NOTIFICATION_OVERHEAD)
+#define ADV_MAINTAIN_INTERVAL_MS   1000U
+#define INVALID_BLE_HANDLE         0xFFFFU
 
 /* RX ring buffer: companion writes (0x2B11) land here for ak_ble_gatt_read.
  * Power of two so the mask wraps cheaply. 512 comfortably holds several MTU
@@ -51,14 +54,17 @@ static volatile bool       s_subscribed;
 static bool                s_tkl_takeover;
 static volatile uint16_t   s_conn_handle;
 static volatile uint16_t   s_notify_handle;
+static volatile uint16_t   s_notify_payload_max;
 static uint32_t            s_last_adv_maintain_ms;
 static volatile bool       s_greet_pending; /* set on subscribe, cleared by take_greet */
 static TAL_BLE_PEER_INFO_T s_peer;
 
-/* Advertising: flags + complete list of 16-bit service UUIDs (0x1910). */
+/* Advertising: flags + complete list of the 16-bit TAL command service. */
 static uint8_t s_adv_data[] = {
-    0x02, 0x01, 0x06,       /* flags: LE General Discoverable, BR/EDR not supported */
-    0x03, 0x03, 0x10, 0x19, /* complete list of 16-bit service UUIDs: 0x1910 */
+    0x02, 0x01, 0x06, /* flags: LE General Discoverable, BR/EDR not supported */
+    0x03, 0x03,
+    (uint8_t)(AK_BLE_GATT_SERVICE_UUID & 0xFFU),
+    (uint8_t)(AK_BLE_GATT_SERVICE_UUID >> 8),
 };
 
 /* Scan response is generated at runtime as Agentic Keyboard-XXXXXX,
@@ -83,6 +89,15 @@ static void rx_ring_push(const uint8_t *data, uint32_t n)
 }
 
 /* ------------------------------------------------------------ advertising */
+
+static void update_notify_payload(uint16_t peer_mtu)
+{
+    uint16_t effective_mtu = peer_mtu < SERVER_MTU ? peer_mtu : SERVER_MTU;
+    if (effective_mtu < ATT_DEFAULT_MTU) {
+        effective_mtu = ATT_DEFAULT_MTU;
+    }
+    s_notify_payload_max = (uint16_t)(effective_mtu - ATT_NOTIFICATION_OVERHEAD);
+}
 
 static bool device_address_valid(const uint8_t address[6])
 {
@@ -180,7 +195,10 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
         break;
 
     case TAL_BLE_EVT_MTU_REQUEST:
-        tal_ble_server_exchange_mtu_reply(s_peer, SERVER_MTU);
+        update_notify_payload(event->ble_event.exchange_mtu.mtu);
+        (void)tal_ble_server_exchange_mtu_reply(s_peer, SERVER_MTU);
+        PR_NOTICE("BLE MTU=%u, notify payload=%u", (unsigned)event->ble_event.exchange_mtu.mtu,
+                  (unsigned)s_notify_payload_max);
         break;
 
     case TAL_BLE_EVT_SUBSCRIBE:
@@ -266,7 +284,10 @@ static void tkl_gatt_event_cb(TKL_BLE_GATT_PARAMS_EVT_T *event)
 
     switch (event->type) {
     case TKL_BLE_GATT_EVT_MTU_REQUEST:
+        update_notify_payload(event->gatt_event.exchange_mtu);
         (void)tkl_ble_gatts_exchange_mtu_reply(event->conn_handle, SERVER_MTU);
+        PR_NOTICE("BLE MTU=%u, notify payload=%u", (unsigned)event->gatt_event.exchange_mtu,
+                  (unsigned)s_notify_payload_max);
         break;
 
     case TKL_BLE_GATT_EVT_SUBSCRIBE:
@@ -307,6 +328,7 @@ static void reset_link_state(void)
     s_subscribed           = false;
     s_conn_handle          = INVALID_BLE_HANDLE;
     s_notify_handle        = INVALID_BLE_HANDLE;
+    s_notify_payload_max   = ATT_DEFAULT_PAYLOAD;
     s_last_adv_maintain_ms = 0;
     s_greet_pending        = false;
 }
@@ -377,23 +399,36 @@ int ak_ble_gatt_write(const void *data, uint32_t length)
         return 0;
     }
 
-    OPERATE_RET rt;
-    if (s_tkl_takeover) {
-        if (s_conn_handle == INVALID_BLE_HANDLE || s_notify_handle == INVALID_BLE_HANDLE) {
-            return 0;
+    const uint8_t *bytes = (const uint8_t *)data;
+    uint32_t sent = 0U;
+    while (sent < length) {
+        uint16_t payload_max = s_notify_payload_max;
+        if (payload_max < ATT_DEFAULT_PAYLOAD) {
+            payload_max = ATT_DEFAULT_PAYLOAD;
         }
-        rt = tkl_ble_gatts_value_notify(s_conn_handle, s_notify_handle,
-                                        (uint8_t *)data, (uint16_t)length);
-    } else {
-        TAL_BLE_DATA_T d = {.len = (uint16_t)length, .p_data = (uint8_t *)data};
-        rt = tal_ble_server_common_send(&d);
+        uint32_t remaining = length - sent;
+        uint16_t chunk = (uint16_t)(remaining < payload_max ? remaining : payload_max);
+
+        OPERATE_RET rt;
+        if (s_tkl_takeover) {
+            if (s_conn_handle == INVALID_BLE_HANDLE || s_notify_handle == INVALID_BLE_HANDLE) {
+                return (int)sent;
+            }
+            rt = tkl_ble_gatts_value_notify(s_conn_handle, s_notify_handle,
+                                            (uint8_t *)&bytes[sent], chunk);
+        } else {
+            TAL_BLE_DATA_T d = {.len = chunk, .p_data = (uint8_t *)&bytes[sent]};
+            rt = tal_ble_server_common_send(&d);
+        }
+        if (rt != OPRT_OK) {
+            PR_WARN("BLE notify failed: %d after %u/%u bytes (conn=0x%04X char=0x%04X)",
+                    rt, (unsigned)sent, (unsigned)length,
+                    (unsigned)s_conn_handle, (unsigned)s_notify_handle);
+            return (int)sent;
+        }
+        sent += chunk;
     }
-    if (rt == OPRT_OK) {
-        return (int)length;
-    }
-    PR_WARN("BLE notify failed: %d (conn=0x%04X char=0x%04X)", rt,
-            (unsigned)s_conn_handle, (unsigned)s_notify_handle);
-    return 0;
+    return (int)sent;
 }
 
 bool ak_ble_gatt_take_greet(void)

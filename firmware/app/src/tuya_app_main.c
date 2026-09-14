@@ -119,11 +119,15 @@ static bool ak_transport_rx_is_usb(void)
 #define AK_TRANSPORT_GREET_ON_SUBSCRIBE 0
 #endif
 
-#define APP_TASK_STACK_SIZE    (5U * 1024U)
-#define POLL_INTERVAL_MS       5U
-#define HEARTBEAT_INTERVAL_MS  2000U
-#define USB_LINK_TIMEOUT_MS    7000U
-#define FRAME_BUFFER_SIZE      192U
+#define APP_TASK_STACK_SIZE       (5U * 1024U)
+#define POLL_INTERVAL_MS          5U
+#define HEARTBEAT_INTERVAL_MS     2000U
+#define USB_LINK_TIMEOUT_MS       7000U
+#define FRAME_BUFFER_SIZE         192U
+#define ASR_FRAME_BUFFER_SIZE     2048U
+#define CORE_INIT_ATTEMPTS        3U
+#define CORE_INIT_RETRY_MS        250U
+#define FATAL_RESTART_DELAY_MS    2000U
 #ifndef PROJECT_VERSION
 #define PROJECT_VERSION "0.0.0-dev"
 #endif
@@ -133,6 +137,9 @@ static THREAD_HANDLE  s_app_thread = NULL;
 static MUTEX_HANDLE   s_tx_mutex   = NULL;
 static uint32_t       s_sequence   = 0;
 static ak_rx_reader_t s_rx;
+/* ASR can contain 255 bytes and JSON control escapes can expand each byte to
+ * six characters. Keep the large frame in BSS instead of callback stacks. */
+static char s_asr_tx_frame[ASR_FRAME_BUFFER_SIZE];
 /* UART/USB: hello marks the companion live; every later UART frame (including
  * heartbeat pong) refreshes liveness. A graceful bye or heartbeat timeout
  * clears the link, so an unplug/crash cannot leave the USB icon stuck on. */
@@ -196,9 +203,15 @@ static bool                s_center_long_consumed;
 /* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
 #define AK_PTT_KEY_ID "k4"
 
-static void transport_write_frame_unlocked(const char *frame, int length)
+static void transport_write_frame_unlocked(const char *frame, size_t capacity, int length)
 {
-    if (length <= 0 || length >= (int)FRAME_BUFFER_SIZE) {
+    if (frame == NULL || capacity == 0U || length <= 0) {
+        PR_WARN("transport frame rejected: invalid buffer/length");
+        return;
+    }
+    if ((size_t)length >= capacity) {
+        PR_WARN("transport frame too large: required=%d capacity=%u", length,
+                (unsigned)capacity);
         return;
     }
     int written = ak_transport_write(frame, (uint32_t)length);
@@ -223,14 +236,17 @@ static void transport_unlock(void)
     }
 }
 
-static void transport_write_frame(const char *frame, int length)
+static void transport_write_frame_sized(const char *frame, size_t capacity, int length)
 {
     if (!transport_lock()) {
         return;
     }
-    transport_write_frame_unlocked(frame, length);
+    transport_write_frame_unlocked(frame, capacity, length);
     transport_unlock();
 }
+
+#define transport_write_frame(frame, length) \
+    transport_write_frame_sized((frame), sizeof(frame), (length))
 
 /* Sequence allocation and the matching write share one critical section, so
  * callback threads cannot race the app loop or transmit sequence N+1 first. */
@@ -243,10 +259,50 @@ static bool transport_begin_sequenced(uint32_t *sequence)
     return true;
 }
 
-static void transport_end_sequenced(const char *frame, int length)
+static void transport_end_sequenced_sized(const char *frame, size_t capacity, int length)
 {
-    transport_write_frame_unlocked(frame, length);
+    transport_write_frame_unlocked(frame, capacity, length);
     transport_unlock();
+}
+
+#define transport_end_sequenced(frame, length) \
+    transport_end_sequenced_sized((frame), sizeof(frame), (length))
+
+typedef OPERATE_RET (*ak_core_init_fn_t)(void);
+
+static OPERATE_RET core_init_with_retry(const char *name, ak_core_init_fn_t init_fn)
+{
+    OPERATE_RET rt = OPRT_INVALID_PARM;
+    for (uint32_t attempt = 1U; attempt <= CORE_INIT_ATTEMPTS; attempt++) {
+        rt = init_fn();
+        if (rt == OPRT_OK) {
+            return OPRT_OK;
+        }
+        PR_ERR("%s init failed: %d (attempt %u/%u)", name, rt,
+               (unsigned)attempt, (unsigned)CORE_INIT_ATTEMPTS);
+        if (attempt < CORE_INIT_ATTEMPTS) {
+            tal_system_sleep(CORE_INIT_RETRY_MS);
+        }
+    }
+    return rt;
+}
+
+static OPERATE_RET tx_mutex_init(void)
+{
+    return tal_mutex_create_init(&s_tx_mutex);
+}
+
+static void restart_after_fatal_init(const char *component, OPERATE_RET rt)
+{
+    PR_ERR("fatal %s initialization failure: %d; restarting in %ums", component, rt,
+           (unsigned)FATAL_RESTART_DELAY_MS);
+    tal_system_sleep(FATAL_RESTART_DELAY_MS);
+    tal_system_reset();
+    /* A platform reset should not return. Do not let the app task silently die
+     * if a port returns unexpectedly. */
+    while (1) {
+        tal_system_sleep(1000U);
+    }
 }
 
 /* Forward declarations: PTT / voice helpers are defined below but referenced by
@@ -353,7 +409,6 @@ static void send_voice_source(void)
  * frame. Registered with ak_asr_init; a no-op path when the stub is compiled. */
 static void on_asr_text(const char *text)
 {
-    char frame[FRAME_BUFFER_SIZE];
     if (text == NULL || text[0] == '\0') {
         return;
     }
@@ -364,7 +419,9 @@ static void on_asr_text(const char *text)
     if (!transport_begin_sequenced(&sequence)) {
         return;
     }
-    transport_end_sequenced(frame, ak_proto_asr(frame, sizeof(frame), sequence, text));
+    transport_end_sequenced(
+        s_asr_tx_frame,
+        ak_proto_asr(s_asr_tx_frame, sizeof(s_asr_tx_frame), sequence, text));
 }
 
 /* Cloud-ASR failure callback: forward "asr_error" / "asr_empty" to the PC as an
@@ -1268,25 +1325,23 @@ static void user_main(void)
     PR_NOTICE("Transport: %s (UART%u RX=P%u TX=P%u @%u 8N1)", AK_TRANSPORT_NAME, (unsigned)AK_UART_PORT,
               (unsigned)AK_UART_RX_PIN, (unsigned)AK_UART_TX_PIN, (unsigned)AK_UART_BAUDRATE);
 #else
-    PR_NOTICE("Transport: %s (BLE GATT peripheral, service 0x1910)", AK_TRANSPORT_NAME);
+    PR_NOTICE("Transport: %s (BLE GATT peripheral, service 0x%04X)",
+              AK_TRANSPORT_NAME, (unsigned)AK_BLE_GATT_SERVICE_UUID);
 #endif
     PR_NOTICE("Inputs: 5 keys + 5-way nav, debounce=%ums long=%ums", (unsigned)AK_FSM_DEBOUNCE_MS,
               (unsigned)AK_FSM_LONG_PRESS_MS);
 
-    rt = ak_transport_init();
+    rt = core_init_with_retry("transport", ak_transport_init);
     if (rt != OPRT_OK) {
-        PR_ERR("transport init failed: %d", rt);
-        return;
+        restart_after_fatal_init("transport", rt);
     }
-    rt = ak_input_init();
+    rt = core_init_with_retry("input", ak_input_init);
     if (rt != OPRT_OK) {
-        PR_ERR("input init failed: %d", rt);
-        return;
+        restart_after_fatal_init("input", rt);
     }
-    rt = tal_mutex_create_init(&s_tx_mutex);
+    rt = core_init_with_retry("transport TX mutex", tx_mutex_init);
     if (rt != OPRT_OK) {
-        PR_ERR("transport TX mutex init failed: %d", rt);
-        return;
+        restart_after_fatal_init("transport TX mutex", rt);
     }
     ak_dclick_init(&s_ptt_dclick);
     ak_voice_route_init(&s_voice_route);
@@ -1513,5 +1568,19 @@ void tuya_app_main(void)
         .thrdname   = "ak_app",
     };
 
-    tal_thread_create_and_start(&s_app_thread, NULL, NULL, app_thread, NULL, &thread_cfg);
+    OPERATE_RET rt = OPRT_COM_ERROR;
+    for (uint32_t attempt = 1U; attempt <= CORE_INIT_ATTEMPTS; attempt++) {
+        s_app_thread = NULL;
+        rt = tal_thread_create_and_start(&s_app_thread, NULL, NULL,
+                                         app_thread, NULL, &thread_cfg);
+        if (rt == OPRT_OK) {
+            return;
+        }
+        PR_ERR("app thread create failed: %d (attempt %u/%u)", rt,
+               (unsigned)attempt, (unsigned)CORE_INIT_ATTEMPTS);
+        if (attempt < CORE_INIT_ATTEMPTS) {
+            tal_system_sleep(CORE_INIT_RETRY_MS);
+        }
+    }
+    restart_after_fatal_init("app thread", rt);
 }

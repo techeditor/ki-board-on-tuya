@@ -175,6 +175,17 @@ static void test_protocol(void)
         CHECK(small[sizeof(small) - 1U] == '\0', "truncated frame remains null terminated");
     }
 
+    {
+        char worst_text[256];
+        char large_frame[2048];
+        memset(worst_text, 0x01, sizeof(worst_text) - 1U);
+        worst_text[sizeof(worst_text) - 1U] = '\0';
+        int required = ak_proto_asr(large_frame, sizeof(large_frame), 19, worst_text);
+        CHECK(required > 191, "worst-case escaped ASR exceeds legacy frame size");
+        CHECK(required < (int)sizeof(large_frame), "2 KiB ASR frame holds worst-case 255-byte text");
+        CHECK(large_frame[required - 1] == '\n', "large ASR frame remains complete JSONL");
+    }
+
     ak_proto_voice_source(buf, sizeof(buf), 12, "cloud");
     CHECK_STR(buf,
               "{\"v\":1,\"seq\":12,\"type\":\"voice_source\",\"payload\":{\"source\":\"cloud\"}}\n",
