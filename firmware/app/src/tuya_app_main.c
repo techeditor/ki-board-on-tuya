@@ -137,8 +137,9 @@ static uint32_t s_usb_last_rx_ms;
 #if AK_ENABLE_DISPLAY
 /* netmgr callbacks can run outside the app loop. Cache WiFi state there and
  * let the app loop perform the frame-buffer redraw. */
-static volatile bool s_wifi_connected    = false;
-static volatile bool s_wifi_status_dirty = false;
+static volatile bool            s_wifi_connected    = false;
+static volatile bool            s_wifi_status_dirty = false;
+static volatile ak_wifi_state_t s_wifi_lcd_state    = AK_WIFI_DISCONNECTED;
 #endif
 
 /* Which ASR path a K4 (PTT) press uses. "system" = board only emits
@@ -312,6 +313,8 @@ static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
     char frame[FRAME_BUFFER_SIZE];
 #if AK_ENABLE_DISPLAY
     s_wifi_connected = (state == AK_WIFI_CONNECTED);
+    s_wifi_lcd_state = state;
+    /* Publish dirty last so the app loop reads a complete state update. */
     s_wifi_status_dirty = true;
 #endif
     s_sequence++;
@@ -409,15 +412,18 @@ static uint16_t ak_status_color(const char *state)
     return AK_COL_DKBLUE;
 }
 
-#define LCD_SIDEBAR_W          64U
-#define LCD_SESSION_ROWS       3U
-#define LCD_SESSION_ROW_H      73U
-#define LCD_CHAT_X             (LCD_SIDEBAR_W + 6U)
-#define LCD_CHAT_TEXT_COLS     29U
-#define LCD_HISTORY_Y          62U
-#define LCD_HISTORY_ROW_H      17U
-#define LCD_HISTORY_CAPACITY   10U
-#define LCD_HISTORY_TEXT_BYTES 128U
+#define LCD_SIDEBAR_W           64U
+#define LCD_SESSION_ROWS        3U
+#define LCD_SESSION_ROW_H       67U
+#define LCD_CHAT_X              (LCD_SIDEBAR_W + 6U)
+#define LCD_CHAT_TEXT_COLS      29U
+#define LCD_HISTORY_Y           62U
+#define LCD_HISTORY_ROW_H       16U
+#define LCD_HISTORY_CAPACITY    10U
+#define LCD_HISTORY_TEXT_BYTES  128U
+#define LCD_STATUS_BAR_H        16U
+#define LCD_STATUS_BAR_Y        (AK_STATUSLCD_H - LCD_STATUS_BAR_H)
+#define LCD_STATUS_TEXT_BYTES   40U
 #define LCD_SESSION_SELECTED_BG AK_RGB565(0x8EU, 0x48U, 0xFFU)
 
 typedef struct {
@@ -432,7 +438,45 @@ static ak_session_ui_t s_sessions[LCD_SESSION_ROWS] = {
     {.agent = "-", .state = "idle"},
     {.agent = "-", .state = "idle"},
 };
-static uint8_t s_selected_session;
+static uint8_t  s_selected_session;
+static char     s_status_bar_text[LCD_STATUS_TEXT_BYTES] = "Starting system...";
+static uint16_t s_status_bar_color = AK_COL_CYAN;
+
+static void ak_status_bar_set(const char *text, uint16_t color)
+{
+    (void)snprintf(s_status_bar_text, sizeof(s_status_bar_text), "%s",
+                   text == NULL ? "" : text);
+    s_status_bar_color = color;
+}
+
+static void ak_status_bar_set_wifi(ak_wifi_state_t state)
+{
+    switch (state) {
+    case AK_WIFI_CONNECTING:
+        ak_status_bar_set("WiFi connecting...", AK_COL_CYAN);
+        break;
+    case AK_WIFI_CONNECTED:
+        ak_status_bar_set("WiFi connected", AK_COL_GREEN);
+        break;
+    case AK_WIFI_FAILED:
+        ak_status_bar_set("Warning: WiFi failed", AK_COL_RED);
+        break;
+    case AK_WIFI_DISCONNECTED:
+    default:
+        ak_status_bar_set("Warning: WiFi disconnected", AK_COL_ORANGE);
+        break;
+    }
+}
+
+static void ak_status_bar_draw(void)
+{
+    ak_gfx_fill_rect(0U, LCD_STATUS_BAR_Y, AK_STATUSLCD_W,
+                     LCD_STATUS_BAR_H, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, LCD_STATUS_BAR_Y, AK_STATUSLCD_W,
+                     1U, LCD_SESSION_SELECTED_BG);
+    ak_gfx_text_thin(4U, (uint16_t)(LCD_STATUS_BAR_Y + 4U),
+                     s_status_bar_text, s_status_bar_color, AK_COL_BLACK, 1);
+}
 
 /* Consume one UTF-8 code point. The 8x8 font is ASCII-only, so each non-ASCII
  * code point becomes one '?' rather than one '?' per UTF-8 byte. */
@@ -534,7 +578,7 @@ static void ak_draw_session_sidebar(void)
         bool selected = (i == s_selected_session);
         uint16_t y = (uint16_t)(22U + i * LCD_SESSION_ROW_H);
         uint16_t h = (i + 1U == LCD_SESSION_ROWS)
-                         ? (uint16_t)(AK_STATUSLCD_H - y)
+                         ? (uint16_t)(LCD_STATUS_BAR_Y - y)
                          : LCD_SESSION_ROW_H;
         uint16_t bg = selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
         uint16_t fg = selected ? AK_COL_WHITE : AK_COL_GRAY;
@@ -584,6 +628,7 @@ static void ak_render_status(void)
     ak_gfx_text_thin(LCD_CHAT_X, 43U, line,
                      ak_status_color(session->state), AK_COL_BLACK, 1);
     ak_chat_history_draw(session);
+    ak_status_bar_draw();
     ak_statuslcd_flush();
 }
 
@@ -607,6 +652,10 @@ static void ak_select_session_key(const char *id)
     }
 
     s_selected_session = selected;
+    char feedback[24];
+    (void)snprintf(feedback, sizeof(feedback), "Selected Session %c",
+                   (char)('A' + selected));
+    ak_status_bar_set(feedback, AK_COL_CYAN);
     ak_render_status();
 }
 
@@ -614,6 +663,19 @@ static void ak_voice_ui_set_state(ak_voice_ui_state_t state)
 {
     s_voice_ui_state = state;
     s_voice_ui_state_since_ms = tal_system_get_millisecond();
+    switch (state) {
+    case AK_VOICE_UI_LISTENING:
+        ak_status_bar_set("Listening...", AK_COL_RED);
+        break;
+    case AK_VOICE_UI_RECOGNIZING:
+        ak_status_bar_set("Recognizing...", AK_COL_YELLOW);
+        break;
+    case AK_VOICE_UI_IDLE:
+    default:
+        ak_status_bar_set("Ready", AK_COL_GREEN);
+        break;
+    }
+    ak_render_status();
 }
 
 static void ak_voice_ui_queue_result(const char *text, bool is_error)
@@ -635,8 +697,13 @@ static void ak_voice_ui_tick(uint32_t now_ms)
         bool is_error = s_asr_result_is_error;
         if (!is_error) {
             ak_chat_history_add(&s_sessions[s_selected_session], s_asr_pending_text);
-            redraw = true;
+            ak_status_bar_set("ASR input received", AK_COL_GREEN);
+        } else if (strcmp(s_asr_pending_text, "asr_empty") == 0) {
+            ak_status_bar_set("Warning: no speech", AK_COL_ORANGE);
+        } else {
+            ak_status_bar_set("Warning: ASR failed", AK_COL_RED);
         }
+        redraw = true;
         s_asr_result_pending = false;
         s_voice_ui_state = AK_VOICE_UI_IDLE;
         s_voice_ui_state_since_ms = now_ms;
@@ -646,6 +713,8 @@ static void ak_voice_ui_tick(uint32_t now_ms)
         (uint32_t)(now_ms - s_voice_ui_state_since_ms) >= ASR_RECOGNIZE_TIMEOUT_MS) {
         s_voice_ui_state = AK_VOICE_UI_IDLE;
         s_voice_ui_state_since_ms = now_ms;
+        ak_status_bar_set("Warning: ASR timeout", AK_COL_ORANGE);
+        redraw = true;
     }
 
     if (redraw) {
@@ -799,8 +868,14 @@ static void user_main(void)
     if (rt != OPRT_OK) {
         PR_WARN("status LCD init failed: %d (continuing headless)", rt);
     } else {
+        ak_status_bar_set("LCD ready", AK_COL_GREEN);
         ak_render_status();
     }
+#endif
+
+#if AK_ENABLE_DISPLAY
+    ak_status_bar_set("Starting cloud...", AK_COL_CYAN);
+    ak_render_status();
 #endif
 
     /* Tuya IoT / cloud bring-up (stub unless AK_ASR_BOARD_CLOUD is set). MUST run
@@ -808,6 +883,12 @@ static void user_main(void)
      * context (tuya_iot_init + netmgr), or it dereferences a NULL handle and
      * hard-faults at boot (the black-screen crash). No-op on the v1/BLE profiles. */
     OPERATE_RET cloud_rt = ak_cloud_init();
+#if AK_ENABLE_DISPLAY
+    ak_status_bar_set(cloud_rt == OPRT_OK ? "Cloud initialized"
+                                          : "Warning: cloud init failed",
+                      cloud_rt == OPRT_OK ? AK_COL_GREEN : AK_COL_RED);
+    ak_render_status();
+#endif
 #if AK_TRANSPORT_DUAL
     /* Cloud netmgr has already initialized TAL's common GATT service. Do NOT
      * call tal_ble_bt_init() a second time: T5's one-shot service guard would
@@ -821,6 +902,10 @@ static void user_main(void)
 #endif
     if (ble_rt != OPRT_OK) {
         PR_ERR("dual: delayed AK BLE setup failed: %d (UART remains available)", ble_rt);
+#if AK_ENABLE_DISPLAY
+        ak_status_bar_set("Warning: BLE init failed", AK_COL_ORANGE);
+        ak_render_status();
+#endif
     }
 #endif
     if (cloud_rt != OPRT_OK) {
@@ -831,15 +916,39 @@ static void user_main(void)
         /* Board-side cloud ASR backend (stub unless AK_ASR_BOARD_CLOUD is set).
          * Registers the recognized-text callback that emits `asr` frames. Only
          * reached once the IoT context exists, so ai_chat_init cannot fault. */
-        ak_asr_init(on_asr_text, on_asr_error);
+#if AK_ENABLE_DISPLAY
+        ak_status_bar_set("Starting ASR...", AK_COL_CYAN);
+        ak_render_status();
+#endif
+        OPERATE_RET asr_rt = ak_asr_init(on_asr_text, on_asr_error);
+        (void)asr_rt;
+#if AK_ENABLE_DISPLAY
+        ak_status_bar_set(asr_rt == OPRT_OK ? "ASR initialized"
+                                            : "Warning: ASR init failed",
+                          asr_rt == OPRT_OK ? AK_COL_GREEN : AK_COL_RED);
+        ak_render_status();
+#endif
     }
     PR_NOTICE("Voice source: %s (cloud backend %s)", ak_voice_source_str(s_voice_source),
               ak_asr_available() ? "ready" : "stub/off");
 
     /* Wi-Fi provisioning (netmgr in the cloud profile, stub otherwise). The PC
      * pushes credentials over a `wifi` frame; results return as wifi_status. */
-    ak_wifi_init(on_wifi_status);
+#if AK_ENABLE_DISPLAY
+    ak_status_bar_set("Starting WiFi monitor...", AK_COL_CYAN);
+    ak_render_status();
+#endif
+    OPERATE_RET wifi_rt = ak_wifi_init(on_wifi_status);
+    (void)wifi_rt;
     PR_NOTICE("Wi-Fi provisioning: %s", ak_wifi_available() ? "ready" : "stub/off");
+#if AK_ENABLE_DISPLAY
+    if (wifi_rt != OPRT_OK) {
+        ak_status_bar_set("Warning: WiFi init failed", AK_COL_RED);
+    } else {
+        ak_status_bar_set_wifi(s_wifi_lcd_state);
+    }
+    ak_render_status();
+#endif
 
     /* Start the Tuya IoT task (tuya_iot_start + a dedicated tuya_iot_yield loop)
      * once everything is initialized. No-op on v1/BLE; runs off the input/RX
@@ -873,6 +982,8 @@ static void user_main(void)
         ak_voice_ui_tick(now);
         if (s_wifi_status_dirty) {
             s_wifi_status_dirty = false;
+            ak_wifi_state_t wifi_state = s_wifi_lcd_state;
+            ak_status_bar_set_wifi(wifi_state);
             ak_refresh_link_header();
         }
 #endif
