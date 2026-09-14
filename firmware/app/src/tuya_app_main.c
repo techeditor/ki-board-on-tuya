@@ -417,10 +417,12 @@ static uint16_t ak_status_color(const char *state)
 #define LCD_SESSION_ROW_H       67U
 #define LCD_CHAT_X              (LCD_SIDEBAR_W + 6U)
 #define LCD_CHAT_TEXT_COLS      29U
-#define LCD_HISTORY_Y           62U
-#define LCD_HISTORY_ROW_H       16U
-#define LCD_HISTORY_CAPACITY    10U
-#define LCD_HISTORY_TEXT_BYTES  128U
+#define LCD_HISTORY_Y             62U
+#define LCD_HISTORY_LINE_ADVANCE  10U
+#define LCD_HISTORY_PARAGRAPH_GAP 6U
+#define LCD_HISTORY_CAPACITY      10U
+#define LCD_HISTORY_TEXT_BYTES    128U
+#define LCD_HISTORY_VISIBLE_LINES 16U
 #define LCD_STATUS_BAR_H        16U
 #define LCD_STATUS_BAR_Y        (AK_STATUSLCD_H - LCD_STATUS_BAR_H)
 #define LCD_STATUS_TEXT_BYTES   40U
@@ -513,20 +515,119 @@ static void ak_chat_history_add(ak_session_ui_t *session, const char *text)
     session->history_count++;
 }
 
+typedef struct {
+    char text[LCD_CHAT_TEXT_COLS + 1U];
+    bool paragraph_start;
+} ak_history_line_t;
+
+static void ak_history_line_push(ak_history_line_t *lines, uint8_t *count,
+                                 const char *text, uint16_t length,
+                                 bool paragraph_start)
+{
+    if (*count == LCD_HISTORY_VISIBLE_LINES) {
+        memmove(&lines[0], &lines[1],
+                (LCD_HISTORY_VISIBLE_LINES - 1U) * sizeof(lines[0]));
+        (*count)--;
+    }
+
+    ak_history_line_t *line = &lines[*count];
+    memcpy(line->text, text, length);
+    line->text[length] = '\0';
+    line->paragraph_start = paragraph_start;
+    (*count)++;
+}
+
+/* Wrap one history entry at word boundaries. An overlong word is split at the
+ * right edge; UTF-8 code points unsupported by the 8x8 font remain one '?'. */
+static void ak_history_wrap_entry(const char *text, ak_history_line_t *lines,
+                                  uint8_t *line_count)
+{
+    char glyphs[LCD_HISTORY_TEXT_BYTES];
+    const char *p = text;
+    uint16_t glyph_count = 0U;
+
+    while (*p != '\0' && glyph_count + 1U < sizeof(glyphs)) {
+        glyphs[glyph_count++] = ak_history_next_glyph(&p);
+    }
+    glyphs[glyph_count] = '\0';
+
+    uint16_t start = 0U;
+    bool first_line = true;
+    while (start < glyph_count) {
+        while (start < glyph_count && glyphs[start] == ' ') {
+            start++;
+        }
+        if (start == glyph_count) {
+            break;
+        }
+
+        uint16_t remaining = (uint16_t)(glyph_count - start);
+        uint16_t length = remaining > LCD_CHAT_TEXT_COLS
+                              ? LCD_CHAT_TEXT_COLS
+                              : remaining;
+        if (length < remaining) {
+            uint16_t split = length;
+            while (split > 0U && glyphs[start + split] != ' ') {
+                split--;
+            }
+            if (split > 0U) {
+                length = split;
+            }
+        }
+        while (length > 0U && glyphs[start + length - 1U] == ' ') {
+            length--;
+        }
+        if (length == 0U) {
+            start++;
+            continue;
+        }
+
+        ak_history_line_push(lines, line_count, &glyphs[start], length,
+                             first_line);
+        first_line = false;
+        start = (uint16_t)(start + length);
+    }
+}
+
 static void ak_chat_history_draw(const ak_session_ui_t *session)
 {
-    for (uint8_t i = 0; i < session->history_count; i++) {
-        char line[LCD_CHAT_TEXT_COLS + 1U];
-        const char *p = session->history[i];
-        uint16_t col = 0U;
+    ak_history_line_t lines[LCD_HISTORY_VISIBLE_LINES];
+    uint8_t line_count = 0U;
 
-        while (*p != '\0' && col < LCD_CHAT_TEXT_COLS) {
-            line[col++] = ak_history_next_glyph(&p);
+    for (uint8_t i = 0U; i < session->history_count; i++) {
+        ak_history_wrap_entry(session->history[i], lines, &line_count);
+    }
+    if (line_count == 0U) {
+        return;
+    }
+
+    /* Select the newest suffix that fits above the status bar. Wrapped lines
+     * advance 10 px; a new history entry adds another 6 px paragraph gap. */
+    uint8_t first = (uint8_t)(line_count - 1U);
+    uint16_t used_height = 8U;
+    while (first > 0U) {
+        uint16_t advance = LCD_HISTORY_LINE_ADVANCE;
+        if (lines[first].paragraph_start) {
+            advance = (uint16_t)(advance + LCD_HISTORY_PARAGRAPH_GAP);
         }
-        line[col] = '\0';
-        ak_gfx_text_thin(LCD_CHAT_X,
-                         (uint16_t)(LCD_HISTORY_Y + i * LCD_HISTORY_ROW_H),
-                         line, AK_COL_WHITE, AK_COL_BLACK, 1);
+        if ((uint16_t)(used_height + advance) >
+            (uint16_t)(LCD_STATUS_BAR_Y - LCD_HISTORY_Y)) {
+            break;
+        }
+        used_height = (uint16_t)(used_height + advance);
+        first--;
+    }
+
+    uint16_t y = LCD_HISTORY_Y;
+    for (uint8_t i = first; i < line_count; i++) {
+        if (i > first) {
+            y = (uint16_t)(y + LCD_HISTORY_LINE_ADVANCE);
+            if (lines[i].paragraph_start) {
+                y = (uint16_t)(y + LCD_HISTORY_PARAGRAPH_GAP);
+            }
+        }
+        ak_gfx_text_thin(LCD_CHAT_X, y, lines[i].text,
+                         AK_COL_WHITE, AK_COL_BLACK, 1);
     }
 }
 
