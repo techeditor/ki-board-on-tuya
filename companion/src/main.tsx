@@ -64,6 +64,8 @@ type KcStatus = {
   agent_name: string;
   state: string;
   text: string;
+  event?: string;
+  detail_text?: string;
   // Set by the sink: true when this session is the one currently driving the
   // board LCD (either nothing is pinned, or this is the pinned session).
   forwarded?: boolean;
@@ -83,9 +85,22 @@ type HookStatus = {
 // AK display alias. Empty aliases fall back to A, B, and C on the board.
 type ChatNumbers = number[];
 type ChatAliases = string[];
+type ChatSessions = string[];
+type WatchedView = "compact" | "detail";
+type QuickBindDraft = { sessionId: string; slot: number; number: number };
 
 const SLOT_DEFAULT_NAMES = ["A", "B", "C"] as const;
 const ALIAS_MAX_CHARS = 7;
+
+function sessionDisplayName(sessionId: string) {
+  const firstPart = sessionId.split(":", 1)[0]?.trim();
+  return firstPart || "Kiro Crew";
+}
+
+function shortSessionId(sessionId: string) {
+  if (sessionId.length <= 14) return sessionId;
+  return `${sessionId.slice(0, 8)}…${sessionId.slice(-4)}`;
+}
 
 const defaultStatus: Status = {
   device_connected: false,
@@ -176,6 +191,7 @@ function App() {
   // Aliases save on blur/Enter rather than on every keystroke.
   const [binds, setBinds] = useState<ChatNumbers>([]);
   const [bindAliases, setBindAliases] = useState<ChatAliases>(["", "", ""]);
+  const [bindSessions, setBindSessions] = useState<ChatSessions>(["", "", ""]);
   const [bindError, setBindError] = useState("");
   const [bindBusy, setBindBusy] = useState(false);
 
@@ -187,6 +203,8 @@ function App() {
   const [ssError, setSsError] = useState("");
   const [ssBusy, setSsBusy] = useState(false);
   const [kcStatuses, setKcStatuses] = useState<Record<string, KcStatus>>({});
+  const [watchedView, setWatchedView] = useState<WatchedView>("compact");
+  const [quickBindDraft, setQuickBindDraft] = useState<QuickBindDraft | null>(null);
   // FP-4b Route STATUS (option A): the pinned "watched chat". "" = follow all
   // sessions. Non-empty = only that session's status drives the board LCD.
   const [pinnedSession, setPinnedSession] = useState("");
@@ -196,6 +214,17 @@ function App() {
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
     [ports],
+  );
+  const sortedKcStatuses = useMemo(
+    () =>
+      Object.values(kcStatuses).sort((a, b) =>
+        a.session_id === pinnedSession
+          ? -1
+          : b.session_id === pinnedSession
+            ? 1
+            : a.session_id.localeCompare(b.session_id),
+      ),
+    [kcStatuses, pinnedSession],
   );
 
   async function refreshRuntime() {
@@ -431,18 +460,44 @@ function App() {
   }
 
   async function refreshBinds() {
-    const [numbers, aliases] = await Promise.all([
+    const [numbers, aliases, sessions] = await Promise.all([
       invoke<ChatNumbers>("kc_bind_get"),
       invoke<ChatAliases>("kc_bind_aliases_get"),
+      invoke<ChatSessions>("kc_bind_sessions_get"),
     ]);
     setBinds(numbers);
     setBindAliases(aliases);
+    setBindSessions(sessions);
   }
 
   // Set A/B/C slot `slot` (1-based API index) to chat `number` (1..9).
   async function bindSet(slot: number, number: number) {
     await invoke("kc_bind_set", { slot, number });
     await refreshBinds();
+  }
+
+  async function bindSession(slot: number, number: number, sessionId: string) {
+    await invoke("kc_bind_session_set", { slot, number, sessionId });
+    await refreshBinds();
+  }
+
+  async function clearBoundSession(slot: number) {
+    await invoke("kc_bind_session_clear", { slot });
+    await refreshBinds();
+    setQuickBindDraft(null);
+  }
+
+  function startQuickBind(sessionId: string, slot: number) {
+    setQuickBindDraft({ sessionId, slot, number: binds[slot - 1] ?? slot });
+  }
+
+  async function confirmQuickBind() {
+    if (!quickBindDraft) return;
+    const draft = quickBindDraft;
+    await runBind(async () => {
+      await bindSession(draft.slot, draft.number, draft.sessionId);
+      setQuickBindDraft(null);
+    });
   }
 
   function bindAliasDraft(slot: number, alias: string) {
@@ -608,6 +663,9 @@ function App() {
       .catch(() => undefined);
     invoke<ChatAliases>("kc_bind_aliases_get")
       .then(setBindAliases)
+      .catch(() => undefined);
+    invoke<ChatSessions>("kc_bind_sessions_get")
+      .then(setBindSessions)
       .catch(() => undefined);
 
     // Recover the pinned "watched chat" on mount (survives a UI reload).
@@ -1108,9 +1166,9 @@ function App() {
               {lcError && <div className="error-banner" style={{ marginTop: 14 }}>{lcError}</div>}
             </Panel>
 
-            <Panel title="Agent Status — the eyes (hook sink)">
+            <Panel title="Agent Status — the eyes (local hook listener)">
               <p className="hint">
-                Ingests Kiro Crew <strong>agent hooks</strong> on
+                Receives Kiro Crew <strong>agent hooks</strong> on
                 <code> 127.0.0.1:5477/status</code> and mirrors each agent's state to the board
                 LCD as a <code>display</code> frame. The hook is a mode of this very binary
                 (<code>companion --hook</code>), gated by a per-run token.
@@ -1164,19 +1222,19 @@ function App() {
 
               <div className="actions" style={{ marginTop: 6 }}>
                 <button disabled={ssBusy || ssRunning} onClick={() => runSs(ssStart)}>
-                  Start sink
+                  Start status listener
                 </button>
                 <button
                   className="secondary"
                   disabled={ssBusy || !ssRunning}
                   onClick={() => runSs(ssStop)}
                 >
-                  Stop sink
+                  Stop status listener
                 </button>
               </div>
 
               <div className="lcd" style={{ marginTop: 14 }}>
-                <span>SINK</span>
+                <span>LISTENER</span>
                 <strong>{ssRunning ? "LISTENING · 127.0.0.1:5477" : "-- (start first)"}</strong>
               </div>
 
@@ -1199,54 +1257,183 @@ function App() {
                 </>
               )}
 
-              <label style={{ marginTop: 18 }}>
-                Watched chat (drives the board LCD)
-              </label>
-              <p className="hint" style={{ marginTop: 4 }}>
-                {pinnedSession
-                  ? `Pinned — only session ${pinnedSession.slice(0, 8)}… updates the board. Click another to switch, or Follow all.`
-                  : "Following ALL sessions — any active chat updates the board. Click one to pin it as the only watched chat."}
-              </p>
-              <div className="actions" style={{ marginTop: 0 }}>
+              <div className="watched-toolbar">
+                <div>
+                  <label>Watched chat (shown on the keyboard screen)</label>
+                  <p className="hint" style={{ marginTop: 4 }}>
+                    {pinnedSession
+                      ? `Watching ${shortSessionId(pinnedSession)} — only this chat appears on the keyboard screen; other chats are hidden.`
+                      : "Following all sessions — the latest active chat updates the keyboard screen."}
+                  </p>
+                </div>
                 <button
-                  className={pinnedSession ? "secondary" : ""}
-                  disabled={!pinnedSession}
+                  className="secondary"
+                  disabled={!pinnedSession || ssBusy}
                   onClick={() => runSs(unpinSession)}
                 >
                   Follow all
                 </button>
               </div>
-              <div className="log">
-                {Object.keys(kcStatuses).length === 0
-                  ? "No status yet. Start the sink, then run an agent turn with the hook wired."
-                  : Object.values(kcStatuses)
-                      .sort((a, b) =>
-                        a.session_id === pinnedSession
-                          ? -1
-                          : b.session_id === pinnedSession
-                          ? 1
-                          : a.session_id.localeCompare(b.session_id),
-                      )
-                      .map((s) => {
-                        const isPinned = s.session_id === pinnedSession;
-                        const driving = pinnedSession ? isPinned : true;
-                        return (
-                          <div
-                            key={s.session_id}
-                            onClick={() => runSs(() => pinSession(s.session_id))}
-                            title={`Pin ${s.session_id} as the watched chat`}
-                            style={{
-                              cursor: "pointer",
-                              fontWeight: isPinned ? 700 : 400,
-                              opacity: driving ? 1 : 0.5,
-                            }}
-                          >
-                            {`${isPinned ? "📌 " : "   "}${s.session_id.slice(0, 8)} · ${s.state.toUpperCase()} · ${s.text}`}
-                          </div>
-                        );
-                      })}
+
+              <p className="hint watched-model-hint">
+                K1–K3 send a Kiro Crew shortcut (Alt+1–9) for the selected Chat #.
+                Watch chooses which live chat can update the keyboard screen.
+              </p>
+
+              <div className="watched-tabs" role="tablist" aria-label="Watched chat view">
+                <button
+                  role="tab"
+                  aria-selected={watchedView === "compact"}
+                  className={watchedView === "compact" ? "watched-tab active" : "watched-tab"}
+                  onClick={() => setWatchedView("compact")}
+                >
+                  Compact · Bind K1–K3
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={watchedView === "detail"}
+                  className={watchedView === "detail" ? "watched-tab active" : "watched-tab"}
+                  onClick={() => setWatchedView("detail")}
+                >
+                  Detail
+                </button>
               </div>
 
+              <div className="watched-list">
+                {sortedKcStatuses.length === 0 ? (
+                  <div className="watched-empty">
+                    No active chats yet. Start the status listener above, then run a Kiro Crew turn.
+                  </div>
+                ) : watchedView === "compact" ? (
+                  sortedKcStatuses.map((s) => {
+                    const isPinned = s.session_id === pinnedSession;
+                    const boundSlot = bindSessions.findIndex((id) => id === s.session_id) + 1;
+                    const draftForSession = quickBindDraft?.sessionId === s.session_id;
+                    return (
+                      <div
+                        className={`watched-compact-card${isPinned ? " pinned" : ""}`}
+                        key={s.session_id}
+                      >
+                        <div className="watched-compact-row">
+                          <div className="watched-session-summary">
+                            <strong>{sessionDisplayName(s.session_id)}</strong>
+                            <code>{shortSessionId(s.session_id)}</code>
+                          </div>
+                          <span className={`watched-state state-${s.state.toLowerCase()}`}>
+                            {s.state.toUpperCase()}
+                          </span>
+                          <div className="watched-slot-binding">
+                            <span>Bind keyboard key</span>
+                            <div className="watched-slot-actions" aria-label="Quick bind keys">
+                              {[1, 2, 3].map((slot) => (
+                              <button
+                                key={slot}
+                                className={bindSessions[slot - 1] === s.session_id ? "bound" : "secondary"}
+                                disabled={bindBusy}
+                                aria-label={`Bind ${s.session_id} to K${slot}`}
+                                onClick={() => startQuickBind(s.session_id, slot)}
+                              >
+                                K{slot}
+                              </button>
+                              ))}
+                            </div>
+                          </div>
+                          <button
+                            className={isPinned ? "watched-watch active" : "watched-watch secondary"}
+                            disabled={ssBusy}
+                            onClick={() =>
+                              runSs(() => isPinned ? unpinSession() : pinSession(s.session_id))
+                            }
+                          >
+                            {isPinned ? "Watch all" : "Watch"}
+                          </button>
+                        </div>
+                        <div className="watched-compact-meta">
+                          {boundSlot
+                            ? `Keyboard K${boundSlot} → Kiro Crew Chat #${binds[boundSlot - 1]} (Alt+${binds[boundSlot - 1]}) · screen label ${bindAliases[boundSlot - 1] || SLOT_DEFAULT_NAMES[boundSlot - 1]}`
+                            : s.text}
+                        </div>
+                        {draftForSession && quickBindDraft && (
+                          <div className="quick-bind-editor">
+                            <strong>Bind keyboard K{quickBindDraft.slot}</strong>
+                            <label htmlFor={`quick-chat-${quickBindDraft.slot}`}>Kiro Crew Chat #</label>
+                            <select
+                              id={`quick-chat-${quickBindDraft.slot}`}
+                              value={quickBindDraft.number}
+                              disabled={bindBusy}
+                              onChange={(event) =>
+                                setQuickBindDraft({
+                                  ...quickBindDraft,
+                                  number: Number(event.target.value),
+                                })
+                              }
+                            >
+                              {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((number) => (
+                                <option key={number} value={number}>{number}</option>
+                              ))}
+                            </select>
+                            <button disabled={bindBusy} onClick={confirmQuickBind}>Save binding</button>
+                            {bindSessions[quickBindDraft.slot - 1] && (
+                              <button
+                                className="secondary"
+                                disabled={bindBusy}
+                                onClick={() => runBind(() => clearBoundSession(quickBindDraft.slot))}
+                              >
+                                Remove session link
+                              </button>
+                            )}
+                            <button
+                              className="secondary"
+                              disabled={bindBusy}
+                              onClick={() => setQuickBindDraft(null)}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                ) : (
+                  sortedKcStatuses.map((s) => {
+                    const isPinned = s.session_id === pinnedSession;
+                    const driving = pinnedSession ? isPinned : true;
+                    return (
+                      <article
+                        className={`watched-detail-card${isPinned ? " pinned" : ""}${driving ? "" : " muted"}`}
+                        key={s.session_id}
+                      >
+                        <div className="watched-detail-head">
+                          <div>
+                            <strong>{sessionDisplayName(s.session_id)}</strong>
+                            <span>{s.agent_name}</span>
+                          </div>
+                          <span className={`watched-state state-${s.state.toLowerCase()}`}>
+                            {s.state.toUpperCase()}
+                          </span>
+                          <button
+                            className={isPinned ? "watched-watch active" : "watched-watch secondary"}
+                            disabled={ssBusy}
+                            onClick={() =>
+                              runSs(() => isPinned ? unpinSession() : pinSession(s.session_id))
+                            }
+                          >
+                            {isPinned ? "Watch all" : "Watch"}
+                          </button>
+                        </div>
+                        <dl className="watched-detail-fields">
+                          <div><dt>Session ID</dt><dd><code>{s.session_id}</code></dd></div>
+                          <div><dt>Event</dt><dd>{s.event || "Status update"}</dd></div>
+                          <div><dt>Keyboard</dt><dd>{driving ? "Shown on keyboard screen" : "Hidden while another chat is watched"}</dd></div>
+                        </dl>
+                        <div className="watched-detail-text">{s.detail_text ?? s.text}</div>
+                      </article>
+                    );
+                  })
+                )}
+              </div>
+
+              {bindError && <div className="error-banner" style={{ marginTop: 14 }}>{bindError}</div>}
               {ssError && <div className="error-banner" style={{ marginTop: 14 }}>{ssError}</div>}
             </Panel>
           </>

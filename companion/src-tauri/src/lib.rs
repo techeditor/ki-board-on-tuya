@@ -611,6 +611,19 @@ mod app {
             .clone())
     }
 
+    /// Return the Crew session associated with each K1-K3 slot. Empty entries
+    /// have not been quick-bound from Watched Chat yet.
+    #[tauri::command]
+    fn kc_bind_sessions_get(state: State<Shared>) -> Result<Vec<String>, String> {
+        Ok(state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .kc_binds
+            .sessions
+            .clone())
+    }
+
     /// Persist one slot alias and immediately synchronize all aliases to the AK
     /// when connected. Saving while offline still succeeds; connect_device sends
     /// the stored values on the next connection.
@@ -644,6 +657,36 @@ mod app {
         // Keep the live router context in sync with the persisted numbers.
         inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
         Ok(())
+    }
+
+    /// Quick-bind one observed Crew session and its real dashboard Chat # to a
+    /// K1-K3 slot atomically. The session id is presentation metadata; the live
+    /// router continues to inject Alt+`number` as before.
+    #[tauri::command]
+    fn kc_bind_session_set(
+        state: State<Shared>,
+        slot: u8,
+        number: u8,
+        session_id: String,
+    ) -> Result<(), String> {
+        if !(1..=9).contains(&number) {
+            return Err(format!("chat number must be 1..=9 (got {number})"));
+        }
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        inner.kc_binds.set_session(slot, &session_id)?;
+        inner.kc_binds.set(slot, number);
+        inner.kc_binds.save()?;
+        inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
+        Ok(())
+    }
+
+    /// Remove only a slot's Watched Chat association, preserving its Chat # and
+    /// AK alias.
+    #[tauri::command]
+    fn kc_bind_session_clear(state: State<Shared>, slot: u8) -> Result<(), String> {
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        inner.kc_binds.clear_session(slot)?;
+        inner.kc_binds.save()
     }
 
     /// M4: reset slot `slot` (1-based) to its default chat number (slot index+1:
@@ -699,6 +742,8 @@ mod app {
                 "agent_name": status.agent_name,
                 "state": status.state,
                 "text": status.text,
+                "event": status.event,
+                "detail_text": status.detail_text,
                 "forwarded": forward,
             }),
         );
@@ -783,6 +828,8 @@ mod app {
         agent_name: String,
         state: String,
         text: String,
+        event: String,
+        detail_text: String,
         pinned: bool,
     }
 
@@ -802,6 +849,8 @@ mod app {
                 agent_name: s.agent_name.clone(),
                 state: s.state.clone(),
                 text: s.text.clone(),
+                event: s.event.clone(),
+                detail_text: s.detail_text.clone(),
                 pinned: pinned.as_deref() == Some(s.session_id.as_str()),
             })
             .collect();
@@ -1165,8 +1214,11 @@ mod app {
                 kc_chord,
                 kc_bind_get,
                 kc_bind_aliases_get,
+                kc_bind_sessions_get,
                 kc_bind_alias_set,
                 kc_bind_set,
+                kc_bind_session_set,
+                kc_bind_session_clear,
                 kc_bind_clear,
                 status_sink_start,
                 status_sink_stop,

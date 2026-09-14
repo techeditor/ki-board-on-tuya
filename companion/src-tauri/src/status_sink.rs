@@ -72,7 +72,12 @@ pub struct HookEvent {
 pub struct DisplayState {
     pub agent_name: String,
     pub state: String,
+    /// Compact, single-line text forwarded to the board LCD.
     pub text: String,
+    /// Original Hook event name shown in the Companion detail view.
+    pub event: String,
+    /// Full event/assistant text shown in the Companion without truncation.
+    pub detail_text: String,
     /// Session this status belongs to (echoed through for per-session keying).
     pub session_id: String,
 }
@@ -107,29 +112,38 @@ fn truncate_response(s: &str) -> String {
 /// layer may override it from the bound session.
 pub fn map_hook_event(ev: &HookEvent) -> DisplayState {
     let normalized = ev.event.to_ascii_lowercase();
-    let (state, text) = match normalized.as_str() {
-        "agentspawn" | "sessionstart" => ("running", "agent started".to_string()),
+    let (state, text, detail_text) = match normalized.as_str() {
+        "agentspawn" | "sessionstart" => {
+            let text = "agent started".to_string();
+            ("running", text.clone(), text)
+        }
         "posttooluse" => {
             let tool = ev.tool_name.as_deref().unwrap_or("tool");
-            ("tool", format!("using {tool}"))
+            let text = format!("using {tool}");
+            ("tool", text.clone(), text)
         }
         "stop" => {
             let resp = ev.assistant_response.as_deref().unwrap_or("");
-            let text = if resp.trim().is_empty() {
-                "done".to_string()
+            if resp.trim().is_empty() {
+                let text = "done".to_string();
+                ("idle", text.clone(), text)
             } else {
-                truncate_response(resp)
-            };
-            ("idle", text)
+                ("idle", truncate_response(resp), resp.to_string())
+            }
         }
-        "userpromptsubmit" => ("received", "prompt received".to_string()),
+        "userpromptsubmit" => {
+            let text = "prompt received".to_string();
+            ("received", text.clone(), text)
+        }
         // Unknown / finer states retain the original spelling for diagnostics.
-        _ => ("running", ev.event.clone()),
+        _ => ("running", ev.event.clone(), ev.event.clone()),
     };
     DisplayState {
         agent_name: "kirocrew".to_string(),
         state: state.to_string(),
         text,
+        event: ev.event.clone(),
+        detail_text,
         session_id: ev.session_id.clone(),
     }
 }
@@ -462,6 +476,8 @@ mod tests {
         assert_eq!(d.text, "agent started");
         assert_eq!(d.session_id, "s1");
         assert_eq!(d.agent_name, "kirocrew");
+        assert_eq!(d.event, "AgentSpawn");
+        assert_eq!(d.detail_text, "agent started");
     }
 
     #[test]
@@ -500,6 +516,7 @@ mod tests {
         // 40 chars + ellipsis.
         assert_eq!(d.text.chars().count(), MAX_RESPONSE_CHARS + 1);
         assert!(d.text.ends_with('…'));
+        assert_eq!(d.detail_text, "a".repeat(100));
     }
 
     #[test]
@@ -528,6 +545,7 @@ mod tests {
         let d = map_hook_event(&ev);
         assert!(!d.text.contains('\n'));
         assert!(d.text.starts_with("line one line two"));
+        assert_eq!(d.detail_text, "line one\n\nline two   with  spaces");
     }
 
     #[test]

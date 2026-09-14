@@ -32,9 +32,14 @@ fn default_aliases() -> Vec<String> {
     vec![String::new(); SLOT_COUNT]
 }
 
-/// The persisted per-key binding store. `chats[i]` is the chat number
-/// (`1..=9`) that K(i+1) jumps to; `aliases[i]` is its optional AK label.
-/// Both vectors have exactly `SLOT_COUNT` entries after load.
+/// Empty session ids mean no observed Crew chat is associated with the slot.
+fn default_sessions() -> Vec<String> {
+    vec![String::new(); SLOT_COUNT]
+}
+
+/// The persisted per-key binding store. `chats[i]` is the chat number,
+/// `aliases[i]` its optional AK label, and `sessions[i]` the Crew session shown
+/// beside that slot in the Companion. All vectors have `SLOT_COUNT` entries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindStore {
     /// Index 0..=2 maps K1..=K3 to the A/B/C slots.
@@ -43,6 +48,9 @@ pub struct BindStore {
     /// Optional display aliases; an empty entry falls back to A, B, or C.
     #[serde(default = "default_aliases")]
     pub aliases: Vec<String>,
+    /// Optional stable Crew session ids used only for Companion presentation.
+    #[serde(default = "default_sessions")]
+    pub sessions: Vec<String>,
 }
 
 impl Default for BindStore {
@@ -50,6 +58,7 @@ impl Default for BindStore {
         Self {
             chats: default_chats(),
             aliases: default_aliases(),
+            sessions: default_sessions(),
         }
     }
 }
@@ -83,6 +92,12 @@ impl BindStore {
         for alias in &mut self.aliases {
             *alias = normalize_alias(alias).unwrap_or_default();
         }
+
+        self.sessions.resize(SLOT_COUNT, String::new());
+        self.sessions.truncate(SLOT_COUNT);
+        for session in &mut self.sessions {
+            *session = normalize_session_id(session).unwrap_or_default();
+        }
     }
 
     /// Read the chat number for slot `n` (1-based). Returns `None` for an
@@ -109,8 +124,21 @@ impl BindStore {
         Ok(())
     }
 
+    /// Associate an observed Crew session with a slot for Companion display.
+    /// This does not alter the physical shortcut; `chats` stays authoritative.
+    pub fn set_session(&mut self, n: u8, session_id: &str) -> Result<(), String> {
+        let i = idx(n).ok_or_else(|| format!("binding slot must be 1..={SLOT_COUNT}"))?;
+        self.sessions[i] = normalize_session_id(session_id)?;
+        Ok(())
+    }
+
+    /// Remove only the UI session association for a slot.
+    pub fn clear_session(&mut self, n: u8) -> Result<(), String> {
+        self.set_session(n, "")
+    }
+
     /// Reset slot `n` (1-based) to its default chat number (slot index + 1).
-    /// Out-of-range is a no-op. Its independent display alias is preserved.
+    /// Out-of-range is a no-op. Its alias and session association are preserved.
     pub fn clear(&mut self, n: u8) {
         if let Some(i) = idx(n) {
             if let Some(slot) = self.chats.get_mut(i) {
@@ -142,6 +170,17 @@ impl BindStore {
         let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))
     }
+}
+
+fn normalize_session_id(session_id: &str) -> Result<String, String> {
+    let session_id = session_id.trim();
+    if session_id.chars().any(char::is_control) {
+        return Err("session id must not contain control characters".to_string());
+    }
+    if session_id.chars().count() > 512 {
+        return Err("session id must be at most 512 characters".to_string());
+    }
+    Ok(session_id.to_string())
 }
 
 fn normalize_alias(alias: &str) -> Result<String, String> {
@@ -188,6 +227,7 @@ mod tests {
         let s = BindStore::new();
         assert_eq!(s.chats, vec![1, 2, 3]);
         assert_eq!(s.aliases, vec!["", "", ""]);
+        assert_eq!(s.sessions, vec!["", "", ""]);
         assert_eq!(s.get(1), Some(1));
         assert_eq!(s.get(2), Some(2));
         assert_eq!(s.get(3), Some(3));
@@ -222,6 +262,17 @@ mod tests {
     }
 
     #[test]
+    fn session_association_round_trips_and_clears() {
+        let mut s = BindStore::new();
+        s.set_session(2, " dashboard:chat-2 ").unwrap();
+        assert_eq!(s.sessions[1], "dashboard:chat-2");
+        s.clear_session(2).unwrap();
+        assert_eq!(s.sessions[1], "");
+        assert!(s.set_session(4, "other").is_err());
+        assert!(s.set_session(1, "bad\nsession").is_err());
+    }
+
+    #[test]
     fn set_clamps_number_into_1_9() {
         let mut s = BindStore::new();
         s.set(1, 0);
@@ -253,8 +304,12 @@ mod tests {
         s.set(1, 4);
         s.set(3, 8);
         s.set_alias(1, "Plan").unwrap();
+        s.set_session(1, "dashboard:chat-4").unwrap();
         let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(json, r#"{"chats":[4,2,8],"aliases":["Plan","",""]}"#);
+        assert_eq!(
+            json,
+            r#"{"chats":[4,2,8],"aliases":["Plan","",""],"sessions":["dashboard:chat-4","",""]}"#
+        );
         let back: BindStore = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
     }
@@ -266,6 +321,7 @@ mod tests {
         old.normalize();
         assert_eq!(old.chats, vec![5, 2, 3]);
         assert_eq!(old.aliases, vec!["", "", ""]);
+        assert_eq!(old.sessions, vec!["", "", ""]);
 
         let mut long: BindStore =
             serde_json::from_str(r#"{"chats":[9,8,7,6],"aliases":["One","Two","Three","Four"]}"#)
@@ -273,6 +329,7 @@ mod tests {
         long.normalize();
         assert_eq!(long.chats, vec![9, 8, 7]);
         assert_eq!(long.aliases, vec!["One", "Two", "Three"]);
+        assert_eq!(long.sessions, vec!["", "", ""]);
 
         // Invalid chat numbers and aliases both fall back safely.
         let mut bad: BindStore =
@@ -281,6 +338,7 @@ mod tests {
         bad.normalize();
         assert_eq!(bad.chats, vec![1, 2, 4]);
         assert_eq!(bad.aliases, vec!["", "", "Ok"]);
+        assert_eq!(bad.sessions, vec!["", "", ""]);
     }
 
     #[test]
@@ -289,5 +347,6 @@ mod tests {
         s.normalize();
         assert_eq!(s.chats, vec![1, 2, 3]);
         assert_eq!(s.aliases, vec!["", "", ""]);
+        assert_eq!(s.sessions, vec!["", "", ""]);
     }
 }
