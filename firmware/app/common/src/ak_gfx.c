@@ -118,7 +118,7 @@ static void ak_gfx_char_impl(uint16_t x, uint16_t y, char c, uint16_t fg,
         scale = 1;
     }
     if (code >= 128) {
-        code = '?';
+        code = AK_FONT_MISSING_GLYPH;
     }
 
     /* Opaque background cell first, then the foreground pixels on top. */

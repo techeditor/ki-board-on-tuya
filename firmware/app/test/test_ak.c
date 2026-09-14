@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ak_font8x8.h"
 #include "ak_icons16.h"
 #include "ak_session_icons.h"
 #include "ak_input_fsm.h"
@@ -336,6 +337,18 @@ static void test_status_icons(void)
           "BLE connected/disconnected bitmaps differ");
 }
 
+static void test_missing_glyph(void)
+{
+    static const uint8_t expected[AK_FONT_H] = {
+        0x00, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x00,
+    };
+
+    printf("test_missing_glyph\n");
+    CHECK(AK_FONT_MISSING_GLYPH == 0x7FU, "missing glyph uses reserved font slot");
+    CHECK(memcmp(ak_font8x8[AK_FONT_MISSING_GLYPH], expected, sizeof(expected)) == 0,
+          "unsupported non-ASCII glyph renders as an outline square");
+}
+
 /* Feed a full short press (DOWN ... UP) into the detector; returns whether a
  * double-click completed. gap_ms advances the clock before the press starts. */
 static bool dclick_short_press(ak_dclick_t *dc, uint32_t *t, uint32_t gap_ms)
@@ -463,6 +476,7 @@ int main(void)
     test_protocol();
     test_rx();
     test_status_icons();
+    test_missing_glyph();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");

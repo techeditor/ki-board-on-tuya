@@ -19,6 +19,7 @@
 #include "ak_board_io.h"
 #include "ak_display.h"
 #include "ak_features.h"
+#include "ak_font8x8.h"
 #include "ak_asr.h"
 #include "ak_cloud.h"
 #include "ak_wifi.h"
@@ -729,8 +730,8 @@ static void ak_status_bar_draw(void)
     ak_gfx_text_thin(4U, (uint16_t)(LCD_STATUS_BAR_Y + 4U), text, color, AK_COL_BLACK, 1);
 }
 
-/* Consume one UTF-8 code point. The 8x8 font is ASCII-only, so each non-ASCII
- * code point becomes one '?' rather than one '?' per UTF-8 byte. */
+/* Consume one UTF-8 code point. The 8x8 font is ASCII-only, so each unsupported
+ * non-ASCII code point becomes one missing-glyph square. */
 static char ak_history_next_glyph(const char **cursor)
 {
     const unsigned char *p = (const unsigned char *)*cursor;
@@ -741,7 +742,7 @@ static char ak_history_next_glyph(const char **cursor)
             p++;
         }
         *cursor = (const char *)p;
-        return '?';
+        return (char)AK_FONT_MISSING_GLYPH;
     }
     *cursor = (const char *)p;
     return (c >= 0x20U && c < 0x7FU) ? (char)c : ' ';
@@ -792,7 +793,7 @@ static void ak_history_line_push(ak_history_line_t *lines, uint8_t *count,
 }
 
 /* Wrap one history entry at word boundaries. An overlong word is split at the
- * right edge; UTF-8 code points unsupported by the 8x8 font remain one '?'. */
+ * right edge; each unsupported UTF-8 code point remains one square glyph. */
 static void ak_history_wrap_entry(const char *text, bool from_agent, ak_history_line_t *lines, uint8_t *line_count)
 {
     char glyphs[LCD_HISTORY_TEXT_BYTES];
@@ -1126,12 +1127,10 @@ static void ak_session_label_set(uint8_t slot, const char *alias)
         return;
     }
 
+    const char *cursor = alias;
     uint8_t length = 0U;
-    while (alias[length] != '\0' && length < LCD_SESSION_ALIAS_CHARS) {
-        unsigned char c = (unsigned char)alias[length];
-        s_session_labels[slot][length] =
-            (c >= 0x20U && c <= 0x7EU) ? (char)c : '?';
-        length++;
+    while (*cursor != '\0' && length < LCD_SESSION_ALIAS_CHARS) {
+        s_session_labels[slot][length++] = ak_history_next_glyph(&cursor);
     }
     s_session_labels[slot][length] = '\0';
 }
