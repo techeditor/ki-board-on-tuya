@@ -36,8 +36,29 @@ firmware/app/
 | v3 | BLE HID (`AK_TRANSPORT_BLE_HID`, no JSONL) | — | 3 |
 
 Exactly one `AK_TRANSPORT_*` is enabled per build (guarded in `ak_features.h`).
-The shared core (input scan, event FSM, protocol, display) is written once and
-reused across all profiles.
+The BLE GATT profiles advertise as `Agentic Keyboard-XXXXXX`, where `XXXXXX`
+is derived from the device address so multiple nearby keyboards can be told
+apart. The shared core (input scan, event FSM, protocol, display) is written
+once and reused across all profiles.
+
+## Firmware version
+
+`VERSION` is the single source of truth. The version command synchronizes it
+with every TuyaOpen profile so the runtime `hello_ack`, cloud software version,
+and generated BIN/dist names stay aligned.
+
+```bash
+cd firmware/app
+python3 tools/version.py show          # current version
+python3 tools/version.py bump          # automatic patch bump: 0.1.0 -> 0.1.1
+python3 tools/version.py bump minor    # 0.1.1 -> 0.2.0
+python3 tools/version.py bump major    # 0.2.0 -> 1.0.0
+python3 tools/version.py set 0.3.0     # manually set an exact version
+python3 tools/version.py check         # CI/build consistency check
+```
+
+Automatic bumps are explicit rather than happening on every build, keeping
+repeated builds of one source revision reproducible.
 
 ## Build (EC2)
 

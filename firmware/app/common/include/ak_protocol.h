@@ -2,9 +2,9 @@
  * @file ak_protocol.h
  * @brief JSONL protocol v1 frame builders (shared/protocol/protocol.md).
  *
- * Pure string formatting (host-testable): each function writes one
- * newline-terminated JSON line into buf and returns the snprintf length
- * (>= size means truncated). No SDK or transport dependency.
+ * Pure, bounded JSON construction (host-testable): each function JSON-escapes
+ * every dynamic string, writes one newline-terminated JSON line into buf, and
+ * returns the complete required length (>= size means truncated).
  */
 
 #ifndef AK_PROTOCOL_H
@@ -18,8 +18,7 @@ int ak_proto_key(char *buf, size_t size, uint32_t seq, const char *id, const cha
 int ak_proto_nav(char *buf, size_t size, uint32_t seq, const char *dir, const char *action, uint32_t held_ms);
 int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state);
 /* Board -> PC: recognized speech text from the board-side (Tuya cloud) ASR.
-   The PC forwards it to Kiro Crew. `text` must already be a JSON-safe ASCII
-   single line (caller sanitizes). */
+   The builder JSON-escapes arbitrary text, including quotes and newlines. */
 int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text);
 int ak_proto_asr_error(char *buf, size_t size, uint32_t seq, const char *code);
 /* Board -> PC: report the board's CURRENT voice routing ("cloud" = board mic +

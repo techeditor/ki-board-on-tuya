@@ -8,6 +8,8 @@ app="$(cd "${here}/.." && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "${out}"' EXIT
 
+python3 "${app}/tools/version.py" check >/dev/null
+
 gcc -std=c11 -Wall -Wextra -Werror \
     -I "${app}/common/include" \
     "${app}/common/src/ak_input_fsm.c" \

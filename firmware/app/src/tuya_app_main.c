@@ -31,6 +31,7 @@
 #include "ak_statuslcd.h"
 #include "ak_voice_route.h"
 #include "tal_api.h"
+#include "tal_mutex.h"
 #include "tkl_output.h"
 
 #if AK_TRANSPORT_DUAL
@@ -123,9 +124,13 @@ static bool ak_transport_rx_is_usb(void)
 #define HEARTBEAT_INTERVAL_MS  2000U
 #define USB_LINK_TIMEOUT_MS    7000U
 #define FRAME_BUFFER_SIZE      192U
-#define APP_FW_VERSION         "0.1.0"
+#ifndef PROJECT_VERSION
+#define PROJECT_VERSION "0.0.0-dev"
+#endif
+#define APP_FW_VERSION PROJECT_VERSION
 
 static THREAD_HANDLE  s_app_thread = NULL;
+static MUTEX_HANDLE   s_tx_mutex   = NULL;
 static uint32_t       s_sequence   = 0;
 static ak_rx_reader_t s_rx;
 /* UART/USB: hello marks the companion live; every later UART frame (including
@@ -191,7 +196,7 @@ static bool                s_center_long_consumed;
 /* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
 #define AK_PTT_KEY_ID "k4"
 
-static void transport_write_frame(const char *frame, int length)
+static void transport_write_frame_unlocked(const char *frame, int length)
 {
     if (length <= 0 || length >= (int)FRAME_BUFFER_SIZE) {
         return;
@@ -200,6 +205,48 @@ static void transport_write_frame(const char *frame, int length)
     if (written != length) {
         PR_WARN("transport short write: %d/%d", written, length);
     }
+}
+
+static bool transport_lock(void)
+{
+    if (s_tx_mutex == NULL || tal_mutex_lock(s_tx_mutex) != OPRT_OK) {
+        PR_ERR("transport TX lock failed");
+        return false;
+    }
+    return true;
+}
+
+static void transport_unlock(void)
+{
+    if (tal_mutex_unlock(s_tx_mutex) != OPRT_OK) {
+        PR_ERR("transport TX unlock failed");
+    }
+}
+
+static void transport_write_frame(const char *frame, int length)
+{
+    if (!transport_lock()) {
+        return;
+    }
+    transport_write_frame_unlocked(frame, length);
+    transport_unlock();
+}
+
+/* Sequence allocation and the matching write share one critical section, so
+ * callback threads cannot race the app loop or transmit sequence N+1 first. */
+static bool transport_begin_sequenced(uint32_t *sequence)
+{
+    if (sequence == NULL || !transport_lock()) {
+        return false;
+    }
+    *sequence = ++s_sequence;
+    return true;
+}
+
+static void transport_end_sequenced(const char *frame, int length)
+{
+    transport_write_frame_unlocked(frame, length);
+    transport_unlock();
 }
 
 /* Forward declarations: PTT / voice helpers are defined below but referenced by
@@ -220,18 +267,21 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
 static void ak_emit_input_frame(ak_input_kind_t kind, const char *id,
                                 ak_input_event_t event, uint32_t held_ms)
 {
-    char frame[FRAME_BUFFER_SIZE];
-    int length;
+    char     frame[FRAME_BUFFER_SIZE];
+    int      length;
+    uint32_t sequence;
 
-    s_sequence++;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
     if (kind == AK_INPUT_KIND_KEY) {
-        length = ak_proto_key(frame, sizeof(frame), s_sequence, id,
+        length = ak_proto_key(frame, sizeof(frame), sequence, id,
                               ak_input_event_str(event), held_ms);
     } else {
-        length = ak_proto_nav(frame, sizeof(frame), s_sequence, id,
+        length = ak_proto_nav(frame, sizeof(frame), sequence, id,
                               ak_input_event_str(event), held_ms);
     }
-    transport_write_frame(frame, length);
+    transport_end_sequenced(frame, length);
     PR_DEBUG("input %s %s held=%ums", id, ak_input_event_str(event), held_ms);
 }
 
@@ -279,18 +329,24 @@ static void send_hello_ack(void)
 /* Emit a voice.start / voice.stop edge (PC companion runs its own ASR). */
 static void send_voice(const char *state)
 {
-    char frame[FRAME_BUFFER_SIZE];
-    s_sequence++;
-    transport_write_frame(frame, ak_proto_voice(frame, sizeof(frame), s_sequence, state));
+    char     frame[FRAME_BUFFER_SIZE];
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(frame, ak_proto_voice(frame, sizeof(frame), sequence, state));
 }
 
 /* Report the board's current voice routing so the companion UI reflects it. */
 static void send_voice_source(void)
 {
-    char frame[FRAME_BUFFER_SIZE];
-    s_sequence++;
-    transport_write_frame(
-        frame, ak_proto_voice_source(frame, sizeof(frame), s_sequence, ak_voice_source_str(s_voice_route.effective)));
+    char     frame[FRAME_BUFFER_SIZE];
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(
+        frame, ak_proto_voice_source(frame, sizeof(frame), sequence, ak_voice_source_str(s_voice_route.effective)));
 }
 
 /* Cloud-ASR result callback: forward recognized text to the PC as an `asr`
@@ -304,8 +360,11 @@ static void on_asr_text(const char *text)
 #if AK_ENABLE_DISPLAY
     ak_voice_ui_queue_result(text, false);
 #endif
-    s_sequence++;
-    transport_write_frame(frame, ak_proto_asr(frame, sizeof(frame), s_sequence, text));
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(frame, ak_proto_asr(frame, sizeof(frame), sequence, text));
 }
 
 /* Cloud-ASR failure callback: forward "asr_error" / "asr_empty" to the PC as an
@@ -320,8 +379,11 @@ static void on_asr_error(const char *code)
 #if AK_ENABLE_DISPLAY
     ak_voice_ui_queue_result(code, true);
 #endif
-    s_sequence++;
-    transport_write_frame(frame, ak_proto_asr_error(frame, sizeof(frame), s_sequence, code));
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(frame, ak_proto_asr_error(frame, sizeof(frame), sequence, code));
 }
 
 /* Wi-Fi provisioning status callback: report state to the PC as a wifi_status
@@ -335,10 +397,13 @@ static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
     /* Publish dirty last so the app loop reads a complete state update. */
     s_wifi_status_dirty = true;
 #endif
-    s_sequence++;
-    transport_write_frame(frame,
-                          ak_proto_wifi_status(frame, sizeof(frame), s_sequence,
-                                               ak_wifi_state_str(state), ssid));
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(frame,
+                            ak_proto_wifi_status(frame, sizeof(frame), sequence,
+                                                 ak_wifi_state_str(state), ssid));
 }
 
 /* K4 push-to-talk routing. The route is decided on DOWN and held until UP:
@@ -393,12 +458,13 @@ static void on_ptt_event(ak_input_event_t event)
 
 static void send_heartbeat(uint32_t uptime_ms)
 {
-    char frame[FRAME_BUFFER_SIZE];
-    int  length;
+    char     frame[FRAME_BUFFER_SIZE];
+    uint32_t sequence;
 
-    s_sequence++;
-    length = ak_proto_ping(frame, sizeof(frame), s_sequence, uptime_ms);
-    transport_write_frame(frame, length);
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(frame, ak_proto_ping(frame, sizeof(frame), sequence, uptime_ms));
 }
 
 static void send_pong(void)
@@ -1156,10 +1222,13 @@ static void on_rx_line(const char *line)
                   (unsigned)strlen(authkey));
         ak_license_result_t lr = ak_license_write(uuid, authkey);
         {
-            char frame[FRAME_BUFFER_SIZE];
-            s_sequence++;
-            transport_write_frame(frame, ak_proto_license_status(frame, sizeof(frame), s_sequence,
-                                                                  ak_license_result_str(lr)));
+            char     frame[FRAME_BUFFER_SIZE];
+            uint32_t sequence;
+            if (transport_begin_sequenced(&sequence)) {
+                transport_end_sequenced(frame,
+                                        ak_proto_license_status(frame, sizeof(frame), sequence,
+                                                                ak_license_result_str(lr)));
+            }
         }
         send_ack(seq);
     } else if (strcmp(type, "display") == 0) {
@@ -1211,6 +1280,11 @@ static void user_main(void)
         PR_ERR("input init failed: %d", rt);
         return;
     }
+    rt = tal_mutex_create_init(&s_tx_mutex);
+    if (rt != OPRT_OK) {
+        PR_ERR("transport TX mutex init failed: %d", rt);
+        return;
+    }
     ak_dclick_init(&s_ptt_dclick);
     ak_voice_route_init(&s_voice_route);
 #if AK_ENABLE_DISPLAY
@@ -1254,7 +1328,7 @@ static void user_main(void)
     /* Cloud netmgr has already initialized TAL's common GATT service. Do NOT
      * call tal_ble_bt_init() a second time: T5's one-shot service guard would
      * leave TAL's rewritten characteristic handles invalid, making every
-     * notify fail even though AK-KB connects. Non-cloud DUAL still needs the
+     * notify fail even though the Agentic Keyboard advertisement connects. Non-cloud DUAL still needs the
      * normal first-time BLE initialization. */
 #if AK_ASR_BOARD_CLOUD
     OPERATE_RET ble_rt = ak_ble_gatt_takeover();

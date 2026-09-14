@@ -151,6 +151,30 @@ static void test_protocol(void)
               "{\"v\":1,\"seq\":11,\"type\":\"asr\",\"payload\":{\"text\":\"hello world\"}}\n",
               "asr frame");
 
+    ak_proto_asr(buf, sizeof(buf), 15, "say \"hi\"\\\n\t\x01");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":15,\"type\":\"asr\",\"payload\":{\"text\":"
+              "\"say \\\"hi\\\"\\\\\\n\\t\\u0001\"}}\n",
+              "asr frame escapes JSON syntax and control bytes");
+
+    ak_proto_wifi_status(buf, sizeof(buf), 16, "connected", "Lab\"AP\\west\n");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":16,\"type\":\"wifi_status\",\"payload\":{\"state\":\"connected\","
+              "\"ssid\":\"Lab\\\"AP\\\\west\\n\"}}\n",
+              "wifi SSID is JSON escaped");
+
+    ak_proto_asr(buf, sizeof(buf), 17, NULL);
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":17,\"type\":\"asr\",\"payload\":{\"text\":\"\"}}\n",
+              "null dynamic string becomes empty JSON string");
+
+    {
+        char small[16];
+        int  required = ak_proto_asr(small, sizeof(small), 18, "a long \"quoted\" value");
+        CHECK(required >= (int)sizeof(small), "truncated frame returns required length");
+        CHECK(small[sizeof(small) - 1U] == '\0', "truncated frame remains null terminated");
+    }
+
     ak_proto_voice_source(buf, sizeof(buf), 12, "cloud");
     CHECK_STR(buf,
               "{\"v\":1,\"seq\":12,\"type\":\"voice_source\",\"payload\":{\"source\":\"cloud\"}}\n",
@@ -222,6 +246,18 @@ static void test_rx(void)
           "extract agent_name string");
     CHECK(ak_json_uint(disp, "seq", &seq) && seq == 42, "extract seq uint");
     CHECK(!ak_json_str(disp, "missing", type, sizeof(type)), "absent key returns false");
+
+    const char *bindings =
+        "{\"type\":\"bindings\",\"payload\":{\"alias_a\":\"Plan\",\"alias_b\":\"\",\"alias_c\":\"Code\"}}";
+    char alias[8];
+    CHECK(ak_json_str(bindings, "alias_a", alias, sizeof(alias)) &&
+              strcmp(alias, "Plan") == 0,
+          "extract slot A alias");
+    CHECK(ak_json_str(bindings, "alias_b", alias, sizeof(alias)) && alias[0] == '\0',
+          "extract empty slot B alias for default fallback");
+    CHECK(ak_json_str(bindings, "alias_c", alias, sizeof(alias)) &&
+              strcmp(alias, "Code") == 0,
+          "extract slot C alias");
 }
 
 static void test_status_icons(void)

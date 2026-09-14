@@ -7,6 +7,21 @@
 set(APP_PATH ${CMAKE_CURRENT_LIST_DIR})
 set(AK_COMMON_PATH ${APP_PATH}/common)
 
+# VERSION is the firmware's single source of truth. tools/version.py keeps the
+# TuyaOpen profiles synchronized because tos.py also uses CONFIG_PROJECT_VERSION
+# to name and collect build artifacts.
+file(STRINGS "${APP_PATH}/VERSION" AK_PROJECT_VERSION LIMIT_COUNT 1)
+string(STRIP "${AK_PROJECT_VERSION}" AK_PROJECT_VERSION)
+if(NOT AK_PROJECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "Invalid firmware VERSION: '${AK_PROJECT_VERSION}'")
+endif()
+if(DEFINED CONFIG_PROJECT_VERSION AND
+   NOT CONFIG_PROJECT_VERSION STREQUAL AK_PROJECT_VERSION)
+    message(FATAL_ERROR
+        "VERSION (${AK_PROJECT_VERSION}) and CONFIG_PROJECT_VERSION "
+        "(${CONFIG_PROJECT_VERSION}) differ; run tools/version.py set ${AK_PROJECT_VERSION}")
+endif()
+
 # Shared core sources compiled into every variant.
 set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_uart.c
@@ -40,6 +55,10 @@ target_include_directories(${EXAMPLE_LIB}
     PRIVATE
         ${APP_PATH}/include
         ${AK_COMMON_PATH}/include
+)
+
+target_compile_definitions(${EXAMPLE_LIB}
+    PRIVATE PROJECT_VERSION=\"${AK_PROJECT_VERSION}\"
 )
 
 # Transport backend selection (mechanism A). A build profile under config/

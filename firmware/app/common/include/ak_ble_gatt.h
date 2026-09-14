@@ -11,7 +11,7 @@
  *
  * Interface shape mirrors ak_uart exactly so tuya_app_main.c can #define the
  * ak_transport_* aliases against either backend:
- *   - ak_ble_gatt_init()  : bring up BLE, advertise "AK-KB" + service 0x1910,
+ *   - ak_ble_gatt_init()  : bring up BLE, advertise "Agentic Keyboard-XXXXXX" + service 0x1910,
  *                           register the event callback. Returns once the init
  *                           call is issued; the stack signals readiness
  *                           asynchronously via TAL_BLE_STACK_INIT.
@@ -33,7 +33,7 @@
 
 #include "tuya_cloud_types.h"
 
-/** Bring up BLE, advertise "AK-KB" + service 0x1910, register the event cb. */
+/** Bring up BLE, advertise "Agentic Keyboard-XXXXXX" + service 0x1910, register the event cb. */
 OPERATE_RET ak_ble_gatt_init(void);
 
 /**
@@ -59,7 +59,7 @@ int ak_ble_gatt_write(const void *data, uint32_t length);
 bool ak_ble_gatt_take_greet(void);
 
 /**
- * Keep the AK-KB advertisement alive while disconnected. The Tuya cloud
+ * Keep the Agentic Keyboard-XXXXXX advertisement alive while disconnected. The Tuya cloud
  * netmgr also initializes its BLE manager and may stop advertising after MQTT
  * connects; the product loop calls this periodically to restore AK ownership.
  */
@@ -67,7 +67,7 @@ void ak_ble_gatt_maintain(uint32_t now_ms);
 
 /** Link state for the app header. */
 typedef enum {
-    AK_BLE_LINK_ADVERTISING = 0, /* not connected — advertising as AK-KB */
+    AK_BLE_LINK_ADVERTISING = 0, /* not connected — advertising as Agentic Keyboard-XXXXXX */
     AK_BLE_LINK_CONNECTED,       /* central connected, notify not yet subscribed */
     AK_BLE_LINK_LIVE,            /* connected AND subscribed to notify (link live) */
 } ak_ble_link_state_t;

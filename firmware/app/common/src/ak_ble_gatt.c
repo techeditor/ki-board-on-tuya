@@ -5,7 +5,7 @@
  * See ak_ble_gatt.h. Ported from the real-hardware-verified FP-2
  * ble_gatt_link probe (firmware/feature-probes/ble_gatt_link):
  *
- *   - advertise local name "AK-KB" + 16-bit service UUID 0x1910,
+ *   - advertise local name "Agentic Keyboard-XXXXXX" + service UUID,
  *   - use Tuya's built-in BLE common service (chars 0x2B10 notify / 0x2B11 write),
  *   - NOTIFY JSONL frames via tal_ble_server_common_send() only while subscribed,
  *   - receive companion writes in TAL_BLE_EVT_WRITE_REQ -> write_report.report
@@ -21,13 +21,17 @@
 
 #include "ak_ble_gatt.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "tal_api.h"
 #include "tal_bluetooth.h"
+#include "tal_wifi.h"
 #include "tkl_bluetooth.h"
 
-#define BLE_NAME                 "AK-KB"
+#define BLE_NAME_PREFIX          "Agentic Keyboard-"
+#define BLE_NAME_SUFFIX_HEX_LEN  6U
+#define BLE_NAME_MAX_LEN         ((sizeof(BLE_NAME_PREFIX) - 1U) + BLE_NAME_SUFFIX_HEX_LEN)
 #define SERVER_MTU               247U
 #define ADV_MAINTAIN_INTERVAL_MS 1000U
 #define INVALID_BLE_HANDLE       0xFFFFU
@@ -57,10 +61,11 @@ static uint8_t s_adv_data[] = {
     0x03, 0x03, 0x10, 0x19, /* complete list of 16-bit service UUIDs: 0x1910 */
 };
 
-/* Scan response: complete local name "AK-KB". */
-static uint8_t s_scan_rsp[] = {
-    0x06, 0x09, 'A', 'K', '-', 'K', 'B',
-};
+/* Scan response is generated at runtime as Agentic Keyboard-XXXXXX,
+ * where XXXXXX normally comes from the device Wi-Fi MAC suffix. */
+static char    s_ble_name[BLE_NAME_MAX_LEN + 1U];
+static uint8_t s_scan_rsp[BLE_NAME_MAX_LEN + 2U];
+static uint8_t s_scan_rsp_len;
 
 /* ------------------------------------------------------------ RX ring */
 
@@ -79,10 +84,62 @@ static void rx_ring_push(const uint8_t *data, uint32_t n)
 
 /* ------------------------------------------------------------ advertising */
 
+static bool device_address_valid(const uint8_t address[6])
+{
+    bool any_nonzero = false;
+    bool any_not_ff  = false;
+    for (uint8_t i = 0U; i < 6U; i++) {
+        any_nonzero = any_nonzero || address[i] != 0U;
+        any_not_ff  = any_not_ff || address[i] != 0xFFU;
+    }
+    return any_nonzero && any_not_ff;
+}
+
+static void prepare_device_name(void)
+{
+    if (s_scan_rsp_len != 0U) {
+        return;
+    }
+
+    uint8_t  suffix[3];
+    NW_MAC_S wifi_mac = {0};
+    if (tal_wifi_get_mac(WF_STATION, &wifi_mac) == OPRT_OK &&
+        device_address_valid(wifi_mac.mac)) {
+        memcpy(suffix, &wifi_mac.mac[3], sizeof(suffix));
+    } else {
+        TKL_BLE_GAP_ADDR_T ble_address = {0};
+        if (tkl_ble_gap_address_get(&ble_address) == OPRT_OK &&
+            device_address_valid(ble_address.addr)) {
+            memcpy(suffix, &ble_address.addr[3], sizeof(suffix));
+        } else {
+            uint32_t random_suffix = (uint32_t)tal_system_get_random(0xFFFFFFU);
+            suffix[0] = (uint8_t)(random_suffix >> 16);
+            suffix[1] = (uint8_t)(random_suffix >> 8);
+            suffix[2] = (uint8_t)random_suffix;
+            PR_WARN("device address unavailable; BLE name suffix is temporary");
+        }
+    }
+
+    int name_len = snprintf(s_ble_name, sizeof(s_ble_name),
+                            BLE_NAME_PREFIX "%02X%02X%02X",
+                            suffix[0], suffix[1], suffix[2]);
+    if (name_len < 0 || (size_t)name_len > BLE_NAME_MAX_LEN) {
+        /* Compile-time sizes make this unreachable; keep the AD structure safe
+         * if the prefix or suffix format changes later. */
+        name_len = 0;
+        s_ble_name[0] = '\0';
+    }
+    s_scan_rsp[0] = (uint8_t)(name_len + 1);
+    s_scan_rsp[1] = 0x09; /* Complete Local Name. */
+    memcpy(&s_scan_rsp[2], s_ble_name, (size_t)name_len);
+    s_scan_rsp_len = (uint8_t)(name_len + 2);
+}
+
 static void start_advertising(void)
 {
+    prepare_device_name();
     TAL_BLE_DATA_T adv = {.len = sizeof(s_adv_data), .p_data = s_adv_data};
-    TAL_BLE_DATA_T rsp = {.len = sizeof(s_scan_rsp), .p_data = s_scan_rsp};
+    TAL_BLE_DATA_T rsp = {.len = s_scan_rsp_len, .p_data = s_scan_rsp};
     /* update works both while another advertiser is active and while stopped;
      * data_set alone may fail to replace Tuya's already-running advertisement. */
     (void)tal_ble_advertising_data_update(&adv, &rsp);
@@ -101,7 +158,7 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
     case TAL_BLE_STACK_INIT:
         if (event->ble_event.init == 0) {
             start_advertising();
-            PR_NOTICE("BLE ready, advertising as %s", BLE_NAME);
+            PR_NOTICE("BLE ready, advertising as %s", s_ble_name);
         } else {
             PR_ERR("BLE init failed: %d", event->ble_event.init);
         }

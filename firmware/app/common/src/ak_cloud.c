@@ -42,7 +42,7 @@
 #include "tuya_config.h"
 
 #ifndef PROJECT_VERSION
-#define PROJECT_VERSION "0.1.0"
+#define PROJECT_VERSION "0.0.0-dev"
 #endif
 
 #define AK_CLOUD_TASK_STACK 4096
