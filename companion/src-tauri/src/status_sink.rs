@@ -162,7 +162,7 @@ pub struct Handoff {
 }
 
 /// Path of the handoff file: `<config-dir>/ak-companion/hook.json`.
-/// On Windows that resolves under `%LOCALAPPDATA%`, else `~/.config`.
+/// On Windows that resolves under `%APPDATA%` (Roaming), else `~/.config`.
 /// Falls back to `~/.config/ak-companion/hook.json` derived from `HOME` when
 /// the platform config dir cannot be resolved.
 pub fn handoff_path() -> Option<PathBuf> {

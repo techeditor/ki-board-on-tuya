@@ -511,15 +511,16 @@ function App() {
   }
 
   // FP-4b: selected-agent hook install/remove/status. On first discovery,
-  // select all agents to preserve the former one-click install-all behavior.
-  // Later refreshes preserve the user's selection and drop names that vanished.
+  // select the three recommended interactive agents. Later refreshes preserve
+  // the user's selection and drop names that vanished.
   function acceptHookStatus(st: HookStatus) {
     setHookStatus(st);
     const available = st.agents.map((a) => a.agent);
     setSelectedHookAgents((previous) => {
       if (!hookSelectionReadyRef.current) {
         hookSelectionReadyRef.current = true;
-        return available;
+        const recommended = new Set(["kirocrew", "kirocrew-research", "kirocrew-lite"]);
+        return available.filter((agent) => recommended.has(agent));
       }
       const availableSet = new Set(available);
       return previous.filter((agent) => availableSet.has(agent));
@@ -1305,7 +1306,7 @@ function App() {
                     <code> agentSpawn</code>, <code>userPromptSubmit</code>,
                     <code>postToolUse</code> and <code>stop</code>. The hook reads the sink's
                     port + token from
-                    <code> %LOCALAPPDATA%\\ak-companion\\hook.json</code> (Windows) /
+                    <code> %APPDATA%\\ak-companion\\hook.json</code> (Windows) /
                     <code> ~/.config/ak-companion/hook.json</code> (else), so no token needs to
                     be pasted into the config — starting the sink writes it. Example:
                   </p>
