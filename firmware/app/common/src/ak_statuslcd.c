@@ -14,14 +14,22 @@
 #include "tdl_display_draw.h"
 #include "tdl_display_manage.h"
 
-#define STATUSLCD_NAME "ak_statuslcd"
-#define FRAME_BYTES    (AK_STATUSLCD_W * AK_STATUSLCD_H * 2U)
-#define TITLE_H        22U
+#define STATUSLCD_NAME   "ak_statuslcd"
+#define FRAME_BYTES      (AK_STATUSLCD_W * AK_STATUSLCD_H * 2U)
+#define TITLE_H          22U
+#define FLUSH_TIMEOUT_MS 1000U
 
 static TDL_DISP_HANDLE_T      s_disp = NULL;
 static TDL_DISP_DEV_INFO_T    s_info;
 static TDL_DISP_FRAME_BUFF_T *s_frame = NULL;
 static bool                   s_ready = false;
+static volatile bool          s_flush_done = true;
+
+static void ak_statuslcd_on_flush_done(TDL_DISP_FRAME_BUFF_T *frame)
+{
+    (void)frame;
+    s_flush_done = true;
+}
 
 /*
  * CL28CK230-18A ST7789 init: stock sequence with INVON replaced by INVOFF (this
@@ -209,9 +217,37 @@ OPERATE_RET ak_statuslcd_set_brightness(uint8_t brightness)
 
 void ak_statuslcd_flush(void)
 {
-    if (s_ready) {
-        tdl_disp_dev_flush(s_disp, s_frame);
+    if (!s_ready) {
+        return;
     }
+
+    /* The SPI TDD queues the framebuffer pointer and returns immediately. Do
+     * not let the renderer overwrite that PSRAM until the display task has
+     * completed every DMA chunk and invokes free_cb. */
+    s_flush_done = false;
+    s_frame->free_cb = ak_statuslcd_on_flush_done;
+    OPERATE_RET rt = tdl_disp_dev_flush(s_disp, s_frame);
+    if (rt != OPRT_OK) {
+        s_frame->free_cb = NULL;
+        s_flush_done = true;
+        PR_ERR("status LCD flush enqueue failed: %d", rt);
+        return;
+    }
+
+    uint32_t started_ms = tal_system_get_millisecond();
+    while (!s_flush_done &&
+           (uint32_t)(tal_system_get_millisecond() - started_ms) <
+               FLUSH_TIMEOUT_MS) {
+        tal_system_sleep(1U);
+    }
+    if (!s_flush_done) {
+        /* Reusing a buffer still owned by SPI corrupts the panel. Stop future
+         * drawing instead of returning a writable in-flight framebuffer. */
+        PR_ERR("status LCD flush timed out; disabling redraw");
+        s_ready = false;
+        return;
+    }
+    s_frame->free_cb = NULL;
 }
 
 void ak_statuslcd_title(const char *title, uint16_t bar_color)
