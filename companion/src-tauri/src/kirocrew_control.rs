@@ -253,8 +253,11 @@ mod windows_impl {
     type WPARAM = usize;
 
     const INPUT_KEYBOARD: u32 = 1;
+    const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
     const KEYEVENTF_KEYUP: u32 = 0x0002;
     const KEYEVENTF_UNICODE: u32 = 0x0004;
+    const KEYEVENTF_SCANCODE: u32 = 0x0008;
+    const MAPVK_VK_TO_VSC: u32 = 0;
 
     // Virtual-key codes we use for chords / the command bar.
     const VK_RETURN: u16 = 0x0D;
@@ -293,6 +296,7 @@ mod windows_impl {
     #[link(name = "user32")]
     extern "system" {
         fn SendInput(c_inputs: u32, p_inputs: *const INPUT, cb_size: i32) -> u32;
+        fn MapVirtualKeyW(u_code: u32, u_map_type: u32) -> u32;
         fn EnumWindows(lp_enum_func: WNDENUMPROC, l_param: LPARAM) -> BOOL;
         fn GetWindowTextW(hwnd: HWND, lp_string: *mut u16, n_max_count: i32) -> i32;
         fn GetWindowTextLengthW(hwnd: HWND) -> i32;
@@ -341,13 +345,30 @@ mod windows_impl {
         }
     }
 
+    /// Build a physical key event with a scan code whenever Windows can map the
+    /// virtual key. Kiro Crew routes chat shortcuts by `KeyboardEvent.code`
+    /// (`Digit1` … `Digit9`); Chromium/WebView cannot reliably derive that code
+    /// from a SendInput packet whose scan code is zero. Fall back to the virtual
+    /// key for the rare values MapVirtualKeyW cannot map.
     fn vkey_event(vk: u16, key_up: bool) -> INPUT {
+        let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+        let mut flags = if key_up { KEYEVENTF_KEYUP } else { 0 };
+        let extended = matches!(vk, VK_LEFT | VK_UP | VK_RIGHT | VK_DOWN);
+        let (w_vk, w_scan) = if scan != 0 {
+            flags |= KEYEVENTF_SCANCODE;
+            if extended {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+            (0, scan)
+        } else {
+            (vk, 0)
+        };
         INPUT {
             r#type: INPUT_KEYBOARD,
             ki: KEYBDINPUT {
-                w_vk: vk,
-                w_scan: 0,
-                dw_flags: if key_up { KEYEVENTF_KEYUP } else { 0 },
+                w_vk,
+                w_scan,
+                dw_flags: flags,
                 time: 0,
                 dw_extra_info: 0,
             },

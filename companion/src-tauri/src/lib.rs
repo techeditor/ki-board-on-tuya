@@ -169,10 +169,10 @@ mod app {
         /// actions. This is the control path that supersedes route A.
         kc_controller: KiroCrewController,
         kc_router: ControlRouter,
-        /// When false (the default), board key/nav frames are NEVER routed to
-        /// Kiro Crew control — the INPUT view only reflects trigger state. The
-        /// user must explicitly enable control (UI toggle -> set_control_enabled)
-        /// before board events drive the local Kiro Crew window.
+        /// Enabled by default so board events immediately drive the local Kiro
+        /// Crew window. When false, board key/nav frames only reflect trigger
+        /// state in the INPUT view; every board-triggered PC action, including
+        /// K4 / Win+H, is blocked until control is enabled again.
         control_enabled: bool,
         /// FP-4b STATUS ("the eyes"): the running localhost hook sink, if
         /// started. `status_sink_start` sets it; `status_sink_stop` / drop
@@ -943,7 +943,7 @@ mod app {
 
         // FP-4b (route B — "the hands"): map the board event to a control action
         // via the pure router, then drive the local Kiro Crew window (focus +
-        // SendInput). GATED on `control_enabled` (default OFF): while disabled,
+        // SendInput). GATED on `control_enabled` (default ON): while disabled,
         // board key/nav frames only reflect trigger state in the UI and NEVER
         // drive Kiro Crew. Errors (e.g. no window matches) are logged, never
         // fatal to the reader thread.
@@ -988,7 +988,7 @@ mod app {
                 kc_router: ControlRouter::new(crate::kirocrew_control::ControlCtx {
                     jump_chats,
                 }),
-                control_enabled: false,
+                control_enabled: true,
                 status_sink: None,
                 status_token: String::new(),
                 kc_status: HashMap::new(),

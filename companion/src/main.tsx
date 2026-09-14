@@ -73,7 +73,7 @@ const defaultStatus: Status = {
   endpoint: "",
   firmware_version: "",
   last_error: "",
-  control_enabled: false,
+  control_enabled: true,
 };
 
 // Our 5 mechanical keys (k1..k5) with their phase-1 default intents. This is a
@@ -255,9 +255,9 @@ function App() {
     }
   }
 
-  // Enable/disable routing board keys to Kiro Crew control. Default OFF so the
-  // INPUT view only reflects trigger state; the board never drives Kiro Crew
-  // until the user explicitly turns this on.
+  // Enable/disable routing board keys to Kiro Crew control. Default ON so the
+  // Companion is ready to drive Kiro Crew immediately; disabling it still
+  // gates every board-triggered PC action, including K4 / Win+H.
   async function toggleControl(enabled: boolean) {
     await invoke("set_control_enabled", { enabled });
     setStatus((s) => ({ ...s, control_enabled: enabled }));
@@ -826,9 +826,9 @@ function App() {
               </button>
             </div>
             <p className="hint">
-              Default is <strong>disabled</strong>: pressing keys only checks the trigger state here
-              and never drives Kiro Crew. Enable to let board keys/nav control the local Kiro Crew
-              window.
+              Default is <strong>enabled</strong>: board keys/nav drive the local Kiro Crew window,
+              and K4 may activate system dictation. Disable control to keep input visualization
+              while blocking every board-triggered PC action.
             </p>
             <div className="input-row">
               <div className="nav-cluster">
