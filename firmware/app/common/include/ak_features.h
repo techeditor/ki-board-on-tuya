@@ -53,6 +53,13 @@
 #define AK_ENABLE_DISPLAY 1
 #endif
 
+/* Development-only USB/UART0 command that reports the full UUID, the last
+ * four AuthKey characters, and whether the value came from flashed storage or
+ * the compile-time fallback. Release profiles leave this disabled. */
+#ifndef AK_ENABLE_LICENSE_DEBUG_READ
+#define AK_ENABLE_LICENSE_DEBUG_READ 0
+#endif
+
 #if AK_TRANSPORT_DUAL
 /* DUAL = UART0 + BLE GATT together; BLE HID is incompatible with it. */
 #if (AK_TRANSPORT_UART != 1) || (AK_TRANSPORT_BLE_GATT != 1) || AK_TRANSPORT_BLE_HID

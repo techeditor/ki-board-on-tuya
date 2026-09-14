@@ -45,7 +45,9 @@
 /* BLE still greets on notify-subscribe; UART greets immediately (both fire). */
 #define AK_TRANSPORT_GREET_ON_SUBSCRIBE 1
 
-static bool s_transport_rx_is_usb = false;
+static bool     s_transport_rx_is_usb = false;
+static bool     s_ak_ble_active       = false;
+static uint32_t s_ak_ble_retry_at_ms  = 0U;
 
 static bool ak_transport_rx_is_usb(void)
 {
@@ -68,7 +70,9 @@ static int ak_transport_write(const void *data, uint32_t length)
     /* Write to both; report the UART count (BLE silently drops when unsubscribed
      * so its short-write is not an error worth surfacing). */
     int wu = ak_uart_write(data, length);
-    (void)ak_ble_gatt_write(data, length);
+    if (s_ak_ble_active) {
+        (void)ak_ble_gatt_write(data, length);
+    }
     return wu;
 }
 
@@ -82,6 +86,9 @@ static int ak_transport_read(uint8_t *data, uint32_t length)
     if (n > 0) {
         s_transport_rx_is_usb = true;
         return n;
+    }
+    if (!s_ak_ble_active) {
+        return 0;
     }
     n = ak_ble_gatt_read(data, length);
     if (n > 0) {
@@ -117,6 +124,12 @@ static bool ak_transport_rx_is_usb(void)
 
 #ifndef AK_TRANSPORT_GREET_ON_SUBSCRIBE
 #define AK_TRANSPORT_GREET_ON_SUBSCRIBE 0
+#endif
+
+#if AK_TRANSPORT_DUAL
+#define AK_BLE_RUNTIME_ACTIVE() (s_ak_ble_active)
+#else
+#define AK_BLE_RUNTIME_ACTIVE() (true)
 #endif
 
 #define APP_TASK_STACK_SIZE       (5U * 1024U)
@@ -303,6 +316,35 @@ static void send_system_info_uart(void)
         }
     } else {
         PR_WARN("UART0 system info frame too large: %d", length);
+    }
+    transport_unlock();
+#endif
+}
+
+/* Explicit development diagnostic. Keep the reply on the physically trusted
+ * UART0 path even in DUAL builds; never mirror License metadata to BLE. */
+static void send_license_info_uart(void)
+{
+#if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
+    ak_license_debug_info_t info;
+    (void)ak_license_debug_read(&info);
+    PR_NOTICE("license read: source=%s uuid=%s authkey=****%s", info.source, info.uuid,
+              info.authkey_tail);
+
+    char frame[FRAME_BUFFER_SIZE];
+    if (!transport_lock()) {
+        return;
+    }
+    uint32_t sequence = ++s_sequence;
+    int length = ak_proto_license_info(frame, sizeof(frame), sequence, info.source, info.uuid,
+                                       info.authkey_tail);
+    if (length > 0 && length < (int)sizeof(frame)) {
+        int written = ak_uart_write(frame, (uint32_t)length);
+        if (written != length) {
+            PR_WARN("UART0 license info short write: %d/%d", written, length);
+        }
+    } else {
+        PR_WARN("UART0 license info frame too large: %d", length);
     }
     transport_unlock();
 #endif
@@ -1495,6 +1537,15 @@ static void on_rx_line(const char *line)
         }
         send_ack(seq);
         send_system_info_uart();
+    } else if (strcmp(type, "license_read") == 0) {
+        if (!ak_transport_rx_is_usb()) {
+            PR_WARN("license read rejected: USB transport required");
+            return;
+        }
+        uint32_t seq = 0;
+        ak_json_uint(line, "seq", &seq);
+        send_license_info_uart();
+        send_ack(seq);
     } else if (strcmp(type, "display") == 0) {
         uint32_t chat_slot = 0U;
         char     agent[32] = "";
@@ -1595,15 +1646,25 @@ static void user_main(void)
     ak_render_status();
 #endif
 #if AK_TRANSPORT_DUAL
-    /* Cloud netmgr has already initialized TAL's common GATT service. Do NOT
-     * call tal_ble_bt_init() a second time: T5's one-shot service guard would
-     * leave TAL's rewritten characteristic handles invalid, making every
-     * notify fail even though the Agentic Keyboard advertisement connects. Non-cloud DUAL still needs the
-     * normal first-time BLE initialization. */
+    /* The T5 exposes one global BLE callback set. While unactivated, leave it
+     * with Tuya BLE/SoftAP provisioning; UART0 remains available to Companion.
+     * Once activation succeeds the app loop takes over the already-created GATT
+     * service without a second tal_ble_bt_init(). */
+    OPERATE_RET ble_rt = OPRT_OK;
 #if AK_ASR_BOARD_CLOUD
-    OPERATE_RET ble_rt = ak_ble_gatt_takeover();
+    if (cloud_rt == OPRT_OK && ak_cloud_network_ready() &&
+        !ak_cloud_activated()) {
+        PR_NOTICE("dual: AK BLE deferred; Tuya BLE/SoftAP provisioning active (UART0 available)");
+    } else if (ak_cloud_network_ready()) {
+        ble_rt = ak_ble_gatt_takeover();
+        s_ak_ble_active = (ble_rt == OPRT_OK);
+    } else {
+        ble_rt = ak_ble_gatt_init();
+        s_ak_ble_active = (ble_rt == OPRT_OK);
+    }
 #else
-    OPERATE_RET ble_rt = ak_ble_gatt_init();
+    ble_rt = ak_ble_gatt_init();
+    s_ak_ble_active = (ble_rt == OPRT_OK);
 #endif
     if (ble_rt != OPRT_OK) {
         PR_ERR("dual: delayed AK BLE setup failed: %d (UART remains available)", ble_rt);
@@ -1711,26 +1772,47 @@ static void user_main(void)
         }
 #endif
 
+#if AK_TRANSPORT_DUAL && AK_ASR_BOARD_CLOUD
+        if (!s_ak_ble_active && ak_cloud_network_ready() &&
+            ak_cloud_activated() &&
+            (s_ak_ble_retry_at_ms == 0U ||
+             (int32_t)(now - s_ak_ble_retry_at_ms) >= 0)) {
+            OPERATE_RET takeover_rt = ak_ble_gatt_takeover();
+            if (takeover_rt == OPRT_OK) {
+                s_ak_ble_active = true;
+                PR_NOTICE("dual: Tuya activation complete; AK BLE transport active");
+            } else {
+                s_ak_ble_retry_at_ms = now + 1000U;
+                PR_WARN("dual: AK BLE takeover after activation failed: %d; retrying in 1s",
+                        takeover_rt);
+            }
+        }
+#endif
+
 #if AK_TRANSPORT_BLE_GATT
-        ak_ble_gatt_maintain(now);
+        if (AK_BLE_RUNTIME_ACTIVE()) {
+            ak_ble_gatt_maintain(now);
+        }
 #endif
 
 #if AK_TRANSPORT_GREET_ON_SUBSCRIBE
-        /* When a central subscribes to notifications, the link is live: greet. */
-        if (ak_ble_gatt_take_greet()) {
-            send_hello_ack();
-        }
-        /* Report BLE advertising/connected/live transitions on UART0 and
-         * refresh the LCD header when present. */
-        {
-            static ak_ble_link_state_t s_last_link = (ak_ble_link_state_t)-1;
-            ak_ble_link_state_t        link = ak_ble_gatt_link_state();
-            if (link != s_last_link) {
-                s_last_link = link;
-                send_system_info_uart();
+        if (AK_BLE_RUNTIME_ACTIVE()) {
+            /* When a central subscribes to notifications, the link is live: greet. */
+            if (ak_ble_gatt_take_greet()) {
+                send_hello_ack();
+            }
+            /* Report BLE advertising/connected/live transitions on UART0 and
+             * refresh the LCD header when present. */
+            {
+                static ak_ble_link_state_t s_last_link = (ak_ble_link_state_t)-1;
+                ak_ble_link_state_t        link = ak_ble_gatt_link_state();
+                if (link != s_last_link) {
+                    s_last_link = link;
+                    send_system_info_uart();
 #if AK_ENABLE_DISPLAY
-                ak_refresh_link_header();
+                    ak_refresh_link_header();
 #endif
+                }
             }
         }
 #endif

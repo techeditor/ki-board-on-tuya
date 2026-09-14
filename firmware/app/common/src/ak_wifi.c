@@ -65,6 +65,14 @@ const char *ak_license_result_str(ak_license_result_t r)
 #include "netconn_wifi.h"
 #include "tuya_authorize.h"
 #include "tuya_iot.h"
+#if AK_ENABLE_LICENSE_DEBUG_READ
+#include "tuya_config.h"
+#endif
+
+/* TuyaOpen's current netconn_wifi backend exports this persistence helper but
+ * does not declare it in netconn_wifi.h. Use the SDK-owned implementation so
+ * its "netinfo" storage format and factory-reset behavior stay aligned. */
+extern OPERATE_RET __netconn_wifi_info_set(netconn_wifi_info_t *info);
 
 static void __netmgr_status_cb(netmgr_type_e type, netmgr_status_e status)
 {
@@ -139,8 +147,19 @@ void ak_wifi_connect(const char *ssid, const char *pass)
     if (pass) {
         strncpy(info.pswd, pass, sizeof(info.pswd) - 1);
     }
+
+    /* NETCONN_CMD_SSID_PSWD only updates RAM in this SDK. Persist through the
+     * backend helper first so an activated device can reconnect after reboot;
+     * EVENT_RESET deletes the same record during three-boot provisioning reset. */
+    OPERATE_RET rt = __netconn_wifi_info_set(&info);
+    if (rt != OPRT_OK) {
+        PR_ERR("ak_wifi: persist SSID_PSWD failed: %d", rt);
+        report_status(AK_WIFI_FAILED, info.ssid);
+        return;
+    }
+
     report_status(AK_WIFI_CONNECTING, info.ssid);
-    OPERATE_RET rt = netmgr_conn_set(NETCONN_AUTO, NETCONN_CMD_SSID_PSWD, &info);
+    rt = netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_SSID_PSWD, &info);
     if (rt != OPRT_OK) {
         PR_ERR("ak_wifi: netmgr set SSID_PSWD failed: %d", rt);
         report_status(AK_WIFI_FAILED, s_current_ssid);
@@ -170,6 +189,37 @@ bool ak_license_present(void)
         return false;
     }
     return lic.uuid != NULL && lic.uuid[0] != '\0';
+}
+
+bool ak_license_debug_read(ak_license_debug_info_t *info)
+{
+    if (info == NULL) {
+        return false;
+    }
+    memset(info, 0, sizeof(*info));
+#if AK_ENABLE_LICENSE_DEBUG_READ
+    tuya_iot_license_t lic = {0};
+    if (tuya_authorize_read(&lic) == OPRT_OK) {
+        info->source = "flashed";
+    } else {
+        lic.uuid     = TUYA_OPENSDK_UUID;
+        lic.authkey  = TUYA_OPENSDK_AUTHKEY;
+        info->source = "compile_time";
+    }
+    if (lic.uuid == NULL || lic.uuid[0] == '\0' || lic.authkey == NULL || lic.authkey[0] == '\0') {
+        info->source = "missing";
+        return false;
+    }
+
+    (void)snprintf(info->uuid, sizeof(info->uuid), "%s", lic.uuid);
+    size_t      authkey_len = strlen(lic.authkey);
+    const char *tail        = authkey_len > 4U ? lic.authkey + authkey_len - 4U : lic.authkey;
+    (void)snprintf(info->authkey_tail, sizeof(info->authkey_tail), "%s", tail);
+    return true;
+#else
+    info->source = "disabled";
+    return false;
+#endif
 }
 
 #else /* !AK_ASR_BOARD_CLOUD — stub (no wifi stack in this profile) */
@@ -204,6 +254,15 @@ ak_license_result_t ak_license_write(const char *uuid, const char *authkey)
 
 bool ak_license_present(void)
 {
+    return false;
+}
+
+bool ak_license_debug_read(ak_license_debug_info_t *info)
+{
+    if (info != NULL) {
+        memset(info, 0, sizeof(*info));
+        info->source = "unavailable";
+    }
     return false;
 }
 

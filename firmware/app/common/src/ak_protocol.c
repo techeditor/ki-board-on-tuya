@@ -213,6 +213,23 @@ int ak_proto_license_status(char *buf, size_t size, uint32_t seq, const char *st
     return writer_finish(&writer);
 }
 
+int ak_proto_license_info(char *buf, size_t size, uint32_t seq, const char *source,
+                          const char *uuid, const char *authkey_tail)
+{
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"license_info\",\"payload\":{\"source\":");
+    writer_json_string(&writer, source);
+    writer_raw(&writer, ",\"uuid\":");
+    writer_json_string(&writer, uuid);
+    writer_raw(&writer, ",\"authkey_tail\":");
+    writer_json_string(&writer, authkey_tail);
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
 int ak_proto_system_info(char *buf, size_t size, uint32_t seq,
                          const char *fw, const char *transport,
                          const char *wifi_name, const char *wifi_state,

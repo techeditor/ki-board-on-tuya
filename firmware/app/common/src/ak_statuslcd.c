@@ -9,6 +9,7 @@
 
 #include "ak_board_io.h"
 #include "ak_icons16.h"
+#include "armstar.h"
 #include "tal_api.h"
 #include "tdd_disp_st7789.h"
 #include "tdd_display_spi.h"
@@ -19,6 +20,11 @@
 #define FRAME_BYTES      (AK_STATUSLCD_W * AK_STATUSLCD_H * 2U)
 #define TITLE_H          22U
 #define FLUSH_TIMEOUT_MS 1000U
+
+/* T5AI's SPI DMA adapter does not populate the actual source range used by its
+ * generic cache-maintenance path. Explicitly synchronize the PSRAM framebuffer
+ * before queueing it, otherwise Wi-Fi/cloud activity can evict dirty cache
+ * lines while DMA is reading stale pixels. */
 
 static TDL_DISP_HANDLE_T      s_disp = NULL;
 static TDL_DISP_DEV_INFO_T    s_info;
@@ -260,6 +266,11 @@ void ak_statuslcd_flush(void)
         PR_ERR("status LCD window restore failed: %d", rt);
         return;
     }
+
+    /* The frame lives in cacheable PSRAM. The T5 SPI DMA path does not clean
+     * this actual address range, so make every completed software render
+     * visible to DMA before it starts reading the frame. */
+    SCB_CleanDCache_by_Addr((uint32_t *)s_frame->frame, (int32_t)s_frame->len);
 
     s_flush_done = false;
     s_frame->free_cb = ak_statuslcd_on_flush_done;

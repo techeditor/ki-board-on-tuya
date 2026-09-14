@@ -25,6 +25,7 @@
 #include "tuya_iot.h"
 #include "tuya_iot_dp.h"
 #include "netmgr.h"
+#include "mqtt_bind.h"
 #include "tuya_authorize.h"
 #include "board_com_api.h"
 #if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
@@ -49,8 +50,10 @@
 
 static tuya_iot_client_t  s_ai_client;
 static tuya_iot_license_t s_license;
-static THREAD_HANDLE      s_iot_thread = NULL;
-static bool               s_iot_ready  = false;
+static THREAD_HANDLE      s_iot_thread      = NULL;
+static bool               s_iot_ready       = false;
+static bool               s_netmgr_ready    = false;
+static volatile bool      s_cloud_activated = false;
 
 /* netmgr link state -> tuya_iot network_check hook. */
 static bool __network_check(void)
@@ -71,11 +74,16 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
     }
     switch (event->id) {
     case TUYA_EVENT_BIND_START:
+        s_cloud_activated = false;
         PR_NOTICE("cloud: bind start (device awaiting Wi-Fi provisioning)");
 #if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
         /* Networking prompt tone (联网提示音) — same as FP-3's BIND_START. */
         ai_audio_player_alert(AI_AUDIO_ALERT_NETWORK_CFG);
 #endif
+        break;
+    case TUYA_EVENT_ACTIVATE_SUCCESSED:
+        s_cloud_activated = true;
+        PR_NOTICE("cloud: activation succeeded; AK BLE takeover is now allowed");
         break;
     case TUYA_EVENT_MQTT_CONNECTED:
         /* No prompt tone here — FP-3 does not play one on MQTT_CONNECTED, and the
@@ -92,6 +100,7 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
     case TUYA_EVENT_RESET:
         /* App-initiated unbind / factory reset requested (matches FP-3). Device
          * application data is cleared by the SDK; nothing extra to persist here. */
+        s_cloud_activated = false;
         PR_NOTICE("cloud: device reset requested (type=%d)", (int)event->value.asInteger);
         break;
     case TUYA_EVENT_RESET_COMPLETE:
@@ -109,19 +118,45 @@ OPERATE_RET ak_cloud_init(void)
 {
     OPERATE_RET rt;
 
-    /* KV + core services the IoT stack depends on (idempotent on this platform;
-     * mirrors the FP-3 user_main init order). */
-    tal_kv_init(&(tal_kv_cfg_t){
+    s_iot_ready       = false;
+    s_netmgr_ready    = false;
+    s_cloud_activated = false;
+
+    /* KV + core services the IoT stack depends on. A partial initialization
+     * must not be reported as cloud-ready: later netmgr/IoT calls otherwise
+     * fail opaquely or spin forever. */
+    rt = tal_kv_init(&(tal_kv_cfg_t){
         .seed = "vmlkasdh93dlvlcy",
         .key  = "dflfuap134ddlduq",
     });
-    tal_sw_timer_init();
-    tal_workq_init();
-    tal_time_service_init();
-    tuya_authorize_init();
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: tal_kv_init failed: %d", rt);
+        return rt;
+    }
+    rt = tal_sw_timer_init();
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: tal_sw_timer_init failed: %d", rt);
+        return rt;
+    }
+    rt = tal_workq_init();
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: tal_workq_init failed: %d", rt);
+        return rt;
+    }
+    rt = tal_time_service_init();
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: tal_time_service_init failed: %d", rt);
+        return rt;
+    }
+    rt = tuya_authorize_init();
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: tuya_authorize_init failed: %d", rt);
+        return rt;
+    }
 
-    /* FP-3 recovery path: three resets inside five seconds clear only Tuya
-     * activation/network data. UUID/AuthKey authorization is stored separately. */
+    /* FP-3 recovery path: three physical power cycles inside five seconds clear
+     * only Tuya activation/network data. UUID/AuthKey authorization is stored
+     * separately. */
     rt = ak_reset_netcfg_start();
     if (rt != OPRT_OK) {
         PR_WARN("cloud: netcfg reset counter start failed: %d", rt);
@@ -147,8 +182,11 @@ OPERATE_RET ak_cloud_init(void)
         PR_ERR("cloud: tuya_iot_init failed: %d", rt);
         return rt;
     }
+    s_cloud_activated = tuya_iot_activated(&s_ai_client);
 
-    /* Network manager: Wi-Fi (BLE + SoftAP netcfg). */
+    /* Network manager: Wi-Fi plus Tuya BLE/SoftAP provisioning. AK's own GATT
+     * transport must not take over the shared BLE callbacks until activation
+     * succeeds; the app enforces that boundary with ak_cloud_activated(). */
     netmgr_type_e type = 0;
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
     type |= NETCONN_WIFI;
@@ -156,18 +194,28 @@ OPERATE_RET ak_cloud_init(void)
 #if defined(ENABLE_WIRED) && (ENABLE_WIRED == 1)
     type |= NETCONN_WIRED;
 #endif
-    netmgr_init(type);
+    rt = netmgr_init(type);
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: netmgr_init failed: %d", rt);
+        return rt;
+    }
+    s_netmgr_ready = true;
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
-#if AK_TRANSPORT_BLE_GATT
-    /* TAL exposes one BLE callback/advertiser. Tuya BLE netcfg and AK JSONL GATT
-     * cannot own it simultaneously, so cloud+AK builds pair through the official
-     * SoftAP netcfg path while BLE remains dedicated to the companion. */
-    netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_NETCFG,
-                    &(netcfg_args_t){.type = NETCFG_TUYA_WIFI_AP});
-#else
-    netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_NETCFG,
-                    &(netcfg_args_t){.type = NETCFG_TUYA_BLE | NETCFG_TUYA_WIFI_AP});
-#endif
+    rt = netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_NETCFG,
+                         &(netcfg_args_t){.type = NETCFG_TUYA_BLE | NETCFG_TUYA_WIFI_AP});
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: configure Tuya BLE/SoftAP netcfg failed: %d", rt);
+        return rt;
+    }
+
+    /* Wi-Fi's SDK backend normally registers only App-driven BLE/AP token
+     * acquisition. Register MQTT bind as a second provider so credentials sent
+     * over trusted UART can bring the radio online before cloud activation. */
+    rt = tuya_iot_token_get_port_register(&s_ai_client, mqtt_bind_token_get);
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: register MQTT bind token provider failed: %d", rt);
+        return rt;
+    }
 #endif
 
     s_iot_ready = true;
@@ -192,17 +240,37 @@ OPERATE_RET ak_cloud_init(void)
  * keepalive. Kept off the app's input/RX loop so key latency is unaffected. */
 static void __iot_task(void *arg)
 {
-    OPERATE_RET rt = OPRT_OK;
+    OPERATE_RET rt;
+    OPERATE_RET last_yield_error = OPRT_OK;
     (void)arg;
-    tuya_iot_start(&s_ai_client);
+
+    rt = tuya_iot_start(&s_ai_client);
+    if (rt != OPRT_OK) {
+        PR_ERR("cloud: tuya_iot_start failed: %d; IoT task stopped", rt);
+        tal_thread_delete(s_iot_thread);
+        s_iot_thread = NULL;
+        return;
+    }
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
     /* FP-3 keeps Wi-Fi fully awake unless its optional app_lowpower module is
      * enabled; the product does not enable that module. */
     tkl_wifi_set_lp_mode(0, 0);
 #endif
-    TUYA_CALL_ERR_LOG(ak_reset_netcfg_check());
+    rt = ak_reset_netcfg_check();
+    if (rt != OPRT_OK) {
+        PR_WARN("cloud: netcfg reset check failed: %d", rt);
+    }
     for (;;) {
-        tuya_iot_yield(&s_ai_client);
+        rt = tuya_iot_yield(&s_ai_client);
+        if (rt != OPRT_OK) {
+            if (rt != last_yield_error) {
+                PR_WARN("cloud: tuya_iot_yield failed: %d; retrying", rt);
+                last_yield_error = rt;
+            }
+            tal_system_sleep(100U);
+        } else {
+            last_yield_error = OPRT_OK;
+        }
     }
 }
 
@@ -220,6 +288,16 @@ OPERATE_RET ak_cloud_start(void)
     return tal_thread_create_and_start(&s_iot_thread, NULL, NULL, __iot_task, NULL, &cfg);
 }
 
+bool ak_cloud_network_ready(void)
+{
+    return s_netmgr_ready;
+}
+
+bool ak_cloud_activated(void)
+{
+    return s_cloud_activated;
+}
+
 bool ak_cloud_compiled(void)
 {
     return true;
@@ -235,6 +313,16 @@ OPERATE_RET ak_cloud_init(void)
 OPERATE_RET ak_cloud_start(void)
 {
     return OPRT_OK;
+}
+
+bool ak_cloud_network_ready(void)
+{
+    return false;
+}
+
+bool ak_cloud_activated(void)
+{
+    return false;
 }
 
 bool ak_cloud_compiled(void)

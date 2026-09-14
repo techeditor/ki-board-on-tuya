@@ -68,6 +68,15 @@ typedef enum {
     AK_LICENSE_FAILED,      /* write failed / not supported (stub) */
 } ak_license_result_t;
 
+#define AK_LICENSE_UUID_CAPACITY         40U
+#define AK_LICENSE_AUTHKEY_TAIL_CAPACITY 5U
+
+typedef struct {
+    char        uuid[AK_LICENSE_UUID_CAPACITY];
+    char        authkey_tail[AK_LICENSE_AUTHKEY_TAIL_CAPACITY];
+    const char *source;
+} ak_license_debug_info_t;
+
 const char *ak_license_result_str(ak_license_result_t r);
 
 /** Write UUID + AuthKey to persistent storage. Idempotent-ish: overwrites any
@@ -77,5 +86,10 @@ ak_license_result_t ak_license_write(const char *uuid, const char *authkey);
 /** True if the device already has a license stored (so the UI can show it is
  *  provisioned without echoing the secret). */
 bool ak_license_present(void);
+
+/** Read non-secret diagnostics for an explicit USB/UART0 request. Returns the
+ *  full UUID, at most the last four AuthKey characters, and a source string:
+ *  "flashed", "compile_time", "missing", "disabled", or "unavailable". */
+bool ak_license_debug_read(ak_license_debug_info_t *info);
 
 #endif /* AK_WIFI_H */

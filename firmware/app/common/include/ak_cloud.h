@@ -35,6 +35,12 @@ OPERATE_RET ak_cloud_init(void);
  *  blocked. No-op in the stub. Call AFTER ak_asr_init(). */
 OPERATE_RET ak_cloud_start(void);
 
+/** True only when netmgr initialized successfully and owns the platform network/BLE stack. */
+bool ak_cloud_network_ready(void);
+
+/** True after valid Tuya activation data is loaded or a provisioning flow activates the device. */
+bool ak_cloud_activated(void);
+
 /** True only when the real backend is compiled in (AK_ASR_BOARD_CLOUD=1).
  *  The stub returns false so callers can log "cloud off". */
 bool ak_cloud_compiled(void);

@@ -55,6 +55,9 @@ target_include_directories(${EXAMPLE_LIB}
     PRIVATE
         ${APP_PATH}/include
         ${AK_COMMON_PATH}/include
+        # T5AI SPI DMA needs an explicit cache clean for PSRAM framebuffers.
+        ${CMAKE_SOURCE_DIR}/platform/T5AI/t5_os/ap/components/cmsis/CMSIS_5/CMSIS/Core/Include
+        ${CMAKE_SOURCE_DIR}/platform/T5AI/t5_os/ap/components/cmsis/CMSIS_5/Device/Beken/armstar
 )
 
 target_compile_definitions(${EXAMPLE_LIB}
@@ -76,4 +79,10 @@ endif()
 # Board-side cloud ASR (ai_chat). Independent of the transport selection above.
 if (CONFIG_AK_ASR_BOARD_CLOUD STREQUAL "y")
     target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_ASR_BOARD_CLOUD=1)
+endif()
+
+# Opt-in development diagnostic. The request is accepted only over UART0 and
+# never returns more than the last four AuthKey characters.
+if (CONFIG_AK_LICENSE_DEBUG_READ STREQUAL "y")
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE AK_ENABLE_LICENSE_DEBUG_READ=1)
 endif()

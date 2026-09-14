@@ -62,6 +62,13 @@ pub fn describe_inbound(frame: &Inbound) -> String {
         Inbound::LicenseStatus { seq, payload } => {
             format!("license_status {}{}", payload.state, seq_suffix(*seq))
         }
+        Inbound::LicenseInfo { seq, payload } => format!(
+            "license_info source={} uuid={} authkey=****{}{}",
+            payload.source,
+            payload.uuid,
+            payload.authkey_tail,
+            seq_suffix(*seq)
+        ),
         Inbound::SystemInfo { seq, payload } => format!(
             "system_info fw={} transport={} wifi={}({}) ble={}({}) cloud={} license={}{}",
             payload.fw,
@@ -140,6 +147,11 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
         }),
         Inbound::LicenseStatus { seq, payload } => json!({
             "kind": "license_status", "seq": seq, "state": payload.state
+        }),
+        Inbound::LicenseInfo { seq, payload } => json!({
+            "kind": "license_info", "seq": seq,
+            "source": payload.source, "uuid": payload.uuid,
+            "authkey_tail": payload.authkey_tail
         }),
         Inbound::SystemInfo { seq, payload } => json!({
             "kind": "system_info", "seq": seq,
@@ -533,6 +545,13 @@ mod app {
             state.inner(),
             &protocol::license_payload(uuid.trim(), authkey.trim()),
         )
+    }
+
+    /// Request development-safe License diagnostics. The board replies only on
+    /// UART0 with the full UUID, AuthKey last four characters, and value source.
+    #[tauri::command]
+    fn read_license(state: State<Shared>) -> Result<(), String> {
+        write_board_usb_only(state.inner(), &protocol::license_read_payload())
     }
 
     /// FP-5: choose which ASR handles a board voice event. `cloud` = board mic +
@@ -1079,6 +1098,7 @@ mod app {
         | Inbound::Voice { seq: Some(seq), .. }
         | Inbound::Macro { seq: Some(seq), .. }
         | Inbound::Asr { seq: Some(seq), .. }
+        | Inbound::LicenseInfo { seq: Some(seq), .. }
         | Inbound::SystemInfo { seq: Some(seq), .. }
         | Inbound::DeviceSettings { seq: Some(seq), .. } = &frame
         {
@@ -1110,6 +1130,18 @@ mod app {
         if let Inbound::LicenseStatus { payload, .. } = &frame {
             let _ = app.emit("license-status", payload.state.clone());
             log_line(app, format!("[LICENSE] {}", payload.state));
+        }
+
+        // Explicit USB-only diagnostic: UUID is visible, AuthKey remains masked.
+        if let Inbound::LicenseInfo { payload, .. } = &frame {
+            let _ = app.emit("license-info", payload.clone());
+            log_line(
+                app,
+                format!(
+                    "[LICENSE] source={} uuid={} authkey=****{}",
+                    payload.source, payload.uuid, payload.authkey_tail
+                ),
+            );
         }
 
         // AK owns the applied runtime values. Mirror every hello/local/remote
@@ -1238,6 +1270,7 @@ mod app {
                 set_device_settings,
                 send_wifi,
                 send_license,
+                read_license,
                 set_voice_source,
                 kc_bind_window,
                 kc_send_text,

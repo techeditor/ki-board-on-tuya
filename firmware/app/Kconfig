@@ -24,6 +24,11 @@ config AK_ASR_BOARD_CLOUD
     default n
     select ENABLE_AI_COMPONENTS
 
+config AK_LICENSE_DEBUG_READ
+    bool "Enable UART0 License diagnostics (full UUID + AuthKey last 4)"
+    default n
+    depends on AK_ASR_BOARD_CLOUD
+
 config TUYA_PRODUCT_ID
     string "product ID (bound to an AI agent) for cloud ASR"
     default ""

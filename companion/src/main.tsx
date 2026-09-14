@@ -25,6 +25,12 @@ type DeviceSettings = {
   brightness: number;
 };
 
+type LicenseInfo = {
+  source: string;
+  uuid: string;
+  authkey_tail: string;
+};
+
 type SerialPortInfo = {
   name: string;
   kind: string;
@@ -37,7 +43,7 @@ type BleDeviceInfo = {
 
 // Flat board-event object emitted by `inbound_to_json` in the backend.
 type BoardEvent = {
-  kind: "key" | "nav" | "voice" | "macro" | "device_settings" | "system_info" | "hello_ack" | "ping" | "pong" | "unknown";
+  kind: "key" | "nav" | "voice" | "macro" | "license_info" | "device_settings" | "system_info" | "hello_ack" | "ping" | "pong" | "unknown";
   seq?: number | null;
   id?: string;
   dir?: string;
@@ -55,6 +61,9 @@ type BoardEvent = {
   ble_state?: string;
   cloud?: string;
   license?: string;
+  source?: string;
+  uuid?: string;
+  authkey_tail?: string;
   type?: string;
 };
 
@@ -161,6 +170,7 @@ function App() {
   const [licAuthkey, setLicAuthkey] = useState("");
   const [licStatus, setLicStatus] = useState("");
   const [licBusy, setLicBusy] = useState(false);
+  const [licInfo, setLicInfo] = useState<LicenseInfo | null>(null);
   const [deviceSettings, setDeviceSettings] = useState<DeviceSettings>({
     volume: defaultStatus.device_volume,
     brightness: defaultStatus.device_brightness,
@@ -247,6 +257,7 @@ function App() {
   }
 
   async function connect() {
+    setLicInfo(null);
     if (transportMode === "ble") {
       if (!selectedBle) {
         throw new Error("Scan and select an AK-KB device first.");
@@ -274,6 +285,7 @@ function App() {
 
   async function disconnect() {
     await invoke("disconnect_device");
+    setLicInfo(null);
     await refreshRuntime();
   }
 
@@ -377,6 +389,26 @@ function App() {
       setLicStatus("writing…");
       await invoke("send_license", { uuid: licUuid.trim(), authkey: licAuthkey.trim() });
       setLicStatus("sent, waiting for board…");
+    } catch (error) {
+      setLicStatus("");
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLicBusy(false);
+    }
+  }
+
+  async function readLicense() {
+    if (!usbProvisioningAvailable) {
+      setUiError("Connect the board over USB before reading License diagnostics.");
+      return;
+    }
+    setLicBusy(true);
+    try {
+      setUiError("");
+      setLicStatus("reading…");
+      setLicInfo(null);
+      await invoke("read_license");
+      setLicStatus("read request sent…");
     } catch (error) {
       setLicStatus("");
       setUiError(error instanceof Error ? error.message : String(error));
@@ -636,6 +668,11 @@ function App() {
       setLicStatus(event.payload);
     });
 
+    const unlistenLicenseInfo = listen<LicenseInfo>("license-info", (event) => {
+      setLicInfo(event.payload);
+      setLicStatus(`read · ${event.payload.source}`);
+    });
+
     // The AK reports authoritative values after hello and every local/remote change.
     const unlistenDeviceSettings = listen<DeviceSettings>("device-settings", (event) => {
       setDeviceSettings(event.payload);
@@ -681,6 +718,7 @@ function App() {
       unlistenVoiceSource.then((fn) => fn());
       unlistenWifi.then((fn) => fn());
       unlistenLicense.then((fn) => fn());
+      unlistenLicenseInfo.then((fn) => fn());
       unlistenDeviceSettings.then((fn) => fn());
     };
   }, []);
@@ -945,6 +983,13 @@ function App() {
               >
                 Write license
               </button>
+              <button
+                className="secondary"
+                disabled={!usbProvisioningAvailable || licBusy}
+                onClick={() => runAction(readLicense)}
+              >
+                Read license info
+              </button>
             </div>
             <div className="lcd" style={{ marginTop: 6 }}>
               <span>LICENSE</span>
@@ -952,10 +997,16 @@ function App() {
                 {licStatus || "-- (not written)"}
               </strong>
             </div>
+            {licInfo && (
+              <p className="hint">
+                Source: <code>{licInfo.source}</code> · UUID: <code>{licInfo.uuid || "--"}</code> ·
+                AuthKey: <code>{licInfo.authkey_tail ? `****${licInfo.authkey_tail}` : "--"}</code>
+              </p>
+            )}
             <p className={`hint ${usbProvisioningAvailable ? "good-text" : "warn-text"}`}>
               USB connection required. UUID/AuthKey cannot be written over BLE. The license is
-              stored on the board; the PID remains compile-time, and Companion never stores or
-              echoes the secret.
+              stored on the board; the PID remains compile-time. Debug read shows the full UUID
+              and only the last four AuthKey characters; Companion never persists the secret.
             </p>
           </Panel>
         )}

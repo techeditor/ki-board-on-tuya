@@ -33,6 +33,10 @@ int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state
    `state` is "written" / "failed" / "present" (already had one). No secret is
    ever echoed back. */
 int ak_proto_license_status(char *buf, size_t size, uint32_t seq, const char *state);
+/* Board -> UART0: explicit development diagnostic. UUID is complete, while
+   authkey_tail contains at most four characters and never the full secret. */
+int ak_proto_license_info(char *buf, size_t size, uint32_t seq, const char *source,
+                          const char *uuid, const char *authkey_tail);
 /* Board -> UART0: consolidated system feedback for diagnostics and Companion logs. */
 int ak_proto_system_info(char *buf, size_t size, uint32_t seq,
                          const char *fw, const char *transport,

@@ -203,6 +203,18 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 - UUID/AuthKey 写入 AK 持久存储；PID 为产品级编译时配置。
 - Companion 不持久化或回显 AuthKey，AK 只回报写入状态。
 
+### license_read / license_info（开发调试，仅 USB）
+
+```json
+{"v":1,"type":"license_read"}
+{"v":1,"seq":20,"type":"license_info","payload":{"source":"flashed","uuid":"...","authkey_tail":"ABCD"}}
+```
+
+- 请求和响应都只允许物理 USB/UART0；DUAL 固件不得将响应镜像到 BLE。
+- `source`：`flashed` / `compile_time` / `missing` / `disabled` / `unavailable`。
+- UUID 完整返回；AuthKey 永远只返回最后四个字符。Companion 不持久化返回值。
+- 该命令由 `CONFIG_AK_LICENSE_DEBUG_READ=y` 显式启用，发布 profile 默认关闭。
+
 ### ack
 
 ```json

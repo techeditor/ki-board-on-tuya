@@ -202,6 +202,12 @@ static void test_protocol(void)
               "{\"v\":1,\"seq\":14,\"type\":\"license_status\",\"payload\":{\"state\":\"written\"}}\n",
               "license_status frame");
 
+    ak_proto_license_info(buf, sizeof(buf), 15, "flashed", "uuid123", "CDEF");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":15,\"type\":\"license_info\",\"payload\":{"
+              "\"source\":\"flashed\",\"uuid\":\"uuid123\",\"authkey_tail\":\"CDEF\"}}\n",
+              "license_info frame");
+
     {
         char info[384];
         ak_proto_system_info(info, sizeof(info), 15, "0.1.1", "dual",

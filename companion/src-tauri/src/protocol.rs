@@ -132,6 +132,14 @@ pub fn license_payload(uuid: &str, authkey: &str) -> Value {
     })
 }
 
+/// PC -> board: explicitly request masked License diagnostics over USB/UART0.
+pub fn license_read_payload() -> Value {
+    serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "type": "license_read"
+    })
+}
+
 /// PC -> board: acknowledge a board event by its sequence number.
 pub fn ack_payload(seq: u64) -> Value {
     serde_json::json!({
@@ -257,6 +265,16 @@ pub struct LicenseStatusPayload {
     pub state: String,
 }
 
+/// `license_info` payload: full UUID plus only the last four AuthKey chars.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LicenseInfoPayload {
+    pub source: String,
+    #[serde(default)]
+    pub uuid: String,
+    #[serde(default)]
+    pub authkey_tail: String,
+}
+
 /// `system_info` payload: consolidated diagnostics emitted on UART0.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SystemInfoPayload {
@@ -355,6 +373,8 @@ pub enum Inbound {
     WifiStatus { seq: Option<u64>, payload: WifiStatusPayload },
     /// The board's device-license provisioning result.
     LicenseStatus { seq: Option<u64>, payload: LicenseStatusPayload },
+    /// Explicit UART0-only development diagnostic; never carries full AuthKey.
+    LicenseInfo { seq: Option<u64>, payload: LicenseInfoPayload },
     /// Consolidated firmware/network/radio diagnostics emitted on UART0.
     SystemInfo { seq: Option<u64>, payload: SystemInfoPayload },
     /// The volume and brightness currently applied by the board.
@@ -413,6 +433,9 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "license_status" => serde_json::from_value::<LicenseStatusPayload>(payload)
             .ok()
             .map(|p| Inbound::LicenseStatus { seq, payload: p }),
+        "license_info" => serde_json::from_value::<LicenseInfoPayload>(payload)
+            .ok()
+            .map(|p| Inbound::LicenseInfo { seq, payload: p }),
         "system_info" => serde_json::from_value::<SystemInfoPayload>(payload)
             .ok()
             .map(|p| Inbound::SystemInfo { seq, payload: p }),
@@ -674,6 +697,25 @@ mod tests {
             Inbound::LicenseStatus {
                 seq: Some(14),
                 payload: LicenseStatusPayload { state: "written".into() },
+            }
+        );
+
+        let read = license_read_payload();
+        assert_eq!(read["type"], "license_read");
+
+        let info = decode_line(
+            r#"{"v":1,"seq":15,"type":"license_info","payload":{"source":"flashed","uuid":"uuid123","authkey_tail":"CDEF"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            info,
+            Inbound::LicenseInfo {
+                seq: Some(15),
+                payload: LicenseInfoPayload {
+                    source: "flashed".into(),
+                    uuid: "uuid123".into(),
+                    authkey_tail: "CDEF".into(),
+                },
             }
         );
     }
