@@ -265,6 +265,52 @@ h2 {
   margin-top: 10px;
 }
 
+.device-settings-compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 7px 8px;
+  border: 2px solid var(--border);
+  background: var(--panel-2);
+  flex-wrap: wrap;
+}
+
+.device-settings-title,
+.device-settings-sync,
+.device-setting-control > span {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.device-settings-title {
+  margin-right: 2px;
+}
+
+.device-setting-control {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.device-setting-control button {
+  width: 28px;
+  min-height: 26px;
+  padding: 0;
+  line-height: 1;
+}
+
+.device-setting-control strong {
+  width: 38px;
+  text-align: center;
+  font-size: 11px;
+}
+
+.device-settings-sync {
+  margin-left: auto;
+}
+
 .input-row {
   display: flex;
   align-items: flex-start;
@@ -404,5 +450,67 @@ h2 {
 
   .topbar {
     flex-direction: column;
+  }
+}
+
+.binding-row {
+  margin-top: 12px;
+}
+
+.binding-row:first-of-type {
+  margin-top: 6px;
+}
+
+.binding-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.binding-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 150px;
+  font-size: 13px;
+}
+
+.binding-alias-input {
+  flex: 0 1 210px;
+  width: min(210px, 45%);
+  min-width: 130px;
+}
+
+.binding-actions {
+  margin-top: 6px;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.binding-actions label {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.binding-actions select {
+  width: auto;
+  min-width: 56px;
+}
+
+.binding-actions button {
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .binding-title-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .binding-alias-input {
+    width: 100%;
+    min-width: 0;
   }
 }

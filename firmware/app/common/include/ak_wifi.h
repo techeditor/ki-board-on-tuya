@@ -2,8 +2,9 @@
  * @file ak_wifi.h
  * @brief Wi-Fi provisioning for the product firmware.
  *
- * The companion sends the board Wi-Fi credentials over the existing JSONL
- * channel (BLE/USB): {"type":"wifi","payload":{"ssid":"...","pass":"..."}}.
+ * The companion sends the board Wi-Fi credentials over the physically trusted
+ * USB/UART JSONL channel: {"type":"wifi","payload":{"ssid":"...","pass":"..."}}.
+ * BLE-originated provisioning is rejected by the product firmware.
  * The board applies them via the Tuya netmgr (NETCONN_CMD_SSID_PSWD), which
  * connects to the AP and runs the cloud activation the board-side cloud ASR
  * needs.
@@ -45,6 +46,11 @@ OPERATE_RET ak_wifi_init(ak_wifi_status_cb on_status);
 
 /** True only when a real Wi-Fi stack is compiled in (cloud profile). */
 bool ak_wifi_available(void);
+
+/** Last known Wi-Fi target/current AP name and connection state. The SSID may
+ *  be empty when no credentials have ever been stored. */
+const char *ak_wifi_current_ssid(void);
+ak_wifi_state_t ak_wifi_current_state(void);
 
 /** Apply credentials and start connecting. Reports progress via the status
  *  callback. In the stub this immediately reports AK_WIFI_FAILED. */

@@ -202,11 +202,37 @@ static void test_protocol(void)
               "{\"v\":1,\"seq\":14,\"type\":\"license_status\",\"payload\":{\"state\":\"written\"}}\n",
               "license_status frame");
 
+    {
+        char info[384];
+        ak_proto_system_info(info, sizeof(info), 15, "0.1.1", "dual",
+                             "Lab\"AP", "connected", "Agentic Keyboard-A1B2C3",
+                             "advertising", "ready", "present");
+        CHECK_STR(info,
+                  "{\"v\":1,\"seq\":15,\"type\":\"system_info\",\"payload\":{"
+                  "\"fw\":\"0.1.1\",\"transport\":\"dual\","
+                  "\"wifi_name\":\"Lab\\\"AP\",\"wifi_state\":\"connected\","
+                  "\"ble_name\":\"Agentic Keyboard-A1B2C3\","
+                  "\"ble_state\":\"advertising\",\"cloud\":\"ready\","
+                  "\"license\":\"present\"}}\n",
+                  "system_info frame");
+    }
+
+    ak_proto_device_settings(buf, sizeof(buf), 15, 70, 90);
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":15,\"type\":\"device_settings_state\",\"payload\":{\"volume\":70,\"brightness\":90}}\n",
+              "device settings frame");
+
     ak_proto_hello_ack(buf, sizeof(buf), "0.1.0", "uart");
     CHECK_STR(buf,
               "{\"v\":1,\"type\":\"hello_ack\",\"payload\":{\"fw\":\"0.1.0\",\"transport\":\"uart\","
-              "\"capabilities\":[\"uart\",\"keymap\",\"voice_state\"]}}\n",
+              "\"capabilities\":[\"uart\",\"keymap\",\"voice_state\",\"device_settings\",\"system_info\"]}}\n",
               "hello_ack frame");
+
+    ak_proto_hello_ack(buf, sizeof(buf), "0.1.0", "ble_gatt");
+    CHECK_STR(buf,
+              "{\"v\":1,\"type\":\"hello_ack\",\"payload\":{\"fw\":\"0.1.0\",\"transport\":\"ble_gatt\","
+              "\"capabilities\":[\"ble_gatt\",\"keymap\",\"voice_state\",\"device_settings\"]}}\n",
+              "BLE handshake excludes UART0 system_info capability");
 
     ak_proto_status(buf, sizeof(buf), "ble_gatt_link", "ready");
     CHECK_STR(buf,
@@ -269,6 +295,14 @@ static void test_rx(void)
     CHECK(ak_json_str(bindings, "alias_c", alias, sizeof(alias)) &&
               strcmp(alias, "Code") == 0,
           "extract slot C alias");
+
+    const char *settings =
+        "{\"type\":\"device_settings\",\"payload\":{\"volume\":60,\"brightness\":80}}";
+    uint32_t value = 0U;
+    CHECK(ak_json_uint(settings, "volume", &value) && value == 60U,
+          "extract device volume");
+    CHECK(ak_json_uint(settings, "brightness", &value) && value == 80U,
+          "extract screen brightness");
 }
 
 static void test_status_icons(void)

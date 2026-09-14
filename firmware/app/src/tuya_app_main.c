@@ -124,6 +124,7 @@ static bool ak_transport_rx_is_usb(void)
 #define HEARTBEAT_INTERVAL_MS     2000U
 #define USB_LINK_TIMEOUT_MS       7000U
 #define FRAME_BUFFER_SIZE         192U
+#define SYSTEM_INFO_FRAME_BUFFER_SIZE 384U
 #define ASR_FRAME_BUFFER_SIZE     2048U
 #define CORE_INIT_ATTEMPTS        3U
 #define CORE_INIT_RETRY_MS        250U
@@ -268,6 +269,42 @@ static void transport_end_sequenced_sized(const char *frame, size_t capacity, in
 #define transport_end_sequenced(frame, length) \
     transport_end_sequenced_sized((frame), sizeof(frame), (length))
 
+/* UART0 is the diagnostics/trusted-Companion channel. In DUAL mode this frame
+ * intentionally stays on UART0 instead of being mirrored to BLE. */
+static void send_system_info_uart(void)
+{
+#if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
+    const char *ble_name  = "";
+    const char *ble_state = "disabled";
+#if AK_TRANSPORT_DUAL
+    ak_ble_link_state_t link = ak_ble_gatt_link_state();
+    ble_name                 = ak_ble_gatt_device_name();
+    ble_state                = ak_ble_gatt_link_state_str(link);
+#endif
+
+    char frame[SYSTEM_INFO_FRAME_BUFFER_SIZE];
+    if (!transport_lock()) {
+        return;
+    }
+    uint32_t sequence = ++s_sequence;
+    int length = ak_proto_system_info(
+        frame, sizeof(frame), sequence, APP_FW_VERSION, AK_TRANSPORT_NAME,
+        ak_wifi_current_ssid(), ak_wifi_state_str(ak_wifi_current_state()),
+        ble_name, ble_state,
+        ak_asr_available() ? "ready" : (ak_cloud_compiled() ? "unavailable" : "disabled"),
+        ak_license_present() ? "present" : "missing");
+    if (length > 0 && length < (int)sizeof(frame)) {
+        int written = ak_uart_write(frame, (uint32_t)length);
+        if (written != length) {
+            PR_WARN("UART0 system info short write: %d/%d", written, length);
+        }
+    } else {
+        PR_WARN("UART0 system info frame too large: %d", length);
+    }
+    transport_unlock();
+#endif
+}
+
 typedef OPERATE_RET (*ak_core_init_fn_t)(void);
 
 static OPERATE_RET core_init_with_retry(const char *name, ak_core_init_fn_t init_fn)
@@ -310,6 +347,7 @@ static void restart_after_fatal_init(const char *component, OPERATE_RET rt)
 static void on_ptt_event(ak_input_event_t event);
 static void send_voice_source(void);
 #if AK_ENABLE_DISPLAY
+static void send_device_settings(void);
 static void ak_voice_ui_set_state(ak_voice_ui_state_t state);
 static void ak_voice_ui_queue_result(const char *text, bool is_error);
 static void ak_voice_ui_tick(uint32_t now_ms);
@@ -377,9 +415,13 @@ static void send_hello_ack(void)
     char frame[FRAME_BUFFER_SIZE];
     int  length = ak_proto_hello_ack(frame, sizeof(frame), APP_FW_VERSION, AK_TRANSPORT_NAME);
     transport_write_frame(frame, length);
-    /* Follow the greeting with the current voice routing so the companion UI
-     * reflects the board's state as soon as a link comes up. */
+    /* Follow the greeting with board-owned runtime state so Companion controls
+     * reflect the AK immediately after connecting or reloading the link. */
     send_voice_source();
+#if AK_ENABLE_DISPLAY
+    send_device_settings();
+#endif
+    send_system_info_uart();
 }
 
 /* Emit a voice.start / voice.stop edge (PC companion runs its own ASR). */
@@ -404,6 +446,20 @@ static void send_voice_source(void)
     transport_end_sequenced(
         frame, ak_proto_voice_source(frame, sizeof(frame), sequence, ak_voice_source_str(s_voice_route.effective)));
 }
+
+#if AK_ENABLE_DISPLAY
+static void send_device_settings(void)
+{
+    char     frame[FRAME_BUFFER_SIZE];
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(
+        frame, ak_proto_device_settings(frame, sizeof(frame), sequence,
+                                        s_settings.volume, s_settings.brightness));
+}
+#endif
 
 /* Cloud-ASR result callback: forward recognized text to the PC as an `asr`
  * frame. Registered with ak_asr_init; a no-op path when the stub is compiled. */
@@ -461,6 +517,7 @@ static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
     transport_end_sequenced(frame,
                             ak_proto_wifi_status(frame, sizeof(frame), sequence,
                                                  ak_wifi_state_str(state), ssid));
+    send_system_info_uart();
 }
 
 /* K4 push-to-talk routing. The route is decided on DOWN and held until UP:
@@ -552,10 +609,12 @@ static uint16_t ak_status_color(const char *state)
     return AK_COL_DKBLUE;
 }
 
-#define LCD_SIDEBAR_W           64U
-#define LCD_SESSION_ROWS        3U
-#define LCD_SESSION_ROW_H       67U
-#define LCD_CHAT_X              (LCD_SIDEBAR_W + 6U)
+#define LCD_SIDEBAR_W             64U
+#define LCD_SESSION_ROWS          3U
+#define LCD_SESSION_ROW_H         67U
+#define LCD_SESSION_ALIAS_CHARS   7U
+#define LCD_SESSION_ALIAS_BYTES   (LCD_SESSION_ALIAS_CHARS + 1U)
+#define LCD_CHAT_X                (LCD_SIDEBAR_W + 6U)
 #define LCD_CHAT_TEXT_COLS      29U
 #define LCD_HISTORY_Y             62U
 #define LCD_HISTORY_LINE_ADVANCE  10U
@@ -580,6 +639,7 @@ static ak_session_ui_t s_sessions[LCD_SESSION_ROWS] = {
     {.agent = "-", .state = "idle"},
     {.agent = "-", .state = "idle"},
 };
+static char     s_session_labels[LCD_SESSION_ROWS][LCD_SESSION_ALIAS_BYTES] = {"A", "B", "C"};
 static uint8_t  s_selected_session;
 static char     s_status_bar_text[LCD_STATUS_TEXT_BYTES] = "Starting system...";
 static uint16_t s_status_bar_color = AK_COL_CYAN;
@@ -989,6 +1049,8 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
         if (rt != OPRT_OK) {
             PR_WARN("settings apply failed: item=%d rt=%d",
                     (int)s_settings.selected, rt);
+        } else {
+            send_device_settings();
         }
     }
     ak_settings_draw();
@@ -996,10 +1058,29 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
     return true;
 }
 
+static void ak_session_label_set(uint8_t slot, const char *alias)
+{
+    if (slot >= LCD_SESSION_ROWS) {
+        return;
+    }
+    if (alias == NULL || alias[0] == '\0') {
+        s_session_labels[slot][0] = (char)('A' + slot);
+        s_session_labels[slot][1] = '\0';
+        return;
+    }
+
+    uint8_t length = 0U;
+    while (alias[length] != '\0' && length < LCD_SESSION_ALIAS_CHARS) {
+        unsigned char c = (unsigned char)alias[length];
+        s_session_labels[slot][length] =
+            (c >= 0x20U && c <= 0x7EU) ? (char)c : '?';
+        length++;
+    }
+    s_session_labels[slot][length] = '\0';
+}
+
 static void ak_draw_session_sidebar(void)
 {
-    static const char labels[LCD_SESSION_ROWS] = {'A', 'B', 'C'};
-
     for (uint16_t i = 0; i < LCD_SESSION_ROWS; i++) {
         bool selected = (i == s_selected_session);
         uint16_t y = (uint16_t)(22U + i * LCD_SESSION_ROW_H);
@@ -1008,11 +1089,16 @@ static void ak_draw_session_sidebar(void)
                          : LCD_SESSION_ROW_H;
         uint16_t bg = selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
         uint16_t fg = selected ? AK_COL_WHITE : AK_COL_GRAY;
+        uint16_t label_width = (uint16_t)(strlen(s_session_labels[i]) * 8U);
+        uint16_t label_x = label_width < LCD_SIDEBAR_W
+                               ? (uint16_t)((LCD_SIDEBAR_W - label_width) / 2U)
+                               : 0U;
 
         ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W - 1U, h, bg);
         ak_gfx_icon(16U, (uint16_t)(y + 8U), AK_SESSION_ICON_KIRO_GHOST,
                     AK_SESSION_ICON_W, AK_SESSION_ICON_H, fg, bg);
-        ak_gfx_char_thin(28U, (uint16_t)(y + 50U), labels[i], fg, bg, 1);
+        ak_gfx_text_thin(label_x, (uint16_t)(y + 50U),
+                         s_session_labels[i], fg, bg, 1);
         if (i > 0U) {
             ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W, 1U, AK_COL_GRAY);
         }
@@ -1052,8 +1138,8 @@ static void ak_render_status(void)
                      AK_COL_BLACK, link_color, 1);
     ak_draw_session_sidebar();
 
-    (void)snprintf(line, sizeof(line), "Session %c: %s",
-                   (char)('A' + s_selected_session),
+    (void)snprintf(line, sizeof(line), "Session %s: %s",
+                   s_session_labels[s_selected_session],
                    session->agent[0] ? session->agent : "-");
     ak_gfx_text_thin(LCD_CHAT_X, 29U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), "Status: %s",
@@ -1085,9 +1171,9 @@ static void ak_select_session_key(const char *id)
     }
 
     s_selected_session = selected;
-    char feedback[24];
-    (void)snprintf(feedback, sizeof(feedback), "Selected Session %c",
-                   (char)('A' + selected));
+    char feedback[32];
+    (void)snprintf(feedback, sizeof(feedback), "Selected Session %s",
+                   s_session_labels[selected]);
     ak_status_bar_set(feedback, AK_COL_CYAN);
     ak_render_status();
 }
@@ -1162,11 +1248,18 @@ static void ak_voice_ui_tick(uint32_t now_ms)
  * prompts happen once per state change rather than once per polling interval. */
 static void ak_voice_route_update(bool announce)
 {
+    static bool       cloud_report_initialized;
+    static bool       last_cloud_available;
     bool              was_initialized = s_voice_route_initialized;
     bool              was_fallback    = s_voice_route.fallback;
     ak_voice_source_t previous        = s_voice_route.effective;
     bool              cloud_available = ak_asr_available();
-    bool              changed         = ak_voice_route_refresh(&s_voice_route, cloud_available);
+    bool              cloud_status_changed =
+        cloud_report_initialized && last_cloud_available != cloud_available;
+    bool              changed = ak_voice_route_refresh(&s_voice_route, cloud_available);
+
+    last_cloud_available     = cloud_available;
+    cloud_report_initialized = true;
 
     s_voice_fallback_active = s_voice_route.fallback;
     if (!was_initialized || changed) {
@@ -1201,6 +1294,9 @@ static void ak_voice_route_update(bool announce)
         if (was_initialized && previous != s_voice_route.effective) {
             send_voice_source();
         }
+    }
+    if (cloud_status_changed) {
+        send_system_info_uart();
     }
     s_voice_route_initialized = true;
 }
@@ -1255,7 +1351,73 @@ static void on_rx_line(const char *line)
             }
         }
         send_ack(seq);
+    } else if (strcmp(type, "device_settings") == 0) {
+#if AK_ENABLE_DISPLAY
+        uint32_t value = 0U;
+        bool received = false;
+        bool changed = false;
+
+        if (ak_json_uint(line, "volume", &value)) {
+            uint8_t volume = (uint8_t)(value > 100U ? 100U : value);
+            received = true;
+            if (ak_asr_set_volume(volume) == OPRT_OK) {
+                s_settings.volume = volume;
+                changed = true;
+            } else {
+                PR_WARN("device settings: volume apply failed");
+            }
+        }
+        if (ak_json_uint(line, "brightness", &value)) {
+            uint8_t brightness = (uint8_t)(value > 100U ? 100U : value);
+            if (brightness < AK_SETTINGS_BRIGHTNESS_MIN) {
+                brightness = AK_SETTINGS_BRIGHTNESS_MIN;
+            }
+            received = true;
+            if (ak_statuslcd_set_brightness(brightness) == OPRT_OK) {
+                s_settings.brightness = brightness;
+                changed = true;
+            } else {
+                PR_WARN("device settings: brightness apply failed");
+            }
+        }
+        if (changed) {
+            if (s_settings_active) {
+                ak_settings_draw();
+            } else {
+                ak_render_status();
+            }
+        }
+        if (received) {
+            send_device_settings();
+        }
+#endif
+    } else if (strcmp(type, "bindings") == 0) {
+#if AK_ENABLE_DISPLAY
+        static const char *fields[LCD_SESSION_ROWS] = {
+            "alias_a", "alias_b", "alias_c"
+        };
+        bool changed = false;
+        for (uint8_t i = 0U; i < LCD_SESSION_ROWS; i++) {
+            char alias[LCD_SESSION_ALIAS_BYTES] = "";
+            if (ak_json_str(line, fields[i], alias, sizeof(alias))) {
+                ak_session_label_set(i, alias);
+                changed = true;
+            }
+        }
+        if (changed) {
+            PR_NOTICE("binding aliases: A=%s B=%s C=%s",
+                      s_session_labels[0], s_session_labels[1],
+                      s_session_labels[2]);
+            ak_render_status();
+        }
+#endif
     } else if (strcmp(type, "wifi") == 0) {
+        /* Wi-Fi credentials are sensitive and may only enter through the
+         * physically trusted USB/UART transport. */
+        if (!ak_transport_rx_is_usb()) {
+            PR_WARN("wifi config rejected: USB transport required");
+            return;
+        }
         /* PC provisions Wi-Fi: {"type":"wifi","payload":{"ssid":"..","pass":".."}}.
          * Apply via ak_wifi (netmgr) so the board connects + cloud-activates;
          * the connect result comes back asynchronously as a wifi_status frame. */
@@ -1269,6 +1431,12 @@ static void on_rx_line(const char *line)
         ak_wifi_connect(ssid, pass);
         send_ack(seq);
     } else if (strcmp(type, "license") == 0) {
+        /* UUID/AuthKey writes are sensitive and may only enter through the
+         * physically trusted USB/UART transport. */
+        if (!ak_transport_rx_is_usb()) {
+            PR_WARN("license write rejected: USB transport required");
+            return;
+        }
         /* PC provisions the device license: {"type":"license","payload":
          * {"uuid":"..","authkey":".."}}. Written to persistent storage; PID
          * stays compile-time. Never echo the secret back — only a status. */
@@ -1291,6 +1459,7 @@ static void on_rx_line(const char *line)
             }
         }
         send_ack(seq);
+        send_system_info_uart();
     } else if (strcmp(type, "display") == 0) {
         char agent[32] = "";
         char state[16] = "";
@@ -1503,18 +1672,19 @@ static void user_main(void)
         if (ak_ble_gatt_take_greet()) {
             send_hello_ack();
         }
-        /* Refresh the connection-status header when the BLE link state changes
-         * (advertising -> connected -> live, or back to advertising on drop). */
-#if AK_ENABLE_DISPLAY
+        /* Report BLE advertising/connected/live transitions on UART0 and
+         * refresh the LCD header when present. */
         {
             static ak_ble_link_state_t s_last_link = (ak_ble_link_state_t)-1;
             ak_ble_link_state_t        link = ak_ble_gatt_link_state();
             if (link != s_last_link) {
                 s_last_link = link;
+                send_system_info_uart();
+#if AK_ENABLE_DISPLAY
                 ak_refresh_link_header();
+#endif
             }
         }
-#endif
 #endif
 
         ak_input_poll(now, on_input_event);

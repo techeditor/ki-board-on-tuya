@@ -15,6 +15,14 @@ type Status = {
   firmware_version: string;
   last_error: string;
   control_enabled?: boolean;
+  device_volume: number;
+  device_brightness: number;
+  device_settings_synced: boolean;
+};
+
+type DeviceSettings = {
+  volume: number;
+  brightness: number;
 };
 
 type SerialPortInfo = {
@@ -29,7 +37,7 @@ type BleDeviceInfo = {
 
 // Flat board-event object emitted by `inbound_to_json` in the backend.
 type BoardEvent = {
-  kind: "key" | "nav" | "voice" | "macro" | "hello_ack" | "ping" | "pong" | "unknown";
+  kind: "key" | "nav" | "voice" | "macro" | "device_settings" | "system_info" | "hello_ack" | "ping" | "pong" | "unknown";
   seq?: number | null;
   id?: string;
   dir?: string;
@@ -37,6 +45,16 @@ type BoardEvent = {
   held_ms?: number;
   state?: string;
   name?: string;
+  volume?: number;
+  brightness?: number;
+  fw?: string;
+  transport?: string;
+  wifi_name?: string;
+  wifi_state?: string;
+  ble_name?: string;
+  ble_state?: string;
+  cloud?: string;
+  license?: string;
   type?: string;
 };
 
@@ -62,10 +80,13 @@ type HookStatus = {
   any_installed: boolean;
 };
 
-// FP-4b M4 (§3.2): the three per-key chat NUMBERS (K1-K3). Each key jumps to a// chat number (1..9) via Kiro Crew's "Alt+N = Jump to chat N" shortcut —
-// client-side, no page reload. The number is user-configurable per key. This
-// mirrors the Rust `bind_store::BindStore.chats: Vec<u8>` (index 0 = K1).
+// FP-4b M4 (§3.2): each A/B/C slot has a chat shortcut number and an optional
+// AK display alias. Empty aliases fall back to A, B, and C on the board.
 type ChatNumbers = number[];
+type ChatAliases = string[];
+
+const SLOT_DEFAULT_NAMES = ["A", "B", "C"] as const;
+const ALIAS_MAX_CHARS = 7;
 
 const defaultStatus: Status = {
   device_connected: false,
@@ -74,15 +95,18 @@ const defaultStatus: Status = {
   firmware_version: "",
   last_error: "",
   control_enabled: true,
+  device_volume: 70,
+  device_brightness: 100,
+  device_settings_synced: false,
 };
 
 // Our 5 mechanical keys (k1..k5) with their phase-1 default intents. This is a
 // reference mapping placeholder — remapping UI lands in a later pass. `wide`
 // marks K4 as the double-width push-to-talk key in the INPUT layout.
 const KEY_MAP: { id: string; label: string; intent: string; wide?: boolean }[] = [
-  { id: "k1", label: "K1", intent: "Agent slot 1" },
-  { id: "k2", label: "K2", intent: "Agent slot 2" },
-  { id: "k3", label: "K3", intent: "Agent slot 3" },
+  { id: "k1", label: "K1", intent: "Chat A" },
+  { id: "k2", label: "K2", intent: "Chat B" },
+  { id: "k3", label: "K3", intent: "Chat C" },
   { id: "k4", label: "K4", intent: "Push-to-Talk (voice)", wide: true },
   { id: "k5", label: "K5", intent: "Submit / Continue" },
 ];
@@ -128,11 +152,17 @@ function App() {
   const [licAuthkey, setLicAuthkey] = useState("");
   const [licStatus, setLicStatus] = useState("");
   const [licBusy, setLicBusy] = useState(false);
+  const [deviceSettings, setDeviceSettings] = useState<DeviceSettings>({
+    volume: defaultStatus.device_volume,
+    brightness: defaultStatus.device_brightness,
+  });
+  const [deviceSettingsBusy, setDeviceSettingsBusy] = useState(false);
   const [lastKey, setLastKey] = useState("");
   const [lastNav, setLastNav] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
   const [activeView, setActiveView] = useState<"device" | "input" | "kirocrew" | "logs">("device");
   const [uiError, setUiError] = useState("");
+  const usbProvisioningAvailable = status.device_connected && status.transport === "usb";
 
   // FP-4b route B ("Local Control", the hands) state: focus a Kiro Crew window
   // and inject keystrokes.
@@ -143,10 +173,10 @@ function App() {
   const [lcError, setLcError] = useState("");
   const [lcBusy, setLcBusy] = useState(false);
 
-  // FP-4b M4 (§3.2): the three per-key chat NUMBERS (K1-K3). Each key fires
-  // Alt+<number> to jump to that chat (client-side, no reload). Loaded via
-  // kc_bind_get on mount; changing a key's number calls kc_bind_set(slot, n).
+  // FP-4b M4 (§3.2): A/B/C chat numbers and optional AK display aliases.
+  // Aliases save on blur/Enter rather than on every keystroke.
   const [binds, setBinds] = useState<ChatNumbers>([]);
+  const [bindAliases, setBindAliases] = useState<ChatAliases>(["", "", ""]);
   const [bindError, setBindError] = useState("");
   const [bindBusy, setBindBusy] = useState(false);
 
@@ -174,7 +204,12 @@ function App() {
   );
 
   async function refreshRuntime() {
-    setStatus(await invoke<Status>("get_status"));
+    const runtime = await invoke<Status>("get_status");
+    setStatus(runtime);
+    setDeviceSettings({
+      volume: runtime.device_volume,
+      brightness: runtime.device_brightness,
+    });
     setPorts(await invoke<SerialPortInfo[]>("list_serial_ports"));
     // Don't clobber the frozen list while the LOGS view is paused.
     if (!logsPausedRef.current) {
@@ -221,6 +256,21 @@ function App() {
   async function disconnect() {
     await invoke("disconnect_device");
     await refreshRuntime();
+  }
+
+  async function adjustDeviceSetting(key: keyof DeviceSettings, delta: number) {
+    const minimum = key === "brightness" ? 10 : 0;
+    const current = deviceSettings[key];
+    const nextValue = Math.max(minimum, Math.min(100, current + delta));
+    if (nextValue === current) return;
+
+    const next = { ...deviceSettings, [key]: nextValue };
+    setDeviceSettingsBusy(true);
+    try {
+      await invoke("set_device_settings", next);
+    } finally {
+      setDeviceSettingsBusy(false);
+    }
   }
 
   async function clearLogs() {
@@ -271,6 +321,10 @@ function App() {
   }
 
   async function sendWifi() {
+    if (!usbProvisioningAvailable) {
+      setUiError("Connect the board over USB before configuring WiFi.");
+      return;
+    }
     if (!wifiSsid.trim()) {
       setUiError("Enter a WiFi SSID first.");
       return;
@@ -290,6 +344,10 @@ function App() {
   }
 
   async function sendLicense() {
+    if (!usbProvisioningAvailable) {
+      setUiError("Connect the board over USB before writing UUID/AuthKey.");
+      return;
+    }
     if (!licUuid.trim() || !licAuthkey.trim()) {
       setUiError("UUID and AuthKey are both required.");
       return;
@@ -359,9 +417,11 @@ function App() {
     setLcResult(`chord: ${name}`);
   }
 
-  // ── FP-4b M4: per-key chat numbers (§3.2) ─────────────────────────────────
+  // ── FP-4b M4: per-key chat numbers and A/B/C aliases ──────────────────────
   // Arg names match the #[tauri::command] signatures in src-tauri/src/lib.rs:
   //   kc_bind_get() -> number[]      kc_bind_set(slot, number)
+  //   kc_bind_aliases_get() -> string[]
+  //   kc_bind_alias_set(slot, alias) -> string[]
   //   kc_bind_clear(slot)
   async function runBind(action: () => Promise<void>) {
     setBindBusy(true);
@@ -376,16 +436,34 @@ function App() {
   }
 
   async function refreshBinds() {
-    setBinds(await invoke<ChatNumbers>("kc_bind_get"));
+    const [numbers, aliases] = await Promise.all([
+      invoke<ChatNumbers>("kc_bind_get"),
+      invoke<ChatAliases>("kc_bind_aliases_get"),
+    ]);
+    setBinds(numbers);
+    setBindAliases(aliases);
   }
 
-  // Set slot `slot` (1-based) to chat `number` (1..9).
+  // Set A/B/C slot `slot` (1-based API index) to chat `number` (1..9).
   async function bindSet(slot: number, number: number) {
     await invoke("kc_bind_set", { slot, number });
     await refreshBinds();
   }
 
-  // Reset slot `slot` to its default number (slot index+1: K1->1, K2->2, K3->3).
+  function bindAliasDraft(slot: number, alias: string) {
+    setBindAliases((current) => {
+      const next = [...current];
+      next[slot - 1] = alias;
+      return next;
+    });
+  }
+
+  async function bindAliasSave(slot: number, alias: string) {
+    const aliases = await invoke<ChatAliases>("kc_bind_alias_set", { slot, alias });
+    setBindAliases(aliases);
+  }
+
+  // Reset the chat number only; the A/B/C slot alias remains independent.
   async function bindClear(slot: number) {
     await invoke("kc_bind_clear", { slot });
     await refreshBinds();
@@ -546,6 +624,12 @@ function App() {
       setLicStatus(event.payload);
     });
 
+    // The AK reports authoritative values after hello and every local/remote change.
+    const unlistenDeviceSettings = listen<DeviceSettings>("device-settings", (event) => {
+      setDeviceSettings(event.payload);
+      setStatus((current) => ({ ...current, device_settings_synced: true }));
+    });
+
     // Recover the sink token/running state on mount (survives a UI reload).
     invoke<string>("status_token")
       .then((token) => {
@@ -556,9 +640,12 @@ function App() {
       })
       .catch(() => undefined);
 
-    // Load the persisted M4 per-key chat numbers on mount.
+    // Load persisted A/B/C chat numbers and optional AK display aliases.
     invoke<ChatNumbers>("kc_bind_get")
       .then(setBinds)
+      .catch(() => undefined);
+    invoke<ChatAliases>("kc_bind_aliases_get")
+      .then(setBindAliases)
       .catch(() => undefined);
 
     // Recover the pinned "watched chat" on mount (survives a UI reload).
@@ -579,6 +666,7 @@ function App() {
       unlistenVoiceSource.then((fn) => fn());
       unlistenWifi.then((fn) => fn());
       unlistenLicense.then((fn) => fn());
+      unlistenDeviceSettings.then((fn) => fn());
     };
   }, []);
 
@@ -712,6 +800,52 @@ function App() {
               <button className="secondary" onClick={() => runAction(refreshRuntime)}>Refresh</button>
             </div>
 
+            <div className="device-settings-compact" aria-label="AK device settings">
+              <span className="device-settings-title">DEVICE SETTINGS</span>
+              {([
+                { key: "volume" as const, label: "VOL", minimum: 0 },
+                { key: "brightness" as const, label: "SCREEN", minimum: 10 },
+              ]).map(({ key, label, minimum }) => (
+                <div className="device-setting-control" key={key}>
+                  <span>{label}</span>
+                  <button
+                    className="secondary"
+                    aria-label={`Decrease ${label.toLowerCase()}`}
+                    disabled={
+                      !status.device_connected ||
+                      !status.device_settings_synced ||
+                      deviceSettingsBusy ||
+                      deviceSettings[key] <= minimum
+                    }
+                    onClick={() => runAction(() => adjustDeviceSetting(key, -10))}
+                  >
+                    −
+                  </button>
+                  <strong>{deviceSettings[key]}%</strong>
+                  <button
+                    className="secondary"
+                    aria-label={`Increase ${label.toLowerCase()}`}
+                    disabled={
+                      !status.device_connected ||
+                      !status.device_settings_synced ||
+                      deviceSettingsBusy ||
+                      deviceSettings[key] >= 100
+                    }
+                    onClick={() => runAction(() => adjustDeviceSetting(key, 10))}
+                  >
+                    +
+                  </button>
+                </div>
+              ))}
+              <span className={`device-settings-sync ${status.device_settings_synced ? "good-text" : ""}`}>
+                {!status.device_connected
+                  ? "AK OFFLINE"
+                  : status.device_settings_synced
+                    ? "AK SYNCED"
+                    : "WAITING FOR AK"}
+              </span>
+            </div>
+
             <label>Voice recognition path</label>
             <div className="actions" style={{ marginTop: 6 }}>
               <button
@@ -738,21 +872,28 @@ function App() {
             <label style={{ marginTop: 14 }}>WiFi provisioning (for board cloud ASR)</label>
             <input
               value={wifiSsid}
+              disabled={!usbProvisioningAvailable || wifiBusy}
               onChange={(event) => setWifiSsid(event.target.value)}
               placeholder="WiFi SSID (2.4GHz)"
             />
             <input
               type="password"
               value={wifiPass}
+              disabled={!usbProvisioningAvailable || wifiBusy}
               onChange={(event) => setWifiPass(event.target.value)}
               placeholder="WiFi password"
               style={{ marginTop: 6 }}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && !wifiBusy) runAction(sendWifi);
+                if (event.key === "Enter" && usbProvisioningAvailable && !wifiBusy) {
+                  runAction(sendWifi);
+                }
               }}
             />
             <div className="actions" style={{ marginTop: 6 }}>
-              <button disabled={wifiBusy} onClick={() => runAction(sendWifi)}>
+              <button
+                disabled={!usbProvisioningAvailable || wifiBusy}
+                onClick={() => runAction(sendWifi)}
+              >
                 Configure WiFi
               </button>
             </div>
@@ -762,26 +903,31 @@ function App() {
                 {wifiStatus || "-- (not configured)"}
               </strong>
             </div>
-            <p className="hint">
-              Connect the board first (USB/BLE), then send WiFi credentials — the board joins the
-              AP over its own radio (needs the cloud-ASR firmware profile; 2.4GHz only).
+            <p className={`hint ${usbProvisioningAvailable ? "good-text" : "warn-text"}`}>
+              USB connection required. WiFi credentials cannot be sent over BLE. The board joins
+              its 2.4GHz AP using the cloud-ASR firmware profile.
             </p>
 
             <label style={{ marginTop: 14 }}>Device license (UUID / AuthKey)</label>
             <input
               value={licUuid}
+              disabled={!usbProvisioningAvailable || licBusy}
               onChange={(event) => setLicUuid(event.target.value)}
               placeholder="UUID (20 chars)"
             />
             <input
               type="password"
               value={licAuthkey}
+              disabled={!usbProvisioningAvailable || licBusy}
               onChange={(event) => setLicAuthkey(event.target.value)}
               placeholder="AuthKey (32 chars)"
               style={{ marginTop: 6 }}
             />
             <div className="actions" style={{ marginTop: 6 }}>
-              <button disabled={licBusy} onClick={() => runAction(sendLicense)}>
+              <button
+                disabled={!usbProvisioningAvailable || licBusy}
+                onClick={() => runAction(sendLicense)}
+              >
                 Write license
               </button>
             </div>
@@ -791,10 +937,10 @@ function App() {
                 {licStatus || "-- (not written)"}
               </strong>
             </div>
-            <p className="hint">
-              Writes the per-device UUID/AuthKey to the board's persistent storage (needs the
-              cloud-ASR profile). The PID is compile-time (product-wide). The secret only travels
-              to the board — it is never stored or echoed by the companion.
+            <p className={`hint ${usbProvisioningAvailable ? "good-text" : "warn-text"}`}>
+              USB connection required. UUID/AuthKey cannot be written over BLE. The license is
+              stored on the board; the PID remains compile-time, and Companion never stores or
+              echoes the secret.
             </p>
           </Panel>
         )}
@@ -871,31 +1017,49 @@ function App() {
 
         {activeView === "kirocrew" && (
           <>
-            <Panel title="Bindings — K1–K3 jump-to-chat number">
+            <Panel title="Bindings — K1–K3 chat slots A/B/C">
               <p className="hint">
-                Bind each slot key (K1–K3) to a Kiro Crew <strong>chat number</strong> (1–9).
-                Pressing the board key fires <code>Alt+&lt;number&gt;</code> — Kiro Crew's
-                <em> "Jump to chat N"</em> shortcut — switching to that chat <strong>client-side,
-                with no page reload</strong>. The number is configurable per key. Requires
-                <em> Local Control</em> below to be bound to a Kiro Crew window and control enabled.
+                Bind K1–K3 to Kiro Crew chat shortcuts and optionally name each AK slot.
+                Names are saved when you press Enter or click elsewhere, then shown on the AK;
+                leave a name blank to display its default <strong>A, B, or C</strong>. Use up to
+                {ALIAS_MAX_CHARS} English letters, numbers, spaces, or symbols.
               </p>
 
               {[1, 2, 3].map((slot) => {
                 const n = binds[slot - 1];
+                const alias = bindAliases[slot - 1] ?? "";
+                const defaultName = SLOT_DEFAULT_NAMES[slot - 1];
                 return (
-                  <div key={slot} style={{ marginTop: slot === 1 ? 6 : 12 }}>
-                    <div style={{ fontSize: 13 }}>
-                      <strong>{`K${slot}: `}</strong>
-                      <span className="good-text">
-                        {n ? `Alt+${n} (jump to chat ${n})` : "--"}
-                      </span>
+                  <div key={slot} className="binding-row">
+                    <div className="binding-title-row">
+                      <div className="binding-title">
+                        <strong>{`K${slot}`}</strong>
+                        <span className="good-text">
+                          {n ? `Alt+${n} · chat ${n}` : "--"}
+                        </span>
+                      </div>
+                      <input
+                        className="binding-alias-input"
+                        value={alias}
+                        maxLength={ALIAS_MAX_CHARS}
+                        disabled={bindBusy}
+                        aria-label={`K${slot} alias; blank uses ${defaultName}`}
+                        placeholder={`Alias · default ${defaultName}`}
+                        onChange={(event) => bindAliasDraft(slot, event.target.value)}
+                        onBlur={(event) =>
+                          runBind(() => bindAliasSave(slot, event.currentTarget.value))
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur();
+                        }}
+                      />
                     </div>
-                    <div className="actions" style={{ marginTop: 6, flexWrap: "nowrap", alignItems: "center", gap: 8 }}>
-                      <label style={{ margin: 0, whiteSpace: "nowrap" }}>Chat #</label>
+                    <div className="actions binding-actions">
+                      <label>Chat #</label>
                       <select
                         value={n ?? ""}
                         disabled={bindBusy}
-                        style={{ width: "auto", minWidth: 56 }}
+                        aria-label={`K${slot} chat number`}
                         onChange={(event) =>
                           runBind(() => bindSet(slot, Number(event.target.value)))
                         }
@@ -909,10 +1073,9 @@ function App() {
                       <button
                         className="secondary"
                         disabled={bindBusy}
-                        style={{ whiteSpace: "nowrap" }}
                         onClick={() => runBind(() => bindClear(slot))}
                       >
-                        Reset to {slot}
+                        Reset chat to {slot}
                       </button>
                     </div>
                   </div>

@@ -213,6 +213,50 @@ int ak_proto_license_status(char *buf, size_t size, uint32_t seq, const char *st
     return writer_finish(&writer);
 }
 
+int ak_proto_system_info(char *buf, size_t size, uint32_t seq,
+                         const char *fw, const char *transport,
+                         const char *wifi_name, const char *wifi_state,
+                         const char *ble_name, const char *ble_state,
+                         const char *cloud_state, const char *license_state)
+{
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"system_info\",\"payload\":{\"fw\":");
+    writer_json_string(&writer, fw);
+    writer_raw(&writer, ",\"transport\":");
+    writer_json_string(&writer, transport);
+    writer_raw(&writer, ",\"wifi_name\":");
+    writer_json_string(&writer, wifi_name);
+    writer_raw(&writer, ",\"wifi_state\":");
+    writer_json_string(&writer, wifi_state);
+    writer_raw(&writer, ",\"ble_name\":");
+    writer_json_string(&writer, ble_name);
+    writer_raw(&writer, ",\"ble_state\":");
+    writer_json_string(&writer, ble_state);
+    writer_raw(&writer, ",\"cloud\":");
+    writer_json_string(&writer, cloud_state);
+    writer_raw(&writer, ",\"license\":");
+    writer_json_string(&writer, license_state);
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
+int ak_proto_device_settings(char *buf, size_t size, uint32_t seq, uint8_t volume, uint8_t brightness)
+{
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"device_settings_state\",\"payload\":{\"volume\":");
+    writer_u32(&writer, volume);
+    writer_raw(&writer, ",\"brightness\":");
+    writer_u32(&writer, brightness);
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport)
 {
     ak_json_writer_t writer;
@@ -223,7 +267,12 @@ int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *trans
     writer_json_string(&writer, transport);
     writer_raw(&writer, ",\"capabilities\":[");
     writer_json_string(&writer, transport);
-    writer_raw(&writer, ",\"keymap\",\"voice_state\"]}}\n");
+    writer_raw(&writer, ",\"keymap\",\"voice_state\",\"device_settings\"");
+    if (transport != NULL &&
+        (strcmp(transport, "uart") == 0 || strcmp(transport, "dual") == 0)) {
+        writer_raw(&writer, ",\"system_info\"");
+    }
+    writer_raw(&writer, "]}}\n");
     return writer_finish(&writer);
 }
 

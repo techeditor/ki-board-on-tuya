@@ -67,7 +67,7 @@ Companion 发：
 板回：
 
 ```json
-{"v":1,"type":"hello_ack","payload":{"fw":"0.1.0","capabilities":["uart","ble_gatt","keymap","voice_state"]}}
+{"v":1,"type":"hello_ack","payload":{"fw":"0.1.0","capabilities":["uart","ble_gatt","keymap","voice_state","device_settings","system_info"]}}
 ```
 
 心跳：
@@ -113,6 +113,20 @@ Companion 发：
 {"v":1,"seq":4,"type":"macro","payload":{"name":"send"}}
 ```
 
+### system_info（UART0 系统反馈）
+
+```json
+{"v":1,"seq":5,"type":"system_info","payload":{"fw":"0.1.1","transport":"dual","wifi_name":"MyAP","wifi_state":"connected","ble_name":"Agentic Keyboard-A1B2C3","ble_state":"advertising","cloud":"ready","license":"present"}}
+```
+
+- 该帧专门写入 UART0；DUAL 模式下不镜像到 BLE。
+- 启动/握手时发送完整快照；Wi-Fi、BLE、云 ASR 或 License 状态变化时刷新。
+- `wifi_state`：`connecting` / `connected` / `failed` / `disconnected`。
+- `ble_state`：`disabled` / `advertising` / `connected` / `live`。
+- `cloud`：`disabled` / `unavailable` / `ready`。
+- `license`：`missing` / `present`；绝不包含 UUID 或 AuthKey。
+- `system_info` 带 `seq`，Companion 按普通板端事件回 `ack`。
+
 ## PC → 板 命令
 
 ### led
@@ -136,7 +150,55 @@ Companion 发：
 {"v":1,"type":"config","payload":{"voice_engine":"system"}}
 ```
 
-- `voice_engine`：`system`（阶段 1，Windows 系统 ASR）/ `third_party`（阶段 2 在线 ASR）
+- `voice_engine`：`system`（Windows 系统 ASR）/ `cloud`（板端 Tuya ASR）
+
+### device_settings / device_settings_state（音量与屏幕亮度）
+
+Companion 修改当前运行值：
+
+```json
+{"v":1,"type":"device_settings","payload":{"volume":70,"brightness":90}}
+```
+
+AK 在握手、本地调节或应用 Companion 命令后回报实际值：
+
+```json
+{"v":1,"seq":15,"type":"device_settings_state","payload":{"volume":70,"brightness":90}}
+```
+
+- `volume`：`0..100`；`brightness`：`10..100`，AK 设置页和 Companion 均以 10% 为步进。
+- AK 是当前运行值的权威来源；Companion 只在收到 `device_settings_state` 后更新显示。
+- `device_settings_state` 带 `seq`，Companion 按普通板端事件回 `ack`。
+- 本协议只同步当前运行值，不承诺断电或重启后保留。
+
+### bindings（A/B/C 显示别名）
+
+```json
+{"v":1,"type":"bindings","payload":{"alias_a":"Plan","alias_b":"","alias_c":"Code"}}
+```
+
+- Companion 连接 AK 时发送全部三个别名，修改别名后再次发送。
+- `alias_a` / `alias_b` / `alias_c` 分别对应 K1 / K2 / K3（槽位 A / B / C）。
+- 每个别名最多 7 个可显示 ASCII 字符；空字符串表示在 AK 上使用默认名 A、B 或 C。
+
+### wifi（仅 USB）
+
+```json
+{"v":1,"type":"wifi","payload":{"ssid":"MyAP","pass":"secret"}}
+```
+
+- 仅允许通过当前 USB/UART 连接发送；Companion 和 AK 固件都必须拒绝 BLE 来源。
+- 设备只支持 2.4GHz Wi-Fi。密码仅发往 AK，不由 Companion 持久化。
+
+### license（UUID / AuthKey，仅 USB）
+
+```json
+{"v":1,"type":"license","payload":{"uuid":"...","authkey":"..."}}
+```
+
+- 仅允许通过当前 USB/UART 连接发送；Companion 和 AK 固件都必须拒绝 BLE 来源。
+- UUID/AuthKey 写入 AK 持久存储；PID 为产品级编译时配置。
+- Companion 不持久化或回显 AuthKey，AK 只回报写入状态。
 
 ### ack
 

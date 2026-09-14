@@ -89,4 +89,10 @@ typedef enum {
 /** Current BLE link state, for the app to render in its header. */
 ak_ble_link_state_t ak_ble_gatt_link_state(void);
 
+/** Generated advertising name (Agentic Keyboard-XXXXXX). */
+const char *ak_ble_gatt_device_name(void);
+
+/** Stable protocol string for a BLE link state. */
+const char *ak_ble_gatt_link_state_str(ak_ble_link_state_t state);
+
 #endif /* AK_BLE_GATT_H */

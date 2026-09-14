@@ -33,6 +33,14 @@ int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state
    `state` is "written" / "failed" / "present" (already had one). No secret is
    ever echoed back. */
 int ak_proto_license_status(char *buf, size_t size, uint32_t seq, const char *state);
+/* Board -> UART0: consolidated system feedback for diagnostics and Companion logs. */
+int ak_proto_system_info(char *buf, size_t size, uint32_t seq,
+                         const char *fw, const char *transport,
+                         const char *wifi_name, const char *wifi_state,
+                         const char *ble_name, const char *ble_state,
+                         const char *cloud_state, const char *license_state);
+/* Board -> PC: report the runtime values currently applied by the AK. */
+int ak_proto_device_settings(char *buf, size_t size, uint32_t seq, uint8_t volume, uint8_t brightness);
 
 /* Handshake / heartbeat. */
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport);

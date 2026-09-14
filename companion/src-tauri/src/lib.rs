@@ -62,6 +62,24 @@ pub fn describe_inbound(frame: &Inbound) -> String {
         Inbound::LicenseStatus { seq, payload } => {
             format!("license_status {}{}", payload.state, seq_suffix(*seq))
         }
+        Inbound::SystemInfo { seq, payload } => format!(
+            "system_info fw={} transport={} wifi={}({}) ble={}({}) cloud={} license={}{}",
+            payload.fw,
+            payload.transport,
+            payload.wifi_name,
+            payload.wifi_state,
+            payload.ble_name,
+            payload.ble_state,
+            payload.cloud,
+            payload.license,
+            seq_suffix(*seq)
+        ),
+        Inbound::DeviceSettings { seq, payload } => format!(
+            "device_settings volume={} brightness={}{}",
+            payload.volume,
+            payload.brightness,
+            seq_suffix(*seq)
+        ),
         Inbound::HelloAck(ack) => format!(
             "hello_ack fw={} transport={} caps=[{}]",
             ack.fw,
@@ -78,6 +96,18 @@ fn seq_suffix(seq: Option<u64>) -> String {
     match seq {
         Some(n) => format!(" seq={n}"),
         None => String::new(),
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn ensure_usb_provisioning_transport(
+    connected: bool,
+    kind: transport::TransportKind,
+) -> Result<(), String> {
+    if connected && kind == transport::TransportKind::Usb {
+        Ok(())
+    } else {
+        Err("WiFi and UUID/AuthKey settings require an active USB connection".to_string())
     }
 }
 
@@ -110,6 +140,17 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
         }),
         Inbound::LicenseStatus { seq, payload } => json!({
             "kind": "license_status", "seq": seq, "state": payload.state
+        }),
+        Inbound::SystemInfo { seq, payload } => json!({
+            "kind": "system_info", "seq": seq,
+            "fw": payload.fw, "transport": payload.transport,
+            "wifi_name": payload.wifi_name, "wifi_state": payload.wifi_state,
+            "ble_name": payload.ble_name, "ble_state": payload.ble_state,
+            "cloud": payload.cloud, "license": payload.license
+        }),
+        Inbound::DeviceSettings { seq, payload } => json!({
+            "kind": "device_settings", "seq": seq,
+            "volume": payload.volume, "brightness": payload.brightness
         }),
         Inbound::HelloAck(ack) => json!({
             "kind": "hello_ack", "fw": ack.fw,
@@ -164,6 +205,11 @@ mod app {
         logs: Vec<String>,
         last_error: String,
         voice_source: VoiceSource,
+        /// Last settings state reported by the AK. Defaults match firmware and
+        /// is replaced by the board's authoritative values after each hello.
+        device_volume: u8,
+        device_brightness: u8,
+        device_settings_synced: bool,
         /// FP-4b (route B): the window-focus + SendInput controller ("the
         /// hands") and the pure router that maps board events to control
         /// actions. This is the control path that supersedes route A.
@@ -213,6 +259,9 @@ mod app {
         firmware_version: String,
         last_error: String,
         voice_source: String,
+        device_volume: u8,
+        device_brightness: u8,
+        device_settings_synced: bool,
         control_enabled: bool,
     }
 
@@ -229,6 +278,13 @@ mod app {
 
     fn write_board(state: &Shared, payload: &Value) -> Result<(), String> {
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        let transport = inner.transport.as_mut().ok_or("device is not connected")?;
+        transport.write_json(payload)
+    }
+
+    fn write_board_usb_only(state: &Shared, payload: &Value) -> Result<(), String> {
+        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        crate::ensure_usb_provisioning_transport(inner.transport.is_some(), inner.kind)?;
         let transport = inner.transport.as_mut().ok_or("device is not connected")?;
         transport.write_json(payload)
     }
@@ -257,7 +313,7 @@ mod app {
     }
 
     /// Enable/disable routing board key/nav frames to Kiro Crew control. Default
-    /// is OFF: while disabled the board only reports trigger state to the UI and
+    /// is ON; while disabled the board only reports trigger state to the UI and
     /// never drives the local Kiro Crew window.
     #[tauri::command]
     fn set_control_enabled(app: AppHandle, state: State<Shared>, enabled: bool) -> Result<(), String> {
@@ -283,6 +339,9 @@ mod app {
             firmware_version: inner.firmware.clone(),
             last_error: inner.last_error.clone(),
             voice_source: inner.voice_source.as_str().to_string(),
+            device_volume: inner.device_volume,
+            device_brightness: inner.device_brightness,
+            device_settings_synced: inner.device_settings_synced,
             control_enabled: inner.control_enabled,
         })
     }
@@ -350,6 +409,7 @@ mod app {
             inner.endpoint = endpoint.clone();
             inner.transport = Some(boxed);
             inner.last_error.clear();
+            inner.device_settings_synced = false;
             inner.connection_id = inner.connection_id.wrapping_add(1);
             inner.connection_id
         };
@@ -362,6 +422,16 @@ mod app {
         // greeting deliberately waits until after notify-subscription).
         spawn_board_reader(app.clone(), shared.clone(), line_rx, connection_id);
         write_board(shared, &protocol::hello_payload())?;
+        let aliases = shared
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .kc_binds
+            .aliases
+            .clone();
+        if let Err(err) = write_board(shared, &protocol::binding_aliases_payload(&aliases)) {
+            log_line(&app, format!("[WARN] binding alias sync failed: {err}"));
+        }
         log_line(
             &app,
             format!("[INFO] connected transport={kind:?} endpoint={endpoint}"),
@@ -387,6 +457,7 @@ mod app {
         }
         inner.kind = TransportKind::None;
         inner.endpoint.clear();
+        inner.device_settings_synced = false;
         inner.connection_id = inner.connection_id.wrapping_add(1);
         Ok(())
     }
@@ -414,6 +485,26 @@ mod app {
         write_board(state.inner(), &protocol::config_payload(&voice_engine))
     }
 
+    /// Set both runtime device values. The AK applies the command and reports a
+    /// `device_settings_state` frame; the UI updates from that authoritative echo.
+    #[tauri::command]
+    fn set_device_settings(
+        state: State<Shared>,
+        volume: u8,
+        brightness: u8,
+    ) -> Result<(), String> {
+        if volume > 100 {
+            return Err(format!("volume must be 0..=100 (got {volume})"));
+        }
+        if !(10..=100).contains(&brightness) {
+            return Err(format!("brightness must be 10..=100 (got {brightness})"));
+        }
+        write_board(
+            state.inner(),
+            &protocol::device_settings_payload(volume, brightness),
+        )
+    }
+
     /// Provision Wi-Fi on the board: send SSID + password over the JSONL
     /// channel. The board applies it via netmgr and reports back a wifi_status
     /// frame (surfaced to the UI as a 'wifi-status' event).
@@ -422,7 +513,7 @@ mod app {
         if ssid.trim().is_empty() {
             return Err("SSID is required".to_string());
         }
-        write_board(state.inner(), &protocol::wifi_payload(ssid.trim(), &pass))
+        write_board_usb_only(state.inner(), &protocol::wifi_payload(ssid.trim(), &pass))
     }
 
     /// Provision the device license (UUID + AuthKey) on the board. The board
@@ -434,7 +525,10 @@ mod app {
         if uuid.trim().is_empty() || authkey.trim().is_empty() {
             return Err("UUID and AuthKey are both required".to_string());
         }
-        write_board(state.inner(), &protocol::license_payload(uuid.trim(), authkey.trim()))
+        write_board_usb_only(
+            state.inner(),
+            &protocol::license_payload(uuid.trim(), authkey.trim()),
+        )
     }
 
     /// FP-5: choose which ASR handles a board voice event. `cloud` = board mic +
@@ -502,6 +596,38 @@ mod app {
             .kc_binds
             .chats
             .clone())
+    }
+
+    /// Return optional display aliases for slots A, B, and C. Empty entries use
+    /// the default letter on the AK.
+    #[tauri::command]
+    fn kc_bind_aliases_get(state: State<Shared>) -> Result<Vec<String>, String> {
+        Ok(state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .kc_binds
+            .aliases
+            .clone())
+    }
+
+    /// Persist one slot alias and immediately synchronize all aliases to the AK
+    /// when connected. Saving while offline still succeeds; connect_device sends
+    /// the stored values on the next connection.
+    #[tauri::command]
+    fn kc_bind_alias_set(
+        state: State<Shared>,
+        slot: u8,
+        alias: String,
+    ) -> Result<Vec<String>, String> {
+        let aliases = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.kc_binds.set_alias(slot, &alias)?;
+            inner.kc_binds.save()?;
+            inner.kc_binds.aliases.clone()
+        };
+        let _ = write_board(state.inner(), &protocol::binding_aliases_payload(&aliases));
+        Ok(aliases)
     }
 
     /// M4: bind slot `slot` (1-based) to chat `number` (`1..=9`). Validates the
@@ -872,6 +998,11 @@ mod app {
                     inner.firmware = ack.fw.clone();
                 }
             }
+            Inbound::SystemInfo { payload, .. } => {
+                if let Ok(mut inner) = state.inner.lock() {
+                    inner.firmware = payload.fw.clone();
+                }
+            }
             _ => {}
         }
         // Acknowledge sequenced board events.
@@ -879,7 +1010,9 @@ mod app {
         | Inbound::Nav { seq: Some(seq), .. }
         | Inbound::Voice { seq: Some(seq), .. }
         | Inbound::Macro { seq: Some(seq), .. }
-        | Inbound::Asr { seq: Some(seq), .. } = &frame
+        | Inbound::Asr { seq: Some(seq), .. }
+        | Inbound::SystemInfo { seq: Some(seq), .. }
+        | Inbound::DeviceSettings { seq: Some(seq), .. } = &frame
         {
             let _ = write_board(state, &protocol::ack_payload(*seq));
         }
@@ -909,6 +1042,24 @@ mod app {
         if let Inbound::LicenseStatus { payload, .. } = &frame {
             let _ = app.emit("license-status", payload.state.clone());
             log_line(app, format!("[LICENSE] {}", payload.state));
+        }
+
+        // AK owns the applied runtime values. Mirror every hello/local/remote
+        // settings report into backend state and the Device view.
+        if let Inbound::DeviceSettings { payload, .. } = &frame {
+            if let Ok(mut inner) = state.inner.lock() {
+                inner.device_volume = payload.volume;
+                inner.device_brightness = payload.brightness;
+                inner.device_settings_synced = true;
+            }
+            let _ = app.emit("device-settings", payload.clone());
+            log_line(
+                app,
+                format!(
+                    "[DEVICE] volume={} brightness={}",
+                    payload.volume, payload.brightness
+                ),
+            );
         }
 
         // FP-5: on a voice-start edge, if the active source is the PC's own ASR,
@@ -984,6 +1135,9 @@ mod app {
                 logs: Vec::new(),
                 last_error: String::new(),
                 voice_source: VoiceSource::default(),
+                device_volume: 70,
+                device_brightness: 100,
+                device_settings_synced: false,
                 kc_controller: KiroCrewController::new(None),
                 kc_router: ControlRouter::new(crate::kirocrew_control::ControlCtx {
                     jump_chats,
@@ -1011,6 +1165,7 @@ mod app {
                 send_display,
                 send_led,
                 send_config,
+                set_device_settings,
                 send_wifi,
                 send_license,
                 set_voice_source,
@@ -1019,6 +1174,8 @@ mod app {
                 kc_command_bar,
                 kc_chord,
                 kc_bind_get,
+                kc_bind_aliases_get,
+                kc_bind_alias_set,
                 kc_bind_set,
                 kc_bind_clear,
                 status_sink_start,
@@ -1078,6 +1235,22 @@ mod tests {
         assert_eq!(json["kind"], "voice");
         assert_eq!(json["seq"], 3);
         assert_eq!(json["state"], "start");
+    }
+
+    #[test]
+    fn provisioning_requires_connected_usb_transport() {
+        assert!(ensure_usb_provisioning_transport(true, transport::TransportKind::Usb).is_ok());
+
+        for (connected, kind) in [
+            (false, transport::TransportKind::None),
+            (false, transport::TransportKind::Usb),
+            (true, transport::TransportKind::Ble),
+        ] {
+            assert_eq!(
+                ensure_usb_provisioning_transport(connected, kind).unwrap_err(),
+                "WiFi and UUID/AuthKey settings require an active USB connection"
+            );
+        }
     }
 
     #[test]

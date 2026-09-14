@@ -83,6 +83,30 @@ pub fn config_payload(voice_engine: &str) -> Value {
     })
 }
 
+/// PC -> board: synchronize optional display aliases for slots A, B, and C.
+/// Empty strings tell the AK to render the corresponding default letter.
+pub fn binding_aliases_payload(aliases: &[String]) -> Value {
+    let alias = |index: usize| aliases.get(index).map(String::as_str).unwrap_or("");
+    serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "type": "bindings",
+        "payload": {
+            "alias_a": alias(0),
+            "alias_b": alias(1),
+            "alias_c": alias(2)
+        }
+    })
+}
+
+/// PC -> board: set the current device volume and screen brightness.
+pub fn device_settings_payload(volume: u8, brightness: u8) -> Value {
+    serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "type": "device_settings",
+        "payload": { "volume": volume, "brightness": brightness }
+    })
+}
+
 /// PC -> board: provision Wi-Fi credentials. The board connects via netmgr and
 /// reports back a `wifi_status` frame.
 pub fn wifi_payload(ssid: &str, pass: &str) -> Value {
@@ -228,6 +252,34 @@ pub struct LicenseStatusPayload {
     pub state: String,
 }
 
+/// `system_info` payload: consolidated diagnostics emitted on UART0.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SystemInfoPayload {
+    #[serde(default)]
+    pub fw: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub wifi_name: String,
+    #[serde(default)]
+    pub wifi_state: String,
+    #[serde(default)]
+    pub ble_name: String,
+    #[serde(default)]
+    pub ble_state: String,
+    #[serde(default)]
+    pub cloud: String,
+    #[serde(default)]
+    pub license: String,
+}
+
+/// `device_settings_state` payload: the values currently applied by the AK.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSettingsPayload {
+    pub volume: u8,
+    pub brightness: u8,
+}
+
 // ─────────────────────── Payload structs (PC -> board) ───────────────────────
 
 /// `display` payload.
@@ -298,6 +350,10 @@ pub enum Inbound {
     WifiStatus { seq: Option<u64>, payload: WifiStatusPayload },
     /// The board's device-license provisioning result.
     LicenseStatus { seq: Option<u64>, payload: LicenseStatusPayload },
+    /// Consolidated firmware/network/radio diagnostics emitted on UART0.
+    SystemInfo { seq: Option<u64>, payload: SystemInfoPayload },
+    /// The volume and brightness currently applied by the board.
+    DeviceSettings { seq: Option<u64>, payload: DeviceSettingsPayload },
     HelloAck(HelloAckPayload),
     Ping,
     Pong,
@@ -352,6 +408,12 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "license_status" => serde_json::from_value::<LicenseStatusPayload>(payload)
             .ok()
             .map(|p| Inbound::LicenseStatus { seq, payload: p }),
+        "system_info" => serde_json::from_value::<SystemInfoPayload>(payload)
+            .ok()
+            .map(|p| Inbound::SystemInfo { seq, payload: p }),
+        "device_settings_state" => serde_json::from_value::<DeviceSettingsPayload>(payload)
+            .ok()
+            .map(|p| Inbound::DeviceSettings { seq, payload: p }),
         "hello_ack" => serde_json::from_value::<HelloAckPayload>(payload)
             .ok()
             .map(Inbound::HelloAck),
@@ -443,6 +505,15 @@ mod tests {
         assert_eq!(display["payload"]["state"], "running");
         assert_eq!(led_payload("on", "green")["payload"]["color"], "green");
         assert_eq!(config_payload("system")["payload"]["voice_engine"], "system");
+        let aliases = binding_aliases_payload(&["Plan".into(), "".into()]);
+        assert_eq!(aliases["type"], "bindings");
+        assert_eq!(aliases["payload"]["alias_a"], "Plan");
+        assert_eq!(aliases["payload"]["alias_b"], "");
+        assert_eq!(aliases["payload"]["alias_c"], "");
+        let settings = device_settings_payload(70, 90);
+        assert_eq!(settings["type"], "device_settings");
+        assert_eq!(settings["payload"]["volume"], 70);
+        assert_eq!(settings["payload"]["brightness"], 90);
         assert_eq!(ack_payload(42)["payload"]["seq"], 42);
     }
 
@@ -597,6 +668,48 @@ mod tests {
             Inbound::LicenseStatus {
                 seq: Some(14),
                 payload: LicenseStatusPayload { state: "written".into() },
+            }
+        );
+    }
+
+    #[test]
+    fn system_info_decodes_all_feedback_fields() {
+        let info = decode_line(
+            r#"{"v":1,"seq":15,"type":"system_info","payload":{"fw":"0.1.1","transport":"dual","wifi_name":"MyAP","wifi_state":"connected","ble_name":"Agentic Keyboard-A1B2C3","ble_state":"advertising","cloud":"ready","license":"present"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            info,
+            Inbound::SystemInfo {
+                seq: Some(15),
+                payload: SystemInfoPayload {
+                    fw: "0.1.1".into(),
+                    transport: "dual".into(),
+                    wifi_name: "MyAP".into(),
+                    wifi_state: "connected".into(),
+                    ble_name: "Agentic Keyboard-A1B2C3".into(),
+                    ble_state: "advertising".into(),
+                    cloud: "ready".into(),
+                    license: "present".into(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn device_settings_payload_and_state_roundtrip() {
+        let state = decode_line(
+            r#"{"v":1,"seq":15,"type":"device_settings_state","payload":{"volume":60,"brightness":80}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            state,
+            Inbound::DeviceSettings {
+                seq: Some(15),
+                payload: DeviceSettingsPayload {
+                    volume: 60,
+                    brightness: 80,
+                },
             }
         );
     }

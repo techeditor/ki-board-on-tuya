@@ -450,3 +450,22 @@ ak_ble_link_state_t ak_ble_gatt_link_state(void)
     }
     return AK_BLE_LINK_ADVERTISING;
 }
+
+const char *ak_ble_gatt_device_name(void)
+{
+    prepare_device_name();
+    return s_ble_name;
+}
+
+const char *ak_ble_gatt_link_state_str(ak_ble_link_state_t state)
+{
+    switch (state) {
+    case AK_BLE_LINK_LIVE:
+        return "live";
+    case AK_BLE_LINK_CONNECTED:
+        return "connected";
+    case AK_BLE_LINK_ADVERTISING:
+    default:
+        return "advertising";
+    }
+}

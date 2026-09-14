@@ -17,38 +17,52 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Number of bindable slots (K1, K2, K3).
+/// Number of bindable slots (K1, K2, K3), named A, B, and C in the UI.
 pub const SLOT_COUNT: usize = 3;
+/// Maximum alias width that fits the AK's 64-pixel sidebar (7 × 8px glyphs).
+pub const ALIAS_MAX_CHARS: usize = 7;
 
 /// Default chat number for slot `i` (0-based): K1->1, K2->2, K3->3.
 fn default_chats() -> Vec<u8> {
     vec![1, 2, 3]
 }
 
-/// The persisted per-key chat-number store. `chats[i]` is the chat number
-/// (`1..=9`) that K(i+1) jumps to. Length is exactly `SLOT_COUNT` after load.
+/// Empty persisted aliases mean that the AK displays the defaults A, B, and C.
+fn default_aliases() -> Vec<String> {
+    vec![String::new(); SLOT_COUNT]
+}
+
+/// The persisted per-key binding store. `chats[i]` is the chat number
+/// (`1..=9`) that K(i+1) jumps to; `aliases[i]` is its optional AK label.
+/// Both vectors have exactly `SLOT_COUNT` entries after load.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindStore {
-    /// Fixed-length: index 0 = slot 1 (K1), … index 2 = slot 3 (K3).
+    /// Index 0..=2 maps K1..=K3 to the A/B/C slots.
     #[serde(default = "default_chats")]
     pub chats: Vec<u8>,
+    /// Optional display aliases; an empty entry falls back to A, B, or C.
+    #[serde(default = "default_aliases")]
+    pub aliases: Vec<String>,
 }
 
 impl Default for BindStore {
     fn default() -> Self {
-        Self { chats: default_chats() }
+        Self {
+            chats: default_chats(),
+            aliases: default_aliases(),
+        }
     }
 }
 
 impl BindStore {
-    /// A store with the default chat numbers (`[1, 2, 3]`).
+    /// A store with default chat numbers and no custom aliases.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Ensure the chats vector is exactly `SLOT_COUNT` long, filling any missing
-    /// slot with its default number and clamping every entry to `1..=9`. Called
-    /// after load (tolerant to a truncated / over-long / out-of-range file).
+    /// Ensure both vectors are exactly `SLOT_COUNT` long and all values are
+    /// valid. Malformed persisted aliases fall back to their default A/B/C
+    /// labels rather than leaking unsupported text to the AK display.
     fn normalize(&mut self) {
         let defaults = default_chats();
         if self.chats.len() < SLOT_COUNT {
@@ -62,6 +76,12 @@ impl BindStore {
             if !(1..=9).contains(n) {
                 *n = defaults[i];
             }
+        }
+
+        self.aliases.resize(SLOT_COUNT, String::new());
+        self.aliases.truncate(SLOT_COUNT);
+        for alias in &mut self.aliases {
+            *alias = normalize_alias(alias).unwrap_or_default();
         }
     }
 
@@ -81,8 +101,16 @@ impl BindStore {
         }
     }
 
-    /// Reset slot `n` (1-based) to its default number (slot index + 1).
-    /// Out-of-range is a no-op.
+    /// Set an optional display alias for slot A, B, or C. Empty input clears the
+    /// alias. The AK font is ASCII-only and the sidebar fits at most 7 glyphs.
+    pub fn set_alias(&mut self, n: u8, alias: &str) -> Result<(), String> {
+        let i = idx(n).ok_or_else(|| format!("binding slot must be 1..={SLOT_COUNT}"))?;
+        self.aliases[i] = normalize_alias(alias)?;
+        Ok(())
+    }
+
+    /// Reset slot `n` (1-based) to its default chat number (slot index + 1).
+    /// Out-of-range is a no-op. Its independent display alias is preserved.
     pub fn clear(&mut self, n: u8) {
         if let Some(i) = idx(n) {
             if let Some(slot) = self.chats.get_mut(i) {
@@ -116,6 +144,19 @@ impl BindStore {
     }
 }
 
+fn normalize_alias(alias: &str) -> Result<String, String> {
+    let alias = alias.trim();
+    if !alias.is_ascii() || !alias.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return Err("alias must contain displayable ASCII characters only".to_string());
+    }
+    if alias.len() > ALIAS_MAX_CHARS {
+        return Err(format!(
+            "alias must be at most {ALIAS_MAX_CHARS} characters"
+        ));
+    }
+    Ok(alias.to_string())
+}
+
 /// Map a 1-based slot number to a 0-based index within `0..SLOT_COUNT`.
 fn idx(n: u8) -> Option<usize> {
     let i = (n as usize).checked_sub(1)?;
@@ -143,9 +184,10 @@ mod tests {
     // ── default / get / set / clear ──────────────────────────
 
     #[test]
-    fn new_store_has_default_chat_numbers() {
+    fn new_store_has_default_chat_numbers_and_empty_aliases() {
         let s = BindStore::new();
         assert_eq!(s.chats, vec![1, 2, 3]);
+        assert_eq!(s.aliases, vec!["", "", ""]);
         assert_eq!(s.get(1), Some(1));
         assert_eq!(s.get(2), Some(2));
         assert_eq!(s.get(3), Some(3));
@@ -156,13 +198,27 @@ mod tests {
         let mut s = BindStore::new();
         s.set(2, 7);
         assert_eq!(s.get(2), Some(7));
-        // Slots 1 and 3 keep their defaults.
+        // Slots A and C keep their defaults.
         assert_eq!(s.get(1), Some(1));
         assert_eq!(s.get(3), Some(3));
 
-        // Clear resets slot 2 to its default (index+1 = 2).
+        // Clear resets slot B's chat number but preserves its display alias.
+        s.set_alias(2, " Build ").unwrap();
         s.clear(2);
         assert_eq!(s.get(2), Some(2));
+        assert_eq!(s.aliases[1], "Build");
+    }
+
+    #[test]
+    fn alias_validation_matches_ak_display_limits() {
+        let mut s = BindStore::new();
+        s.set_alias(1, "Plan-1").unwrap();
+        assert_eq!(s.aliases[0], "Plan-1");
+        s.set_alias(1, "   ").unwrap();
+        assert_eq!(s.aliases[0], "");
+        assert!(s.set_alias(2, "12345678").is_err());
+        assert!(s.set_alias(2, "中文").is_err());
+        assert!(s.set_alias(4, "Build").is_err());
     }
 
     #[test]
@@ -196,38 +252,42 @@ mod tests {
         let mut s = BindStore::new();
         s.set(1, 4);
         s.set(3, 8);
+        s.set_alias(1, "Plan").unwrap();
         let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(json, r#"{"chats":[4,2,8]}"#);
+        assert_eq!(json, r#"{"chats":[4,2,8],"aliases":["Plan","",""]}"#);
         let back: BindStore = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
     }
 
     #[test]
-    fn load_normalizes_short_and_long_and_out_of_range_vectors() {
-        // Truncated (1 entry) -> padded to SLOT_COUNT with defaults.
-        let mut short: BindStore = serde_json::from_str(r#"{"chats":[5]}"#).unwrap();
-        short.normalize();
-        assert_eq!(short.chats, vec![5, 2, 3]);
+    fn load_normalizes_vectors_and_migrates_old_files() {
+        // Old files have no aliases; serde defaults them to three empty entries.
+        let mut old: BindStore = serde_json::from_str(r#"{"chats":[5]}"#).unwrap();
+        old.normalize();
+        assert_eq!(old.chats, vec![5, 2, 3]);
+        assert_eq!(old.aliases, vec!["", "", ""]);
 
-        // Over-long (5 entries) -> truncated to SLOT_COUNT.
         let mut long: BindStore =
-            serde_json::from_str(r#"{"chats":[9,8,7,6,5]}"#).unwrap();
+            serde_json::from_str(r#"{"chats":[9,8,7,6],"aliases":["One","Two","Three","Four"]}"#)
+                .unwrap();
         long.normalize();
         assert_eq!(long.chats, vec![9, 8, 7]);
+        assert_eq!(long.aliases, vec!["One", "Two", "Three"]);
 
-        // Out-of-range entries -> replaced with each slot's default.
-        let mut bad: BindStore = serde_json::from_str(r#"{"chats":[0,10,4]}"#).unwrap();
+        // Invalid chat numbers and aliases both fall back safely.
+        let mut bad: BindStore =
+            serde_json::from_str(r#"{"chats":[0,10,4],"aliases":["12345678","中文","Ok"]}"#)
+                .unwrap();
         bad.normalize();
         assert_eq!(bad.chats, vec![1, 2, 4]);
+        assert_eq!(bad.aliases, vec!["", "", "Ok"]);
     }
 
     #[test]
     fn empty_object_deserializes_to_defaults() {
-        // Missing `chats` -> serde default -> [1,2,3]; normalize keeps it.
         let mut s: BindStore = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.chats, vec![1, 2, 3]);
         s.normalize();
-        assert_eq!(s.chats.len(), SLOT_COUNT);
         assert_eq!(s.chats, vec![1, 2, 3]);
+        assert_eq!(s.aliases, vec!["", "", ""]);
     }
 }
