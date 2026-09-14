@@ -1343,9 +1343,12 @@ static void ak_voice_route_update(bool announce)
 #endif
         }
 
+        /* Cloud/Wi-Fi is expected to be unavailable during initial startup.
+         * Announce only a real ready -> unavailable transition, not the initial
+         * fallback selected before association and AI-agent startup complete. */
         bool play_failure_prompt =
-            announce && s_voice_route.fallback &&
-            (!was_initialized || !was_fallback);
+            announce && was_initialized && !was_fallback &&
+            s_voice_route.fallback;
         bool play_recovery_prompt =
             announce && was_initialized && was_fallback &&
             s_voice_route.effective == AK_VOICE_CLOUD;
