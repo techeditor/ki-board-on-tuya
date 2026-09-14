@@ -55,8 +55,19 @@ void ak_gfx_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t c
  */
 void ak_gfx_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale);
 
+/**
+ * @brief Draw one glyph with single-pixel stems for light-weight body text.
+ *
+ * Keeps the same 8x8 cell and API as ak_gfx_char(), so layouts can mix a
+ * regular title with thin content without adding a second font table.
+ */
+void ak_gfx_char_thin(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale);
+
 /** @brief Draw a NUL-terminated string left-to-right on one line. */
 void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale);
+
+/** @brief Draw a NUL-terminated string using the thin body-text style. */
+void ak_gfx_text_thin(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale);
 
 /**
  * @brief Draw an opaque 1-bpp bitmap, row-major and MSB-first.

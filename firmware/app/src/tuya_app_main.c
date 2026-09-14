@@ -23,6 +23,7 @@
 #include "ak_cloud.h"
 #include "ak_wifi.h"
 #include "ak_input.h"
+#include "ak_icons16.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
 #include "ak_statuslcd.h"
@@ -407,10 +408,21 @@ static uint16_t ak_status_color(const char *state)
     return AK_COL_DKBLUE;
 }
 
-/* Word-blind wrap of ASCII text into the content area; non-ASCII -> '.'. */
+#define LCD_SIDEBAR_W       64U
+#define LCD_SESSION_ROWS    3U
+#define LCD_SESSION_ROW_H   73U
+#define LCD_CHAT_X          (LCD_SIDEBAR_W + 6U)
+#define LCD_CHAT_TEXT_COLS  29U
+#define LCD_CHAT_TEXT_Y     76U
+#define LCD_ASR_TEXT_Y      150U
+#define LCD_ASR_TEXT_COLS   29U
+#define LCD_ASR_LINES       9U
+#define LCD_TEXT_LINE_H     10U
+
+/* Wrap ASCII chat text inside the right-hand history panel; non-ASCII -> '.'. */
 static void ak_status_wrap(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t max_lines)
 {
-    const uint16_t cols   = 36; /* ~ (320-12)/8 chars per line at scale 1 */
+    const uint16_t cols   = LCD_CHAT_TEXT_COLS;
     const uint16_t line_h = 10;
     char           buf[40];
     uint16_t       col = 0, ln = 0;
@@ -420,22 +432,16 @@ static void ak_status_wrap(uint16_t x, uint16_t y, const char *s, uint16_t fg, u
         buf[col++]      = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
         if (col >= cols) {
             buf[col] = '\0';
-            ak_gfx_text(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
+            ak_gfx_text_thin(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
             col = 0;
             ln++;
         }
     }
     if (col > 0 && ln < max_lines) {
         buf[col] = '\0';
-        ak_gfx_text(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
     }
 }
-
-#define ASR_PANEL_Y       116U
-#define ASR_TEXT_Y        140U
-#define ASR_TEXT_COLS     38U /* 38 glyphs * 8 px = 304 px */
-#define ASR_VISIBLE_LINES 10U
-#define ASR_LINE_H        10U
 
 static const char *ak_voice_ui_label(void)
 {
@@ -510,7 +516,7 @@ static uint16_t ak_asr_line_count(const char *text)
         }
         (void)ak_asr_next_glyph(&p);
         col++;
-        if (col >= ASR_TEXT_COLS && *p != '\0') {
+        if (col >= LCD_ASR_TEXT_COLS && *p != '\0') {
             lines++;
             col = 0;
         }
@@ -521,17 +527,17 @@ static uint16_t ak_asr_line_count(const char *text)
 static void ak_asr_draw_line(uint16_t line_index, uint16_t scroll_line,
                              const char *line)
 {
-    if (line_index < scroll_line || line_index >= scroll_line + ASR_VISIBLE_LINES) {
+    if (line_index < scroll_line || line_index >= scroll_line + LCD_ASR_LINES) {
         return;
     }
     uint16_t visible = (uint16_t)(line_index - scroll_line);
-    ak_gfx_text(6, (uint16_t)(ASR_TEXT_Y + visible * ASR_LINE_H), line,
+    ak_gfx_text_thin(LCD_CHAT_X, (uint16_t)(LCD_ASR_TEXT_Y + visible * LCD_TEXT_LINE_H), line,
                 AK_COL_WHITE, AK_COL_BLACK, 1);
 }
 
 static void ak_asr_draw_transcript(void)
 {
-    char line[ASR_TEXT_COLS + 1U];
+    char line[LCD_ASR_TEXT_COLS + 1U];
     uint16_t col = 0;
     uint16_t line_index = 0;
     const char *p = s_asr_transcript;
@@ -545,7 +551,7 @@ static void ak_asr_draw_transcript(void)
             continue;
         }
         line[col++] = ak_asr_next_glyph(&p);
-        if (col >= ASR_TEXT_COLS) {
+        if (col >= LCD_ASR_TEXT_COLS) {
             line[col] = '\0';
             ak_asr_draw_line(line_index++, s_asr_scroll_line, line);
             col = 0;
@@ -597,15 +603,40 @@ static uint16_t ak_link_header(char *out, uint32_t out_len)
 #endif
 }
 
-/* Render a Kiro Crew agent-status screen from a `display` frame. The title bar
- * doubles as the connection-status header (transport + BLE link state). */
+static void ak_draw_session_sidebar(const char *state)
+{
+    static const char labels[LCD_SESSION_ROWS] = {'A', 'B', 'C'};
+
+    for (uint16_t i = 0; i < LCD_SESSION_ROWS; i++) {
+        uint16_t y = (uint16_t)(22U + i * LCD_SESSION_ROW_H);
+        uint16_t h = (i + 1U == LCD_SESSION_ROWS)
+                         ? (uint16_t)(AK_STATUSLCD_H - y)
+                         : LCD_SESSION_ROW_H;
+        uint16_t bg = (i == 0U) ? AK_COL_DKBLUE : AK_COL_BLACK;
+        uint16_t fg = (i == 0U) ? ak_status_color(state) : AK_COL_GRAY;
+
+        ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W - 1U, h, bg);
+        ak_gfx_icon(24U, (uint16_t)(y + 17U), AK_ICON_KIRO_GHOST,
+                    AK_ICON_W, AK_ICON_H, fg, bg);
+        ak_gfx_char_thin(28U, (uint16_t)(y + 42U), labels[i], AK_COL_WHITE, bg, 1);
+        if (i > 0U) {
+            ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W, 1U, AK_COL_GRAY);
+        }
+    }
+    ak_gfx_fill_rect(LCD_SIDEBAR_W - 1U, 22U, 1U,
+                     AK_STATUSLCD_H - 22U, AK_COL_GRAY);
+}
+
+/* Render the reference layout: header, three session slots at left, and chat
+ * history at right. Until session IDs arrive on the wire, slot A represents
+ * the active session while B/C remain neutral placeholders. */
 static void ak_render_status(const char *agent, const char *state, const char *text)
 {
     if (!ak_statuslcd_ready()) {
         return;
     }
-    char     header[32];
-    uint16_t link_color = ak_link_header(header, sizeof(header));
+    char     link_text[32];
+    uint16_t link_color = ak_link_header(link_text, sizeof(link_text));
     char     line[48];
     uint16_t voice_color = ak_voice_ui_color();
 
@@ -618,30 +649,30 @@ static void ak_render_status(const char *agent, const char *state, const char *t
     ble_connected = (ak_ble_gatt_link_state() != AK_BLE_LINK_ADVERTISING);
 #endif
 
-    /* Title bar = connection-status header. Right side shows WiFi, USB and BLE
-     * link state. The voice dot sits just left of the three icons. */
-    ak_statuslcd_title_links(header, link_color, s_wifi_connected, usb_connected,
-                             ble_connected);
-    ak_voice_ui_dot(244, 11,
-                    (s_voice_ui_state == AK_VOICE_UI_LISTENING && !s_voice_ui_blink_on)
-                        ? link_color
-                        : voice_color);
+    /* Header keeps the live transport icons; the reference content layout
+     * begins directly below its existing 22 px height. */
+    ak_statuslcd_title_links("Ki-board for Kiro Crew", link_color, s_wifi_connected,
+                             usb_connected, ble_connected);
+    ak_draw_session_sidebar(state);
 
-    (void)snprintf(line, sizeof(line), "agent: %s", agent[0] ? agent : "-");
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 2, line, AK_COL_WHITE, AK_COL_BLACK, 1);
-    (void)snprintf(line, sizeof(line), "state: %s", state[0] ? state : "-");
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 16, line, ak_status_color(state), AK_COL_BLACK, 1);
-    (void)snprintf(line, sizeof(line), "voice: %s%s", ak_voice_source_str(s_voice_source),
-                   (s_voice_source == AK_VOICE_CLOUD && !ak_asr_available()) ? " (stub)" : "");
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 30, line, AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(LCD_CHAT_X, 28U, "Chat History", AK_COL_CYAN, AK_COL_BLACK, 1);
+    (void)snprintf(line, sizeof(line), "Session A: %s", agent[0] ? agent : "-");
+    ak_gfx_text_thin(LCD_CHAT_X, 43U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
+    (void)snprintf(line, sizeof(line), "Status: %s", state[0] ? state : "-");
+    ak_gfx_text_thin(LCD_CHAT_X, 55U, line, ak_status_color(state), AK_COL_BLACK, 1);
+    ak_gfx_fill_rect(LCD_SIDEBAR_W, 68U,
+                     AK_STATUSLCD_W - LCD_SIDEBAR_W, 1U, AK_COL_GRAY);
+
+    ak_status_wrap(LCD_CHAT_X, LCD_CHAT_TEXT_Y, text, AK_COL_WHITE, 5U);
+
+    ak_gfx_fill_rect(LCD_SIDEBAR_W, 132U,
+                     AK_STATUSLCD_W - LCD_SIDEBAR_W, 1U, AK_COL_GRAY);
     (void)snprintf(line, sizeof(line), "ASR: %s", ak_voice_ui_label());
-    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 44, line, voice_color, AK_COL_BLACK, 1);
-    ak_status_wrap(6, AK_STATUSLCD_CONTENT_Y + 58, text, AK_COL_GRAY, 3);
-
-    /* Fixed lower-half transcript panel. New results reset to line zero; long
-     * results advance one wrapped line per second in ak_voice_ui_tick(). */
-    ak_gfx_fill_rect(0, ASR_PANEL_Y, AK_STATUSLCD_W, 1, AK_COL_GRAY);
-    ak_gfx_text(6, ASR_PANEL_Y + 6, "Tuya ASR transcript", AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(LCD_CHAT_X, 137U, line, voice_color, AK_COL_BLACK, 1);
+    ak_voice_ui_dot(300U, 141U,
+                    (s_voice_ui_state == AK_VOICE_UI_LISTENING && !s_voice_ui_blink_on)
+                        ? AK_COL_BLACK
+                        : voice_color);
     ak_asr_draw_transcript();
     ak_statuslcd_flush();
 }
@@ -720,8 +751,8 @@ static void ak_voice_ui_tick(uint32_t now_ms)
     }
 
     uint16_t total_lines = ak_asr_line_count(s_asr_transcript);
-    uint16_t max_scroll = (total_lines > ASR_VISIBLE_LINES)
-                              ? (uint16_t)(total_lines - ASR_VISIBLE_LINES)
+    uint16_t max_scroll = (total_lines > LCD_ASR_LINES)
+                              ? (uint16_t)(total_lines - LCD_ASR_LINES)
                               : 0;
     if (max_scroll > 0 &&
         (uint32_t)(now_ms - s_asr_last_scroll_ms) >= ASR_SCROLL_INTERVAL_MS) {

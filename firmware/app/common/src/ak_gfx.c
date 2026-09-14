@@ -49,7 +49,42 @@ void ak_gfx_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t c
     tdl_disp_draw_fill(s_fb, &rect, color, s_is_swap);
 }
 
-void ak_gfx_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale)
+static uint8_t ak_gfx_thin_row(uint8_t code, uint8_t row)
+{
+    uint8_t bits = ak_font8x8[code][row];
+    uint8_t above = (row > 0U) ? ak_font8x8[code][row - 1U] : 0U;
+    uint8_t below = (row + 1U < AK_FONT_H) ? ak_font8x8[code][row + 1U] : 0U;
+    uint8_t col = 0U;
+
+    /* Collapse short horizontal runs only when the same run continues in an
+     * adjacent row. This turns 2-3 px VGA stems into 1 px strokes while
+     * retaining one-row horizontal bars and the overall 8x8 glyph shape. */
+    while (col < AK_FONT_W) {
+        if ((bits & (uint8_t)(1U << col)) == 0U) {
+            col++;
+            continue;
+        }
+
+        uint8_t start = col;
+        while (col < AK_FONT_W && (bits & (uint8_t)(1U << col)) != 0U) {
+            col++;
+        }
+        uint8_t len = (uint8_t)(col - start);
+        if (len >= 2U && len <= 3U) {
+            uint8_t mask = (uint8_t)(((1U << len) - 1U) << start);
+            if ((above & mask) == mask || (below & mask) == mask) {
+                uint8_t keep = (uint8_t)((start + len <= AK_FONT_W / 2U)
+                                             ? start
+                                             : (uint8_t)(start + len - 1U));
+                bits = (uint8_t)((bits & (uint8_t)~mask) | (uint8_t)(1U << keep));
+            }
+        }
+    }
+    return bits;
+}
+
+static void ak_gfx_char_impl(uint16_t x, uint16_t y, char c, uint16_t fg,
+                             uint16_t bg, uint8_t scale, bool thin)
 {
     uint8_t code = (uint8_t)c;
 
@@ -67,7 +102,7 @@ void ak_gfx_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8
     ak_gfx_fill_rect(x, y, (uint16_t)(AK_FONT_W * scale), (uint16_t)(AK_FONT_H * scale), bg);
 
     for (uint8_t row = 0; row < AK_FONT_H; row++) {
-        uint8_t bits = ak_font8x8[code][row];
+        uint8_t bits = thin ? ak_gfx_thin_row(code, row) : ak_font8x8[code][row];
         if (bits == 0) {
             continue;
         }
@@ -77,6 +112,16 @@ void ak_gfx_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8
             }
         }
     }
+}
+
+void ak_gfx_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale)
+{
+    ak_gfx_char_impl(x, y, c, fg, bg, scale, false);
+}
+
+void ak_gfx_char_thin(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale)
+{
+    ak_gfx_char_impl(x, y, c, fg, bg, scale, true);
 }
 
 void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale)
@@ -91,6 +136,23 @@ void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg
     uint16_t cursor = x;
     for (; *s != '\0'; s++) {
         ak_gfx_char(cursor, y, *s, fg, bg, scale);
+        cursor = (uint16_t)(cursor + AK_FONT_W * scale);
+    }
+}
+
+void ak_gfx_text_thin(uint16_t x, uint16_t y, const char *s, uint16_t fg,
+                      uint16_t bg, uint8_t scale)
+{
+    if (s == NULL) {
+        return;
+    }
+    if (scale == 0) {
+        scale = 1;
+    }
+
+    uint16_t cursor = x;
+    for (; *s != '\0'; s++) {
+        ak_gfx_char_thin(cursor, y, *s, fg, bg, scale);
         cursor = (uint16_t)(cursor + AK_FONT_W * scale);
     }
 }
