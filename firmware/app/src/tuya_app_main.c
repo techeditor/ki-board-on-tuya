@@ -990,6 +990,9 @@ static void ak_render_status(void)
 
     ak_statuslcd_title_links("Ki-board for Kiro Crew", link_color, s_wifi_connected,
                              usb_connected, ble_connected);
+    /* 22 title glyphs end at x=182; the thin version fits before WiFi at x=256. */
+    ak_gfx_text_thin(186U, 7U, "v" APP_FW_VERSION,
+                     AK_COL_BLACK, link_color, 1);
     ak_draw_session_sidebar();
 
     (void)snprintf(line, sizeof(line), "Session %c: %s",
