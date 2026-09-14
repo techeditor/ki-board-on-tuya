@@ -876,59 +876,48 @@ mod app {
         hook_install::hook_command(&exe)
     }
 
-    /// Report per-agent hook install status (does not modify anything). `exe`
-    /// optional — only affects the `command` string echoed back.
+    /// Report global standalone hook status without modifying anything.
     #[tauri::command]
     fn kc_hook_status(exe: Option<String>) -> Result<hook_install::HookStatus, String> {
         hook_install::status(&resolve_hook_command(exe))
     }
 
-    /// Install `companion --hook` into agentSpawn/userPromptSubmit/postToolUse/stop
-    /// for the explicitly selected local agents (idempotent). Returns status for all
-    /// agents so the UI picker remains complete.
+    /// Install the four lifecycle actions into one user-level standalone v1
+    /// Crew hook file. The file applies globally and activates without restart.
     #[tauri::command]
     fn kc_hook_install(
         app: AppHandle,
         exe: Option<String>,
-        agents: Vec<String>,
     ) -> Result<hook_install::HookStatus, String> {
         let command = resolve_hook_command(exe);
-        let selected_count = agents.len();
-        let st = hook_install::install_selected(&command, &agents)?;
+        let status = hook_install::install(&command)?;
         log_line(
             &app,
-            format!("[KC-HOOK] installed into {selected_count} selected agent(s) · {command}"),
+            format!("[KC-HOOK] global hook installed · {}", status.hook_file),
         );
-        Ok(st)
+        Ok(status)
     }
 
-    /// Remove the companion `--hook` entry from the explicitly selected local
-    /// agents (leaves hand-authored hooks and unselected agents intact).
+    /// Remove only AK Companion entries from the global standalone hook file.
     #[tauri::command]
     fn kc_hook_remove(
         app: AppHandle,
         exe: Option<String>,
-        agents: Vec<String>,
     ) -> Result<hook_install::HookStatus, String> {
-        let selected_count = agents.len();
-        let st = hook_install::remove_selected(&resolve_hook_command(exe), &agents)?;
+        let status = hook_install::remove(&resolve_hook_command(exe))?;
         log_line(
             &app,
-            format!("[KC-HOOK] removed from {selected_count} selected agent(s)"),
+            format!("[KC-HOOK] global hook removed · {}", status.hook_file),
         );
-        Ok(st)
+        Ok(status)
     }
 
-    /// Open the resolved local Kiro agents directory in Windows Explorer. The
-    /// directory comes from the same `agents_dir()` resolver used by hook
-    /// status/install/remove, so the button always opens the folder represented
-    /// by the UI status rather than a separately hard-coded path.
+    /// Open the supported user-level Crew hooks directory in Explorer.
     #[tauri::command]
-    fn kc_open_agents_folder() -> Result<String, String> {
-        let dir = hook_install::agents_dir().ok_or("cannot resolve Kiro agents dir")?;
-        if !dir.is_dir() {
-            return Err(format!("agent folder does not exist: {}", dir.display()));
-        }
+    fn kc_open_hooks_folder() -> Result<String, String> {
+        let dir = hook_install::hooks_dir().ok_or("cannot resolve Kiro Crew hooks directory")?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("create {}: {e}", dir.display()))?;
         std::process::Command::new("explorer.exe")
             .arg(&dir)
             .spawn()
@@ -1188,7 +1177,7 @@ mod app {
                 kc_hook_status,
                 kc_hook_install,
                 kc_hook_remove,
-                kc_open_agents_folder,
+                kc_open_hooks_folder,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");

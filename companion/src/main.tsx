@@ -69,13 +69,12 @@ type KcStatus = {
   forwarded?: boolean;
 };
 
-// FP-4b: one-click global hook install status, mirroring the Rust
-// hook_install::HookStatus / AgentHookState.
-type AgentHookState = { agent: string; installed_events: number };
+// FP-4b: one-click user-level global Crew hook install status.
 type HookStatus = {
   command: string;
-  agents_dir: string;
-  agents: AgentHookState[];
+  hooks_dir: string;
+  hook_file: string;
+  installed_events: number;
   fully_installed: boolean;
   any_installed: boolean;
 };
@@ -87,7 +86,6 @@ type ChatAliases = string[];
 
 const SLOT_DEFAULT_NAMES = ["A", "B", "C"] as const;
 const ALIAS_MAX_CHARS = 7;
-const HOOK_EVENT_COUNT = 4;
 
 const defaultStatus: Status = {
   device_connected: false,
@@ -192,12 +190,8 @@ function App() {
   // FP-4b Route STATUS (option A): the pinned "watched chat". "" = follow all
   // sessions. Non-empty = only that session's status drives the board LCD.
   const [pinnedSession, setPinnedSession] = useState("");
-  // FP-4b: selectable hook installation state. On first load every discovered
-  // agent is selected (preserves the former install-all default); users may
-  // then select individuals, select all, or clear the selection.
+  // FP-4b: one standalone v1 hook file applies to every Crew agent.
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
-  const [selectedHookAgents, setSelectedHookAgents] = useState<string[]>([]);
-  const hookSelectionReadyRef = useRef(false);
 
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
@@ -510,55 +504,21 @@ function App() {
     setPinnedSession("");
   }
 
-  // FP-4b: selected-agent hook install/remove/status. On first discovery,
-  // select the three recommended interactive agents. Later refreshes preserve
-  // the user's selection and drop names that vanished.
-  function acceptHookStatus(st: HookStatus) {
-    setHookStatus(st);
-    const available = st.agents.map((a) => a.agent);
-    setSelectedHookAgents((previous) => {
-      if (!hookSelectionReadyRef.current) {
-        hookSelectionReadyRef.current = true;
-        const recommended = new Set(["kirocrew", "kirocrew-research", "kirocrew-lite"]);
-        return available.filter((agent) => recommended.has(agent));
-      }
-      const availableSet = new Set(available);
-      return previous.filter((agent) => availableSet.has(agent));
-    });
-  }
-
+  // FP-4b: global standalone hook install/remove/status.
   async function hookRefresh() {
-    acceptHookStatus(await invoke<HookStatus>("kc_hook_status", { exe: null }));
+    setHookStatus(await invoke<HookStatus>("kc_hook_status", { exe: null }));
   }
 
-  async function hookOpenAgentsFolder() {
-    await invoke<string>("kc_open_agents_folder");
+  async function hookOpenFolder() {
+    await invoke<string>("kc_open_hooks_folder");
   }
 
   async function hookInstall() {
-    acceptHookStatus(
-      await invoke<HookStatus>("kc_hook_install", {
-        exe: null,
-        agents: selectedHookAgents,
-      }),
-    );
+    setHookStatus(await invoke<HookStatus>("kc_hook_install", { exe: null }));
   }
 
   async function hookRemove() {
-    acceptHookStatus(
-      await invoke<HookStatus>("kc_hook_remove", {
-        exe: null,
-        agents: selectedHookAgents,
-      }),
-    );
-  }
-
-  function toggleHookAgent(agent: string) {
-    setSelectedHookAgents((selected) =>
-      selected.includes(agent)
-        ? selected.filter((name) => name !== agent)
-        : [...selected, agent],
-    );
+    setHookStatus(await invoke<HookStatus>("kc_hook_remove", { exe: null }));
   }
 
   useEffect(() => {
@@ -655,9 +615,9 @@ function App() {
       .then((sid) => setPinnedSession(sid || ""))
       .catch(() => undefined);
 
-    // Load hook status and select all discovered agents on first mount.
+    // Load the user-level global Crew hook status on first mount.
     invoke<HookStatus>("kc_hook_status", { exe: null })
-      .then(acceptHookStatus)
+      .then(setHookStatus)
       .catch(() => undefined);
 
     return () => {
@@ -1156,121 +1116,49 @@ function App() {
                 (<code>companion --hook</code>), gated by a per-run token.
               </p>
 
-              <label style={{ marginTop: 8 }}>Hook installation (choose local agents)</label>
+              <label style={{ marginTop: 8 }}>Global Crew hook installation</label>
               <p className="hint" style={{ marginTop: 4 }}>
-                Choose which agents should run <code>companion --hook</code> for
-                <em> agentSpawn / userPromptSubmit / postToolUse / stop</em>. Install and Remove
-                affect only the checked agents under
-                <code>{hookStatus?.agents_dir ?? "~/.kiro/agents"}</code>;
-                hand-authored hooks and unchecked agents are left untouched.
+                Installs one standalone v1 hook file for every Crew agent under
+                <code>{hookStatus?.hooks_dir ?? "~/.kiro/crew/hooks"}</code>. It covers
+                <em> SessionStart / UserPromptSubmit / PostToolUse / Stop</em>, activates
+                automatically, and never modifies managed Agent JSON files.
               </p>
               <div className="lcd" style={{ marginTop: 6 }}>
                 <span>HOOK</span>
                 <strong className={hookStatus?.fully_installed ? "good-text" : ""}>
                   {!hookStatus
                     ? "-- (checking)"
-                    : hookStatus.agents.length === 0
-                    ? "NO AGENTS FOUND"
                     : hookStatus.fully_installed
-                    ? `INSTALLED · ${hookStatus.agents.length}/${hookStatus.agents.length}`
+                    ? "INSTALLED · 4/4"
                     : hookStatus.any_installed
-                    ? `PARTIAL · ${hookStatus.agents.filter((a) => a.installed_events === HOOK_EVENT_COUNT).length}/${hookStatus.agents.length}`
+                    ? `PARTIAL · ${hookStatus.installed_events}/4`
                     : "NOT INSTALLED"}
                 </strong>
               </div>
+              <p className="hint" style={{ marginTop: 4 }}>
+                <code>{hookStatus?.hook_file ?? "~/.kiro/crew/hooks/ak-companion-status.json"}</code>
+              </p>
               <div className="actions" style={{ marginTop: 6 }}>
-                <button
-                  className="secondary"
-                  disabled={
-                    ssBusy ||
-                    !hookStatus ||
-                    selectedHookAgents.length === hookStatus.agents.length
-                  }
-                  onClick={() =>
-                    setSelectedHookAgents(hookStatus?.agents.map((a) => a.agent) ?? [])
-                  }
-                >
-                  Select all
-                </button>
-                <button
-                  className="secondary"
-                  disabled={ssBusy || selectedHookAgents.length === 0}
-                  onClick={() => setSelectedHookAgents([])}
-                >
-                  Clear selection
-                </button>
                 <button className="secondary" disabled={ssBusy} onClick={() => runSs(hookRefresh)}>
                   Refresh
                 </button>
-                <button
-                  className="secondary"
-                  disabled={ssBusy}
-                  onClick={() => runSs(hookOpenAgentsFolder)}
-                >
-                  Open agent folder
+                <button className="secondary" disabled={ssBusy} onClick={() => runSs(hookOpenFolder)}>
+                  Open hooks folder
                 </button>
-              </div>
-              {hookStatus && hookStatus.agents.length > 0 && (
-                <div className="log" style={{ marginTop: 6 }}>
-                  {hookStatus.agents.map((a) => {
-                    const selected = selectedHookAgents.includes(a.agent);
-                    const installState =
-                      a.installed_events === HOOK_EVENT_COUNT
-                        ? "installed"
-                        : a.installed_events > 0
-                        ? `partial ${a.installed_events}/${HOOK_EVENT_COUNT}`
-                        : "not installed";
-                    return (
-                      <label
-                        key={a.agent}
-                        style={{
-                          alignItems: "center",
-                          cursor: ssBusy ? "default" : "pointer",
-                          display: "flex",
-                          gap: 8,
-                          margin: 0,
-                          opacity: selected ? 1 : 0.65,
-                          textTransform: "none",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={selected}
-                          disabled={ssBusy}
-                          onChange={() => toggleHookAgent(a.agent)}
-                          style={{ width: "auto" }}
-                        />
-                        <span>{a.agent}</span>
-                        <span style={{ marginLeft: "auto" }}>{installState}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
-              <div className="actions" style={{ marginTop: 6 }}>
-                <button
-                  disabled={ssBusy || selectedHookAgents.length === 0}
-                  onClick={() => runSs(hookInstall)}
-                >
-                  Install selected ({selectedHookAgents.length})
+                <button disabled={ssBusy} onClick={() => runSs(hookInstall)}>
+                  Install globally
                 </button>
                 <button
                   className="secondary"
-                  disabled={
-                    ssBusy ||
-                    selectedHookAgents.length === 0 ||
-                    !hookStatus?.agents.some(
-                      (a) => selectedHookAgents.includes(a.agent) && a.installed_events > 0,
-                    )
-                  }
+                  disabled={ssBusy || !hookStatus?.any_installed}
                   onClick={() => runSs(hookRemove)}
                 >
-                  Remove selected ({selectedHookAgents.length})
+                  Remove global hook
                 </button>
               </div>
               <p className="hint" style={{ marginTop: 4, opacity: 0.7 }}>
-                Note: a Kiro Crew upgrade/rebuild can rewrite agent specs and drop these entries —
-                if status ever falls back to NOT INSTALLED after an update, click Install again.
+                No Kiro Crew restart is required. Reinstalling is idempotent and also refreshes
+                the Companion executable path after a rebuild.
               </p>
 
               <div className="actions" style={{ marginTop: 6 }}>
@@ -1296,30 +1184,17 @@ function App() {
                   <label style={{ marginTop: 18 }}>Token (X-AK-Status-Token)</label>
                   <input readOnly value={ssToken} onFocus={(e) => e.currentTarget.select()} />
 
-                  <label style={{ marginTop: 18 }}>Hook command (paste into your Kiro agent config)</label>
+                  <label style={{ marginTop: 18 }}>Global hook command</label>
                   <div className="terminal" style={{ whiteSpace: "pre-wrap" }}>
-                    {'"<path-to-companion.exe>" --hook'}
+                    {hookStatus?.command ?? '"<path-to-companion.exe>" --hook'}
                   </div>
                   <p className="hint">
-                    Add this command to your <strong>local</strong> agent config
-                    (<code>~/.kiro/agents/&lt;name&gt;.json</code>) under <code>hooks</code> for
-                    <code> agentSpawn</code>, <code>userPromptSubmit</code>,
-                    <code>postToolUse</code> and <code>stop</code>. The hook reads the sink's
-                    port + token from
-                    <code> %APPDATA%\\ak-companion\\hook.json</code> (Windows) /
-                    <code> ~/.config/ak-companion/hook.json</code> (else), so no token needs to
-                    be pasted into the config — starting the sink writes it. Example:
+                    The standalone hook file invokes this command for every Crew agent. The hook
+                    reads the sink port and token from
+                    <code> %APPDATA%\ak-companion\hook.json</code> (Windows) /
+                    <code> ~/.config/ak-companion/hook.json</code> (else). Starting the sink writes
+                    that handoff file; no token is stored in the Crew hook configuration.
                   </p>
-                  <div className="terminal" style={{ whiteSpace: "pre-wrap" }}>
-{`{
-  "hooks": {
-    "agentSpawn":      [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
-    "userPromptSubmit":[{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
-    "postToolUse":     [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
-    "stop":            [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }]
-  }
-}`}
-                  </div>
                 </>
               )}
 
