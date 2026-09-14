@@ -78,11 +78,10 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
 #endif
         break;
     case TUYA_EVENT_MQTT_CONNECTED:
+        /* No prompt tone here — FP-3 does not play one on MQTT_CONNECTED, and the
+         * SDK fires this event on every (re)connect during boot, which caused the
+         * "network connected" tone to play twice. Only BIND_START plays a tone. */
         PR_NOTICE("cloud: MQTT connected (device online, cloud ASR ready)");
-#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
-        /* "Network connected" prompt once we are actually online. */
-        ai_audio_player_alert(AI_AUDIO_ALERT_NETWORK_CONNECTED);
-#endif
         break;
     case TUYA_EVENT_MQTT_DISCONNECT:
         PR_NOTICE("cloud: MQTT disconnected (device offline)");

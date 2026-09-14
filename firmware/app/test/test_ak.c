@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ak_icons16.h"
 #include "ak_input_fsm.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
@@ -220,14 +221,78 @@ static void test_rx(void)
     CHECK(!ak_json_str(disp, "missing", type, sizeof(type)), "absent key returns false");
 }
 
+static void test_status_icons(void)
+{
+    printf("test_status_icons\n");
+
+    CHECK(AK_ICON_W == 16U && AK_ICON_H == 16U, "status icons are 16x16");
+    CHECK(AK_ICON_BYTES == 32U, "1-bpp 16x16 icon occupies 32 bytes");
+    CHECK(sizeof(AK_ICON_WIFI) == AK_ICON_BYTES, "WiFi icon byte count");
+    CHECK(sizeof(AK_ICON_NO_WIFI) == AK_ICON_BYTES, "no-WiFi icon byte count");
+    CHECK(sizeof(AK_ICON_USB) == AK_ICON_BYTES, "USB icon byte count");
+    CHECK(sizeof(AK_ICON_NO_USB) == AK_ICON_BYTES, "no-USB icon byte count");
+    CHECK(sizeof(AK_ICON_BLUETOOTH) == AK_ICON_BYTES, "BLE icon byte count");
+    CHECK(sizeof(AK_ICON_NO_BLUETOOTH) == AK_ICON_BYTES, "no-BLE icon byte count");
+    CHECK(memcmp(AK_ICON_WIFI, AK_ICON_NO_WIFI, AK_ICON_BYTES) != 0,
+          "WiFi connected/disconnected bitmaps differ");
+    CHECK(memcmp(AK_ICON_USB, AK_ICON_NO_USB, AK_ICON_BYTES) != 0,
+          "USB connected/disconnected bitmaps differ");
+    CHECK(memcmp(AK_ICON_BLUETOOTH, AK_ICON_NO_BLUETOOTH, AK_ICON_BYTES) != 0,
+          "BLE connected/disconnected bitmaps differ");
+}
+
+/* Feed a full short press (DOWN ... UP) into the detector; returns whether a
+ * double-click completed. gap_ms advances the clock before the press starts. */
+static bool dclick_short_press(ak_dclick_t *dc, uint32_t *t, uint32_t gap_ms)
+{
+    *t += gap_ms;
+    ak_dclick_feed(dc, AK_INPUT_EVENT_DOWN, *t, 0);
+    *t += 30; /* short hold, below long-press threshold */
+    return ak_dclick_feed(dc, AK_INPUT_EVENT_UP, *t, 30);
+}
+
+static void test_dclick(void)
+{
+    printf("test_dclick\n");
+    ak_dclick_t dc;
+    uint32_t    t = 1000;
+
+    /* Two short presses within the window -> double-click on the 2nd release. */
+    ak_dclick_init(&dc);
+    CHECK(!dclick_short_press(&dc, &t, 0), "first short press: no dclick");
+    CHECK(dclick_short_press(&dc, &t, 100), "second short press in window: dclick");
+
+    /* Third quick press must not re-trigger without a fresh first click. */
+    CHECK(!dclick_short_press(&dc, &t, 100), "third press alone: no dclick");
+    CHECK(dclick_short_press(&dc, &t, 100), "fourth press completes a new dclick");
+
+    /* Gap too long between the two releases -> not a double-click. */
+    ak_dclick_init(&dc);
+    CHECK(!dclick_short_press(&dc, &t, 0), "first press (slow test): no dclick");
+    CHECK(!dclick_short_press(&dc, &t, AK_DCLICK_WINDOW_MS + 100), "gap too long: no dclick");
+
+    /* A long press never counts, and cancels a pending first click. */
+    ak_dclick_init(&dc);
+    CHECK(!dclick_short_press(&dc, &t, 0), "arm with one short press");
+    ak_dclick_feed(&dc, AK_INPUT_EVENT_DOWN, t, 0);
+    t += 900;
+    ak_dclick_feed(&dc, AK_INPUT_EVENT_LONG, t, 900);
+    CHECK(!ak_dclick_feed(&dc, AK_INPUT_EVENT_UP, t, 900), "long-press release: no dclick");
+    /* The long press cancelled the pending click, so the next short press only
+     * re-arms rather than completing a double-click. */
+    CHECK(!dclick_short_press(&dc, &t, 50), "short press after long: only re-arms");
+}
+
 int main(void)
 {
     printf("== ak host tests ==\n");
     test_short_press();
     test_long_press();
     test_debounce_bounce();
+    test_dclick();
     test_protocol();
     test_rx();
+    test_status_icons();
 
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");

@@ -36,6 +36,14 @@
 /** Bring up BLE, advertise "AK-KB" + service 0x1910, register the event cb. */
 OPERATE_RET ak_ble_gatt_init(void);
 
+/**
+ * Take ownership of an already-initialized BLE stack without registering the
+ * common GATT service again. Cloud DUAL mode uses this after netmgr_init(),
+ * because a second tal_ble_bt_init() would reset TAL's saved characteristic
+ * handles while the T5 service-add guard skips repopulating them.
+ */
+OPERATE_RET ak_ble_gatt_takeover(void);
+
 /** Drain up to `length` received bytes from the RX ring. Returns byte count. */
 int ak_ble_gatt_read(uint8_t *data, uint32_t length);
 

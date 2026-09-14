@@ -451,6 +451,10 @@ function App() {
     acceptHookStatus(await invoke<HookStatus>("kc_hook_status", { exe: null }));
   }
 
+  async function hookOpenAgentsFolder() {
+    await invoke<string>("kc_open_agents_folder");
+  }
+
   async function hookInstall() {
     acceptHookStatus(
       await invoke<HookStatus>("kc_hook_install", {
@@ -1031,6 +1035,13 @@ function App() {
                 </button>
                 <button className="secondary" disabled={ssBusy} onClick={() => runSs(hookRefresh)}>
                   Refresh
+                </button>
+                <button
+                  className="secondary"
+                  disabled={ssBusy}
+                  onClick={() => runSs(hookOpenAgentsFolder)}
+                >
+                  Open agent folder
                 </button>
               </div>
               {hookStatus && hookStatus.agents.length > 0 && (

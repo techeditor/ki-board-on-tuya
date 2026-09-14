@@ -793,6 +793,23 @@ mod app {
         Ok(st)
     }
 
+    /// Open the resolved local Kiro agents directory in Windows Explorer. The
+    /// directory comes from the same `agents_dir()` resolver used by hook
+    /// status/install/remove, so the button always opens the folder represented
+    /// by the UI status rather than a separately hard-coded path.
+    #[tauri::command]
+    fn kc_open_agents_folder() -> Result<String, String> {
+        let dir = hook_install::agents_dir().ok_or("cannot resolve Kiro agents dir")?;
+        if !dir.is_dir() {
+            return Err(format!("agent folder does not exist: {}", dir.display()));
+        }
+        std::process::Command::new("explorer.exe")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("open {} in Explorer: {e}", dir.display()))?;
+        Ok(dir.display().to_string())
+    }
+
     /// Compact human-readable description of a routed control action for logs.
     fn describe_control_action(action: &ControlAction) -> String {
         match action {
@@ -1014,6 +1031,7 @@ mod app {
                 kc_hook_status,
                 kc_hook_install,
                 kc_hook_remove,
+                kc_open_agents_folder,
             ])
             .run(tauri::generate_context!())
             .expect("error while running tauri application");

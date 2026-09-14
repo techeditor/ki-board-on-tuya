@@ -75,6 +75,13 @@ OPERATE_RET ak_wifi_init(ak_wifi_status_cb on_status)
     /* Route netmgr link transitions into our status callback. */
     void (*cb)(netmgr_type_e, netmgr_status_e) = __netmgr_status_cb;
     (void)netmgr_conn_set(NETCONN_AUTO, NETCONN_CMD_SET_STATUS_CB, (void *)&cb);
+
+    /* netmgr may already be online before this callback is registered (cloud
+     * bring-up runs first), so publish its current state immediately too. */
+    netmgr_status_e status = NETMGR_LINK_DOWN;
+    if (netmgr_conn_get(NETCONN_AUTO, NETCONN_CMD_STATUS, &status) == OPRT_OK) {
+        __netmgr_status_cb(NETCONN_AUTO, status);
+    }
     return OPRT_OK;
 }
 

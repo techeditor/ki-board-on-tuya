@@ -25,10 +25,12 @@
 
 #include "tal_api.h"
 #include "tal_bluetooth.h"
+#include "tkl_bluetooth.h"
 
 #define BLE_NAME                 "AK-KB"
 #define SERVER_MTU               247U
 #define ADV_MAINTAIN_INTERVAL_MS 1000U
+#define INVALID_BLE_HANDLE       0xFFFFU
 
 /* RX ring buffer: companion writes (0x2B11) land here for ak_ble_gatt_read.
  * Power of two so the mask wraps cheaply. 512 comfortably holds several MTU
@@ -40,8 +42,11 @@ static uint8_t           s_rx_ring[RX_RING_SIZE];
 static volatile uint32_t s_rx_head; /* producer (BLE event cb) writes here */
 static volatile uint32_t s_rx_tail; /* consumer (app loop) reads here */
 
-static bool                s_connected;
-static bool                s_subscribed;
+static volatile bool       s_connected;
+static volatile bool       s_subscribed;
+static bool                s_tkl_takeover;
+static volatile uint16_t   s_conn_handle;
+static volatile uint16_t   s_notify_handle;
 static uint32_t            s_last_adv_maintain_ms;
 static volatile bool       s_greet_pending; /* set on subscribe, cleared by take_greet */
 static TAL_BLE_PEER_INFO_T s_peer;
@@ -103,9 +108,18 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
         break;
 
     case TAL_BLE_EVT_PERIPHERAL_CONNECT:
-        s_peer      = event->ble_event.connect.peer;
-        s_connected = true;
-        PR_NOTICE("BLE central connected (result %d)", event->ble_event.connect.result);
+        if (event->ble_event.connect.result == OPRT_OK) {
+            s_peer       = event->ble_event.connect.peer;
+            s_connected  = true;
+            s_subscribed = false;
+            PR_NOTICE("BLE central connected");
+        } else {
+            s_connected  = false;
+            s_subscribed = false;
+            PR_WARN("BLE central connect failed: %d; continuing advertising",
+                    event->ble_event.connect.result);
+            start_advertising();
+        }
         break;
 
     case TAL_BLE_EVT_MTU_REQUEST:
@@ -141,18 +155,133 @@ static void ble_event_cb(TAL_BLE_EVT_PARAMS_T *event)
     }
 }
 
+/* ------------------------------------------------------------ TKL takeover events */
+
+/* Cloud DUAL mode reaches here after netmgr has already initialized TAL and
+ * registered the common service. Re-register only the platform callbacks: a
+ * second tal_ble_bt_init() rewrites TAL's service table with INVALID handles,
+ * while T5's one-shot service guard skips the handle repopulation. */
+static void tkl_gap_event_cb(TKL_BLE_GAP_PARAMS_EVT_T *event)
+{
+    if (event == NULL) {
+        return;
+    }
+
+    switch (event->type) {
+    case TKL_BLE_GAP_EVT_CONNECT:
+        if (event->result == OPRT_OK && event->gap_event.connect.role == TKL_BLE_ROLE_SERVER) {
+            s_conn_handle  = event->conn_handle;
+            s_notify_handle = INVALID_BLE_HANDLE;
+            s_connected    = true;
+            s_subscribed   = false;
+            PR_NOTICE("BLE central connected (TKL takeover)");
+        }
+        break;
+
+    case TKL_BLE_GAP_EVT_DISCONNECT:
+        if (event->conn_handle == s_conn_handle) {
+            s_conn_handle   = INVALID_BLE_HANDLE;
+            s_notify_handle = INVALID_BLE_HANDLE;
+            s_connected     = false;
+            s_subscribed    = false;
+            PR_NOTICE("BLE disconnected (reason 0x%02X); re-advertising",
+                      (unsigned)event->gap_event.disconnect.reason);
+            start_advertising();
+        }
+        break;
+
+    case TKL_BLE_EVT_STACK_INIT:
+        if (event->result == OPRT_OK) {
+            start_advertising();
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+static void tkl_gatt_event_cb(TKL_BLE_GATT_PARAMS_EVT_T *event)
+{
+    if (event == NULL) {
+        return;
+    }
+
+    switch (event->type) {
+    case TKL_BLE_GATT_EVT_MTU_REQUEST:
+        (void)tkl_ble_gatts_exchange_mtu_reply(event->conn_handle, SERVER_MTU);
+        break;
+
+    case TKL_BLE_GATT_EVT_SUBSCRIBE:
+        if (event->result == OPRT_OK && event->gatt_event.subscribe.cur_notify) {
+            s_conn_handle   = event->conn_handle;
+            s_notify_handle = event->gatt_event.subscribe.char_handle;
+            s_connected     = true;
+            s_subscribed    = true;
+            s_greet_pending = true;
+            PR_NOTICE("BLE notify subscribed; handle=0x%04X; hello_ack pending",
+                      (unsigned)s_notify_handle);
+        } else if (event->conn_handle == s_conn_handle) {
+            s_subscribed    = false;
+            s_notify_handle = INVALID_BLE_HANDLE;
+        }
+        break;
+
+    case TKL_BLE_GATT_EVT_WRITE_REQ: {
+        TKL_BLE_DATA_T *rx = &event->gatt_event.write_report.report;
+        if (rx->p_data != NULL && rx->length > 0) {
+            rx_ring_push(rx->p_data, rx->length);
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+
 /* ------------------------------------------------------------ interface */
+
+static void reset_link_state(void)
+{
+    s_rx_head              = 0;
+    s_rx_tail              = 0;
+    s_connected            = false;
+    s_subscribed           = false;
+    s_conn_handle          = INVALID_BLE_HANDLE;
+    s_notify_handle        = INVALID_BLE_HANDLE;
+    s_last_adv_maintain_ms = 0;
+    s_greet_pending        = false;
+}
 
 OPERATE_RET ak_ble_gatt_init(void)
 {
-    s_rx_head       = 0;
-    s_rx_tail       = 0;
-    s_connected             = false;
-    s_subscribed            = false;
-    s_last_adv_maintain_ms  = 0;
-    s_greet_pending         = false;
-
+    reset_link_state();
+    s_tkl_takeover = false;
     return tal_ble_bt_init(TAL_BLE_ROLE_PERIPERAL, ble_event_cb);
+}
+
+OPERATE_RET ak_ble_gatt_takeover(void)
+{
+    OPERATE_RET rt;
+
+    reset_link_state();
+    s_tkl_takeover = true;
+
+    rt = tkl_ble_gap_callback_register(tkl_gap_event_cb);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+    rt = tkl_ble_gatt_callback_register(tkl_gatt_event_cb);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+
+    /* The stack-init event normally happened inside netmgr_init() before this
+     * takeover, so advertise immediately instead of waiting for another one. */
+    start_advertising();
+    PR_NOTICE("BLE callbacks taken over without GATT reinitialization");
+    return OPRT_OK;
 }
 
 void ak_ble_gatt_maintain(uint32_t now_ms)
@@ -190,10 +319,23 @@ int ak_ble_gatt_write(const void *data, uint32_t length)
         /* No subscribed central: drop the frame (mirrors FP-2 emit_frame). */
         return 0;
     }
-    TAL_BLE_DATA_T d = {.len = (uint16_t)length, .p_data = (uint8_t *)data};
-    if (tal_ble_server_common_send(&d) == OPRT_OK) {
+
+    OPERATE_RET rt;
+    if (s_tkl_takeover) {
+        if (s_conn_handle == INVALID_BLE_HANDLE || s_notify_handle == INVALID_BLE_HANDLE) {
+            return 0;
+        }
+        rt = tkl_ble_gatts_value_notify(s_conn_handle, s_notify_handle,
+                                        (uint8_t *)data, (uint16_t)length);
+    } else {
+        TAL_BLE_DATA_T d = {.len = (uint16_t)length, .p_data = (uint8_t *)data};
+        rt = tal_ble_server_common_send(&d);
+    }
+    if (rt == OPRT_OK) {
         return (int)length;
     }
+    PR_WARN("BLE notify failed: %d (conn=0x%04X char=0x%04X)", rt,
+            (unsigned)s_conn_handle, (unsigned)s_notify_handle);
     return 0;
 }
 

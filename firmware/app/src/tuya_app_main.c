@@ -40,6 +40,13 @@
 /* BLE still greets on notify-subscribe; UART greets immediately (both fire). */
 #define AK_TRANSPORT_GREET_ON_SUBSCRIBE 1
 
+static bool s_transport_rx_is_usb = false;
+
+static bool ak_transport_rx_is_usb(void)
+{
+    return s_transport_rx_is_usb;
+}
+
 static OPERATE_RET ak_transport_init(void)
 {
     /* netmgr_init() also calls tal_ble_bt_init() and replaces the single TAL
@@ -68,9 +75,14 @@ static int ak_transport_read(uint8_t *data, uint32_t length)
      * talks over exactly one link at a time). */
     int n = ak_uart_read(data, length);
     if (n > 0) {
+        s_transport_rx_is_usb = true;
         return n;
     }
-    return ak_ble_gatt_read(data, length);
+    n = ak_ble_gatt_read(data, length);
+    if (n > 0) {
+        s_transport_rx_is_usb = false;
+    }
+    return n;
 }
 #elif AK_TRANSPORT_UART
 #include "ak_uart.h"
@@ -78,6 +90,10 @@ static int ak_transport_read(uint8_t *data, uint32_t length)
 #define ak_transport_write ak_uart_write
 #define ak_transport_read  ak_uart_read
 #define AK_TRANSPORT_NAME  "uart"
+static bool ak_transport_rx_is_usb(void)
+{
+    return true;
+}
 #elif AK_TRANSPORT_BLE_GATT
 #include "ak_ble_gatt.h"
 #define ak_transport_init               ak_ble_gatt_init
@@ -86,6 +102,10 @@ static int ak_transport_read(uint8_t *data, uint32_t length)
 #define AK_TRANSPORT_NAME               "ble_gatt"
 /* BLE greets on notify-subscribe, not at init (see ak_ble_gatt_take_greet). */
 #define AK_TRANSPORT_GREET_ON_SUBSCRIBE 1
+static bool ak_transport_rx_is_usb(void)
+{
+    return false;
+}
 #else
 #error "Select exactly one AK_TRANSPORT_* backend in the build profile"
 #endif
@@ -94,18 +114,30 @@ static int ak_transport_read(uint8_t *data, uint32_t length)
 #define AK_TRANSPORT_GREET_ON_SUBSCRIBE 0
 #endif
 
-#define APP_TASK_STACK_SIZE   (5U * 1024U)
-#define POLL_INTERVAL_MS      5U
-#define HEARTBEAT_INTERVAL_MS 2000U
-#define FRAME_BUFFER_SIZE     192U
-#define APP_FW_VERSION        "0.1.0"
+#define APP_TASK_STACK_SIZE    (5U * 1024U)
+#define POLL_INTERVAL_MS       5U
+#define HEARTBEAT_INTERVAL_MS  2000U
+#define USB_LINK_TIMEOUT_MS    7000U
+#define FRAME_BUFFER_SIZE      192U
+#define APP_FW_VERSION         "0.1.0"
 
 static THREAD_HANDLE  s_app_thread = NULL;
 static uint32_t       s_sequence   = 0;
 static ak_rx_reader_t s_rx;
-/* UART/USB: set once the PC companion greets (hello -> we answer hello_ack), so
- * the header can show "USB Connected" vs "USB Disconnected". */
+/* UART/USB: hello marks the companion live; every later UART frame (including
+ * heartbeat pong) refreshes liveness. A graceful bye or heartbeat timeout
+ * clears the link, so an unplug/crash cannot leave the USB icon stuck on. */
 static bool s_pc_connected = false;
+#if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
+static uint32_t s_usb_last_rx_ms;
+#endif
+
+#if AK_ENABLE_DISPLAY
+/* netmgr callbacks can run outside the app loop. Cache WiFi state there and
+ * let the app loop perform the frame-buffer redraw. */
+static volatile bool s_wifi_connected    = false;
+static volatile bool s_wifi_status_dirty = false;
+#endif
 
 /* Which ASR path a K4 (PTT) press uses. "system" = board only emits
  * voice.start; the PC companion runs its own ASR (Win+H). "cloud" = board mic +
@@ -119,6 +151,37 @@ static ak_voice_source_t s_voice_source = AK_VOICE_SYSTEM;
  * HOLD semantics); system emits start immediately and always receives its UP. */
 static bool s_ptt_cloud_route   = false;
 static bool s_ptt_cloud_started = false;
+/* Double-click detector for K4: a double-click in the cloud ASR route sounds
+ * the "long-press to talk" prompt tone (FP-3 plays this on K4 double-click).
+ * It observes the same DOWN/UP/LONG stream and never affects the hold-to-talk
+ * capture path. */
+static ak_dclick_t s_ptt_dclick;
+
+#if AK_ENABLE_DISPLAY
+typedef enum {
+    AK_VOICE_UI_IDLE = 0,
+    AK_VOICE_UI_LISTENING,
+    AK_VOICE_UI_RECOGNIZING,
+} ak_voice_ui_state_t;
+
+#define ASR_TRANSCRIPT_MAX       256U
+#define ASR_BLINK_INTERVAL_MS    350U
+#define ASR_SCROLL_INTERVAL_MS   1000U
+#define ASR_RECOGNIZE_TIMEOUT_MS 15000U
+
+static ak_voice_ui_state_t s_voice_ui_state = AK_VOICE_UI_IDLE;
+static uint32_t            s_voice_ui_state_since_ms;
+static uint32_t            s_voice_ui_last_blink_ms;
+static uint32_t            s_asr_last_scroll_ms;
+static uint16_t            s_asr_scroll_line;
+static bool                s_voice_ui_blink_on = true;
+static char                s_asr_transcript[ASR_TRANSCRIPT_MAX] = "Waiting for Tuya ASR...";
+/* ASR callbacks run on the AI event thread. They copy one complete result and
+ * publish the volatile flag last; the app thread consumes it before drawing. */
+static char                s_asr_pending_text[ASR_TRANSCRIPT_MAX];
+static volatile bool       s_asr_result_pending;
+static volatile bool       s_asr_result_is_error;
+#endif
 
 /* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
 #define AK_PTT_KEY_ID "k4"
@@ -143,6 +206,11 @@ static void transport_write_frame(const char *frame, int length)
  * on_input_event and send_hello_ack above them. */
 static void on_ptt_event(ak_input_event_t event);
 static void send_voice_source(void);
+#if AK_ENABLE_DISPLAY
+static void ak_voice_ui_set_state(ak_voice_ui_state_t state);
+static void ak_voice_ui_queue_result(const char *text, bool is_error);
+static void ak_voice_ui_tick(uint32_t now_ms);
+#endif
 
 /* Input event -> key/nav JSONL frame on the active transport. */
 static void on_input_event(ak_input_kind_t kind, const char *id, ak_input_event_t event, uint32_t held_ms)
@@ -165,6 +233,13 @@ static void on_input_event(ak_input_kind_t kind, const char *id, ak_input_event_
     if (kind == AK_INPUT_KIND_KEY && strcmp(id, AK_PTT_KEY_ID) == 0 &&
         (event == AK_INPUT_EVENT_DOWN || event == AK_INPUT_EVENT_LONG ||
          event == AK_INPUT_EVENT_UP)) {
+        /* Double-click on K4 (cloud route) sounds the "long-press to talk"
+         * prompt, mirroring FP-3. Feeding runs on every edge; a hold fires LONG
+         * which the detector excludes, so hold-to-talk never trips it. */
+        if (ak_dclick_feed(&s_ptt_dclick, event, tal_system_get_millisecond(), held_ms) &&
+            s_voice_source == AK_VOICE_CLOUD && ak_asr_available()) {
+            ak_asr_play_prompt();
+        }
         on_ptt_event(event);
     }
 }
@@ -205,6 +280,9 @@ static void on_asr_text(const char *text)
     if (text == NULL || text[0] == '\0') {
         return;
     }
+#if AK_ENABLE_DISPLAY
+    ak_voice_ui_queue_result(text, false);
+#endif
     s_sequence++;
     transport_write_frame(frame, ak_proto_asr(frame, sizeof(frame), s_sequence, text));
 }
@@ -218,6 +296,9 @@ static void on_asr_error(const char *code)
     if (code == NULL || code[0] == '\0') {
         return;
     }
+#if AK_ENABLE_DISPLAY
+    ak_voice_ui_queue_result(code, true);
+#endif
     s_sequence++;
     transport_write_frame(frame, ak_proto_asr_error(frame, sizeof(frame), s_sequence, code));
 }
@@ -227,6 +308,10 @@ static void on_asr_error(const char *code)
 static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
 {
     char frame[FRAME_BUFFER_SIZE];
+#if AK_ENABLE_DISPLAY
+    s_wifi_connected = (state == AK_WIFI_CONNECTED);
+    s_wifi_status_dirty = true;
+#endif
     s_sequence++;
     transport_write_frame(frame,
                           ak_proto_wifi_status(frame, sizeof(frame), s_sequence,
@@ -243,7 +328,13 @@ static void on_ptt_event(ak_input_event_t event)
         s_ptt_cloud_route =
             (s_voice_source == AK_VOICE_CLOUD && ak_asr_available());
         s_ptt_cloud_started = false;
-        if (!s_ptt_cloud_route) {
+        if (s_ptt_cloud_route) {
+#if AK_ENABLE_DISPLAY
+            /* Show feedback from the physical press immediately. Capture starts
+             * on LONG below, matching the official HOLD state machine. */
+            ak_voice_ui_set_state(AK_VOICE_UI_LISTENING);
+#endif
+        } else {
             send_voice("start");
         }
         return;
@@ -261,6 +352,14 @@ static void on_ptt_event(ak_input_event_t event)
         if (s_ptt_cloud_route) {
             if (s_ptt_cloud_started) {
                 ak_asr_stop();
+#if AK_ENABLE_DISPLAY
+                ak_voice_ui_set_state(AK_VOICE_UI_RECOGNIZING);
+#endif
+            } else {
+#if AK_ENABLE_DISPLAY
+                /* A short cloud press never opened a HOLD session. */
+                ak_voice_ui_set_state(AK_VOICE_UI_IDLE);
+#endif
             }
         } else {
             send_voice("stop");
@@ -332,6 +431,132 @@ static void ak_status_wrap(uint16_t x, uint16_t y, const char *s, uint16_t fg, u
     }
 }
 
+#define ASR_PANEL_Y       116U
+#define ASR_TEXT_Y        140U
+#define ASR_TEXT_COLS     38U /* 38 glyphs * 8 px = 304 px */
+#define ASR_VISIBLE_LINES 10U
+#define ASR_LINE_H        10U
+
+static const char *ak_voice_ui_label(void)
+{
+    switch (s_voice_ui_state) {
+    case AK_VOICE_UI_LISTENING:
+        return "LISTENING";
+    case AK_VOICE_UI_RECOGNIZING:
+        return "RECOGNIZING";
+    case AK_VOICE_UI_IDLE:
+    default:
+        return "IDLE";
+    }
+}
+
+static uint16_t ak_voice_ui_color(void)
+{
+    switch (s_voice_ui_state) {
+    case AK_VOICE_UI_LISTENING:
+        return AK_COL_RED;
+    case AK_VOICE_UI_RECOGNIZING:
+        return AK_COL_YELLOW;
+    case AK_VOICE_UI_IDLE:
+    default:
+        return AK_COL_GREEN;
+    }
+}
+
+/* Draw a small filled circle using horizontal spans. */
+static void ak_voice_ui_dot(uint16_t cx, uint16_t cy, uint16_t color)
+{
+    const int radius = 6;
+    for (int dy = -radius; dy <= radius; dy++) {
+        int dx = 0;
+        while ((dx + 1) * (dx + 1) + dy * dy <= radius * radius) {
+            dx++;
+        }
+        ak_gfx_fill_rect((uint16_t)((int)cx - dx), (uint16_t)((int)cy + dy),
+                         (uint16_t)(2 * dx + 1), 1, color);
+    }
+}
+
+/* Consume one UTF-8 code point. The built-in 8x8 font is ASCII-only, so a
+ * non-ASCII code point is shown as one '?' rather than one '?' per UTF-8 byte. */
+static char ak_asr_next_glyph(const char **cursor)
+{
+    const unsigned char *p = (const unsigned char *)*cursor;
+    unsigned char c = *p++;
+
+    if (c >= 0x80U) {
+        while ((*p & 0xC0U) == 0x80U) {
+            p++;
+        }
+        *cursor = (const char *)p;
+        return '?';
+    }
+    *cursor = (const char *)p;
+    return (c >= 0x20U && c < 0x7FU) ? (char)c : ' ';
+}
+
+static uint16_t ak_asr_line_count(const char *text)
+{
+    uint16_t lines = 1;
+    uint16_t col = 0;
+    const char *p = text;
+
+    while (*p != '\0') {
+        if (*p == '\n') {
+            p++;
+            lines++;
+            col = 0;
+            continue;
+        }
+        (void)ak_asr_next_glyph(&p);
+        col++;
+        if (col >= ASR_TEXT_COLS && *p != '\0') {
+            lines++;
+            col = 0;
+        }
+    }
+    return lines;
+}
+
+static void ak_asr_draw_line(uint16_t line_index, uint16_t scroll_line,
+                             const char *line)
+{
+    if (line_index < scroll_line || line_index >= scroll_line + ASR_VISIBLE_LINES) {
+        return;
+    }
+    uint16_t visible = (uint16_t)(line_index - scroll_line);
+    ak_gfx_text(6, (uint16_t)(ASR_TEXT_Y + visible * ASR_LINE_H), line,
+                AK_COL_WHITE, AK_COL_BLACK, 1);
+}
+
+static void ak_asr_draw_transcript(void)
+{
+    char line[ASR_TEXT_COLS + 1U];
+    uint16_t col = 0;
+    uint16_t line_index = 0;
+    const char *p = s_asr_transcript;
+
+    while (*p != '\0') {
+        if (*p == '\n') {
+            p++;
+            line[col] = '\0';
+            ak_asr_draw_line(line_index++, s_asr_scroll_line, line);
+            col = 0;
+            continue;
+        }
+        line[col++] = ak_asr_next_glyph(&p);
+        if (col >= ASR_TEXT_COLS) {
+            line[col] = '\0';
+            ak_asr_draw_line(line_index++, s_asr_scroll_line, line);
+            col = 0;
+        }
+    }
+    if (col > 0 || line_index == 0) {
+        line[col] = '\0';
+        ak_asr_draw_line(line_index, s_asr_scroll_line, line);
+    }
+}
+
 /* Compose the connection-status header text + color for the title bar.
  * Header reads "Companion: <state>". USB reflects whether the PC companion has
  * greeted (Connected green / Disconnected orange). BLE reflects the live link
@@ -382,9 +607,26 @@ static void ak_render_status(const char *agent, const char *state, const char *t
     char     header[32];
     uint16_t link_color = ak_link_header(header, sizeof(header));
     char     line[48];
+    uint16_t voice_color = ak_voice_ui_color();
 
-    /* Title bar = connection-status header (green when the link is up). */
-    ak_statuslcd_title(header, link_color);
+    bool usb_connected = false;
+    bool ble_connected = false;
+#if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
+    usb_connected = s_pc_connected;
+#endif
+#if AK_TRANSPORT_BLE_GATT || AK_TRANSPORT_DUAL
+    ble_connected = (ak_ble_gatt_link_state() != AK_BLE_LINK_ADVERTISING);
+#endif
+
+    /* Title bar = connection-status header. Right side shows WiFi, USB and BLE
+     * link state. The voice dot sits just left of the three icons. */
+    ak_statuslcd_title_links(header, link_color, s_wifi_connected, usb_connected,
+                             ble_connected);
+    ak_voice_ui_dot(244, 11,
+                    (s_voice_ui_state == AK_VOICE_UI_LISTENING && !s_voice_ui_blink_on)
+                        ? link_color
+                        : voice_color);
+
     (void)snprintf(line, sizeof(line), "agent: %s", agent[0] ? agent : "-");
     ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 2, line, AK_COL_WHITE, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), "state: %s", state[0] ? state : "-");
@@ -392,7 +634,15 @@ static void ak_render_status(const char *agent, const char *state, const char *t
     (void)snprintf(line, sizeof(line), "voice: %s%s", ak_voice_source_str(s_voice_source),
                    (s_voice_source == AK_VOICE_CLOUD && !ak_asr_available()) ? " (stub)" : "");
     ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 30, line, AK_COL_CYAN, AK_COL_BLACK, 1);
-    ak_status_wrap(6, AK_STATUSLCD_CONTENT_Y + 46, text, AK_COL_YELLOW, 13);
+    (void)snprintf(line, sizeof(line), "ASR: %s", ak_voice_ui_label());
+    ak_gfx_text(6, AK_STATUSLCD_CONTENT_Y + 44, line, voice_color, AK_COL_BLACK, 1);
+    ak_status_wrap(6, AK_STATUSLCD_CONTENT_Y + 58, text, AK_COL_GRAY, 3);
+
+    /* Fixed lower-half transcript panel. New results reset to line zero; long
+     * results advance one wrapped line per second in ak_voice_ui_tick(). */
+    ak_gfx_fill_rect(0, ASR_PANEL_Y, AK_STATUSLCD_W, 1, AK_COL_GRAY);
+    ak_gfx_text(6, ASR_PANEL_Y + 6, "Tuya ASR transcript", AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_asr_draw_transcript();
     ak_statuslcd_flush();
 }
 
@@ -406,6 +656,86 @@ static void ak_refresh_link_header(void)
 {
     ak_render_status(s_last_agent, s_last_state, s_last_text);
 }
+
+static void ak_voice_ui_set_state(ak_voice_ui_state_t state)
+{
+    s_voice_ui_state = state;
+    s_voice_ui_state_since_ms = tal_system_get_millisecond();
+    s_voice_ui_last_blink_ms = s_voice_ui_state_since_ms;
+    s_voice_ui_blink_on = true;
+    ak_refresh_link_header();
+}
+
+static void ak_voice_ui_queue_result(const char *text, bool is_error)
+{
+    if (text == NULL) {
+        return;
+    }
+    (void)snprintf(s_asr_pending_text, sizeof(s_asr_pending_text), "%s", text);
+    s_asr_result_is_error = is_error;
+    /* Publish last: the app loop never reads a partially copied result. */
+    s_asr_result_pending = true;
+}
+
+static void ak_voice_ui_tick(uint32_t now_ms)
+{
+    bool redraw = false;
+
+    if (s_asr_result_pending) {
+        bool is_error = s_asr_result_is_error;
+        if (is_error && strcmp(s_asr_pending_text, "asr_empty") == 0) {
+            (void)snprintf(s_asr_transcript, sizeof(s_asr_transcript),
+                           "No speech recognized.");
+        } else if (is_error) {
+            (void)snprintf(s_asr_transcript, sizeof(s_asr_transcript),
+                           "Recognition failed.");
+        } else {
+            (void)snprintf(s_asr_transcript, sizeof(s_asr_transcript), "%s",
+                           s_asr_pending_text);
+        }
+        s_asr_result_pending = false;
+        s_asr_scroll_line = 0;
+        s_asr_last_scroll_ms = now_ms;
+        s_voice_ui_state = AK_VOICE_UI_IDLE;
+        s_voice_ui_state_since_ms = now_ms;
+        s_voice_ui_blink_on = true;
+        redraw = true;
+    }
+
+    if (s_voice_ui_state == AK_VOICE_UI_LISTENING &&
+        (uint32_t)(now_ms - s_voice_ui_last_blink_ms) >= ASR_BLINK_INTERVAL_MS) {
+        s_voice_ui_last_blink_ms = now_ms;
+        s_voice_ui_blink_on = !s_voice_ui_blink_on;
+        redraw = true;
+    }
+
+    if (s_voice_ui_state == AK_VOICE_UI_RECOGNIZING &&
+        (uint32_t)(now_ms - s_voice_ui_state_since_ms) >= ASR_RECOGNIZE_TIMEOUT_MS) {
+        (void)snprintf(s_asr_transcript, sizeof(s_asr_transcript),
+                       "Recognition timed out.");
+        s_voice_ui_state = AK_VOICE_UI_IDLE;
+        s_voice_ui_state_since_ms = now_ms;
+        s_asr_scroll_line = 0;
+        redraw = true;
+    }
+
+    uint16_t total_lines = ak_asr_line_count(s_asr_transcript);
+    uint16_t max_scroll = (total_lines > ASR_VISIBLE_LINES)
+                              ? (uint16_t)(total_lines - ASR_VISIBLE_LINES)
+                              : 0;
+    if (max_scroll > 0 &&
+        (uint32_t)(now_ms - s_asr_last_scroll_ms) >= ASR_SCROLL_INTERVAL_MS) {
+        s_asr_last_scroll_ms = now_ms;
+        s_asr_scroll_line = (s_asr_scroll_line >= max_scroll)
+                                ? 0
+                                : (uint16_t)(s_asr_scroll_line + 1U);
+        redraw = true;
+    }
+
+    if (redraw) {
+        ak_refresh_link_header();
+    }
+}
 #endif /* AK_ENABLE_DISPLAY */
 
 /* Handle one inbound JSONL line (PC -> board). Unknown types are ignored. */
@@ -417,8 +747,9 @@ static void on_rx_line(const char *line)
     }
     if (strcmp(type, "hello") == 0) {
         send_hello_ack();
-        /* The PC companion has greeted -> mark USB link up and refresh header. */
-        if (!s_pc_connected) {
+        /* Only a greeting received over UART proves the USB companion link is
+         * up. In DUAL mode a BLE hello must not light the USB icon. */
+        if (ak_transport_rx_is_usb() && !s_pc_connected) {
             s_pc_connected = true;
 #if AK_ENABLE_DISPLAY
             ak_refresh_link_header();
@@ -430,7 +761,7 @@ static void on_rx_line(const char *line)
         /* The PC companion is disconnecting gracefully. Plain UART gives no
          * hardware disconnect edge, so this frame is how the board learns the
          * link is going down -> flip the header to "USB Disconnected". */
-        if (s_pc_connected) {
+        if (ak_transport_rx_is_usb() && s_pc_connected) {
             s_pc_connected = false;
 #if AK_ENABLE_DISPLAY
             ak_refresh_link_header();
@@ -537,6 +868,7 @@ static void user_main(void)
         PR_ERR("input init failed: %d", rt);
         return;
     }
+    ak_dclick_init(&s_ptt_dclick);
 
 #if AK_ENABLE_DISPLAY
     /* Status LCD FIRST — before any AI / Wi-Fi bring-up. The board-side cloud
@@ -559,12 +891,18 @@ static void user_main(void)
      * hard-faults at boot (the black-screen crash). No-op on the v1/BLE profiles. */
     OPERATE_RET cloud_rt = ak_cloud_init();
 #if AK_TRANSPORT_DUAL
-    /* netmgr_init() initializes Tuya BLE and overwrites TAL's single BLE event
-     * callback. Register AK last so writes/subscriptions reach our JSONL GATT
-     * transport and its scan response advertises the companion-visible name. */
+    /* Cloud netmgr has already initialized TAL's common GATT service. Do NOT
+     * call tal_ble_bt_init() a second time: T5's one-shot service guard would
+     * leave TAL's rewritten characteristic handles invalid, making every
+     * notify fail even though AK-KB connects. Non-cloud DUAL still needs the
+     * normal first-time BLE initialization. */
+#if AK_ASR_BOARD_CLOUD
+    OPERATE_RET ble_rt = ak_ble_gatt_takeover();
+#else
     OPERATE_RET ble_rt = ak_ble_gatt_init();
+#endif
     if (ble_rt != OPRT_OK) {
-        PR_ERR("dual: delayed AK BLE init failed: %d (UART remains available)", ble_rt);
+        PR_ERR("dual: delayed AK BLE setup failed: %d (UART remains available)", ble_rt);
     }
 #endif
     if (cloud_rt != OPRT_OK) {
@@ -613,6 +951,14 @@ static void user_main(void)
     while (1) {
         now = tal_system_get_millisecond();
 
+#if AK_ENABLE_DISPLAY
+        ak_voice_ui_tick(now);
+        if (s_wifi_status_dirty) {
+            s_wifi_status_dirty = false;
+            ak_refresh_link_header();
+        }
+#endif
+
 #if AK_TRANSPORT_BLE_GATT
         ak_ble_gatt_maintain(now);
 #endif
@@ -641,8 +987,26 @@ static void user_main(void)
         uint8_t rx[64];
         int     got = ak_transport_read(rx, sizeof(rx));
         if (got > 0) {
+#if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
+            if (ak_transport_rx_is_usb()) {
+                /* The companion answers the board's 2 s ping with pong, so any
+                 * UART traffic proves the USB protocol link is still alive. */
+                s_usb_last_rx_ms = now;
+            }
+#endif
             ak_rx_reader_feed(&s_rx, rx, (size_t)got, on_rx_line);
         }
+
+#if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
+        if (s_pc_connected &&
+            (uint32_t)(now - s_usb_last_rx_ms) >= USB_LINK_TIMEOUT_MS) {
+            s_pc_connected = false;
+            PR_NOTICE("USB companion timed out; marking link disconnected");
+#if AK_ENABLE_DISPLAY
+            ak_refresh_link_header();
+#endif
+        }
+#endif
 
         if ((uint32_t)(now - last_heartbeat) >= HEARTBEAT_INTERVAL_MS) {
             last_heartbeat = now;

@@ -52,4 +52,38 @@ ak_input_event_t ak_input_fsm_update(ak_input_fsm_t *fsm, bool raw_pressed, uint
 /** Protocol action string ("down"/"up"/"long"/"") for an event. */
 const char *ak_input_event_str(ak_input_event_t event);
 
+/* --- Double-click detector -------------------------------------------------
+ * A tiny, pure, host-testable helper layered ON TOP of the FSM's event stream.
+ * It does NOT change the FSM's DOWN/UP/LONG output; feed each emitted event
+ * into ak_dclick_feed() and it returns true on the second short press of a
+ * double click. Only short presses count: a press that fired LONG (held past
+ * the long-press threshold) resets the sequence, so long-press-to-talk never
+ * registers as a double-click click.
+ *
+ * Rationale: the FSM emits at most one event per tick and reports UP as soon as
+ * a press releases, so double-click cannot live inside it without delaying
+ * every single-press UP. Keeping it separate leaves the record/hold-to-talk
+ * path (DOWN -> LONG -> UP) untouched. */
+#ifndef AK_DCLICK_WINDOW_MS
+#define AK_DCLICK_WINDOW_MS 400U /* max gap between the two release edges */
+#endif
+
+typedef struct {
+    bool     armed;         /* a first short press has been seen */
+    uint32_t last_up_ms;    /* timestamp of that first short-press release */
+    bool     press_had_long;/* the current press already fired LONG */
+} ak_dclick_t;
+
+/** Reset a double-click detector to the idle (disarmed) state. */
+void ak_dclick_init(ak_dclick_t *dc);
+
+/**
+ * Feed one FSM event. Returns true exactly once when a double-click completes
+ * (the second short-press release within AK_DCLICK_WINDOW_MS of the first).
+ * DOWN starts a press, LONG marks it as a long press (excluded), UP closes it.
+ * held_ms is the FSM's release duration (used only for robustness; the LONG
+ * marker is authoritative). now_ms is the current tick time.
+ */
+bool ak_dclick_feed(ak_dclick_t *dc, ak_input_event_t event, uint32_t now_ms, uint32_t held_ms);
+
 #endif /* AK_INPUT_FSM_H */

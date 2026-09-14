@@ -41,12 +41,21 @@ bool ak_statuslcd_ready(void);
 void ak_statuslcd_flush(void);
 
 /**
- * @brief Draw a top title bar (full width, height 30) with 2x text, and clear
+ * @brief Draw a top title bar (full width, height 22) with 1x text, and clear
  *        the content area below it to black. Does NOT flush.
  * @param title     Bar text (drawn white).
  * @param bar_color Bar background color.
  */
 void ak_statuslcd_title(const char *title, uint16_t bar_color);
+
+/**
+ * @brief Draw the title bar plus 16x16 WiFi, USB and BLE link icons at right.
+ *
+ * Connected links use their normal icon; disconnected links use the matching
+ * slashed icon. Icon order is WiFi, USB, BLE. Does NOT flush.
+ */
+void ak_statuslcd_title_links(const char *title, uint16_t bar_color, bool wifi_connected,
+                              bool usb_connected, bool ble_connected);
 
 /** @brief Y coordinate where the content area starts (below the title bar). */
 #define AK_STATUSLCD_CONTENT_Y 26U

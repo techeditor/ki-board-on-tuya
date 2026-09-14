@@ -8,6 +8,7 @@
 #include "ak_statuslcd.h"
 
 #include "ak_board_io.h"
+#include "ak_icons16.h"
 #include "tal_api.h"
 #include "tdd_disp_st7789.h"
 #include "tdl_display_draw.h"
@@ -212,4 +213,23 @@ void ak_statuslcd_title(const char *title, uint16_t bar_color)
     ak_gfx_fill_rect(0, 0, AK_STATUSLCD_W, TITLE_H, bar_color);
     ak_gfx_text(6, 7, title == NULL ? "" : title, AK_COL_WHITE, bar_color, 1);
     ak_gfx_fill_rect(0, TITLE_H, AK_STATUSLCD_W, (uint16_t)(AK_STATUSLCD_H - TITLE_H), AK_COL_BLACK);
+}
+
+void ak_statuslcd_title_links(const char *title, uint16_t bar_color, bool wifi_connected,
+                              bool usb_connected, bool ble_connected)
+{
+    const uint16_t icon_y = (uint16_t)((TITLE_H - AK_ICON_H) / 2U);
+
+    ak_statuslcd_title(title, bar_color);
+    if (!s_ready) {
+        return;
+    }
+
+    /* Right aligned: WiFi, USB, BLE. 16 px icons with 4 px gaps. */
+    ak_gfx_icon(256U, icon_y, wifi_connected ? AK_ICON_WIFI : AK_ICON_NO_WIFI,
+                AK_ICON_W, AK_ICON_H, AK_COL_WHITE, bar_color);
+    ak_gfx_icon(276U, icon_y, usb_connected ? AK_ICON_USB : AK_ICON_NO_USB,
+                AK_ICON_W, AK_ICON_H, AK_COL_WHITE, bar_color);
+    ak_gfx_icon(296U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH,
+                AK_ICON_W, AK_ICON_H, AK_COL_WHITE, bar_color);
 }

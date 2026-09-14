@@ -94,3 +94,33 @@ void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg
         cursor = (uint16_t)(cursor + AK_FONT_W * scale);
     }
 }
+
+void ak_gfx_icon(uint16_t x, uint16_t y, const uint8_t *bitmap, uint16_t w, uint16_t h,
+                 uint16_t fg, uint16_t bg)
+{
+    if (s_fb == NULL || bitmap == NULL || w == 0 || h == 0) {
+        return;
+    }
+
+    const uint16_t stride = (uint16_t)((w + 7U) / 8U);
+
+    /* Paint the clear bits in one operation, then draw foreground row runs. */
+    ak_gfx_fill_rect(x, y, w, h, bg);
+    for (uint16_t row = 0; row < h; row++) {
+        uint16_t run_start = w;
+        for (uint16_t col = 0; col <= w; col++) {
+            bool on = false;
+            if (col < w) {
+                uint8_t bits = bitmap[(uint32_t)row * stride + col / 8U];
+                on = (bits & (uint8_t)(0x80U >> (col % 8U))) != 0;
+            }
+            if (on && run_start == w) {
+                run_start = col;
+            } else if (!on && run_start != w) {
+                ak_gfx_fill_rect((uint16_t)(x + run_start), (uint16_t)(y + row),
+                                 (uint16_t)(col - run_start), 1U, fg);
+                run_start = w;
+            }
+        }
+    }
+}

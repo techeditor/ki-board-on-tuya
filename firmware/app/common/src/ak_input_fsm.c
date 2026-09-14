@@ -72,3 +72,49 @@ const char *ak_input_event_str(ak_input_event_t event)
         return "";
     }
 }
+
+void ak_dclick_init(ak_dclick_t *dc)
+{
+    dc->armed          = false;
+    dc->last_up_ms     = 0;
+    dc->press_had_long = false;
+}
+
+bool ak_dclick_feed(ak_dclick_t *dc, ak_input_event_t event, uint32_t now_ms, uint32_t held_ms)
+{
+    (void)held_ms;
+
+    switch (event) {
+    case AK_INPUT_EVENT_DOWN:
+        /* New press starts; assume short until a LONG says otherwise. */
+        dc->press_had_long = false;
+        return false;
+
+    case AK_INPUT_EVENT_LONG:
+        /* This press is a hold, not a click: it can neither open nor complete a
+         * double-click, and it cancels any pending first click. */
+        dc->press_had_long = true;
+        dc->armed          = false;
+        return false;
+
+    case AK_INPUT_EVENT_UP:
+        if (dc->press_had_long) {
+            /* Long-press release: never part of a double-click. */
+            dc->press_had_long = false;
+            dc->armed          = false;
+            return false;
+        }
+        if (dc->armed && (uint32_t)(now_ms - dc->last_up_ms) <= AK_DCLICK_WINDOW_MS) {
+            /* Second short release inside the window -> double-click. */
+            dc->armed = false;
+            return true;
+        }
+        /* First short release (or the window lapsed): arm and wait for a second. */
+        dc->armed      = true;
+        dc->last_up_ms = now_ms;
+        return false;
+
+    default:
+        return false;
+    }
+}

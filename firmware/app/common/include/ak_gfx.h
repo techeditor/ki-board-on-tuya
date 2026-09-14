@@ -58,4 +58,13 @@ void ak_gfx_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8
 /** @brief Draw a NUL-terminated string left-to-right on one line. */
 void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale);
 
+/**
+ * @brief Draw an opaque 1-bpp bitmap, row-major and MSB-first.
+ *
+ * Each row occupies ceil(w / 8) bytes. Set bits use @p fg; clear bits use
+ * @p bg. The function clips through ak_gfx_fill_rect().
+ */
+void ak_gfx_icon(uint16_t x, uint16_t y, const uint8_t *bitmap, uint16_t w, uint16_t h,
+                 uint16_t fg, uint16_t bg);
+
 #endif /* AK_GFX_H */

@@ -51,4 +51,10 @@ bool ak_asr_available(void);
 void ak_asr_start(void);
 void ak_asr_stop(void);
 
+/** Play the local "long-press to talk" prompt tone (AI_AUDIO_ALERT_LONG_KEY_TALK),
+ *  the same clip FP-3 sounds on a K4 double-click. No-op in the stub and a no-op
+ *  when the AI audio component is not compiled in. Used for the double-click
+ *  prompt; does NOT start capture or change chat mode. */
+void ak_asr_play_prompt(void);
+
 #endif /* AK_ASR_H */

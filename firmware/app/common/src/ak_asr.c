@@ -167,6 +167,17 @@ void ak_asr_stop(void)
 #endif
 }
 
+void ak_asr_play_prompt(void)
+{
+    /* Same clip FP-3 sounds on a K4 double-click (its ai_chat button callback
+     * plays AI_AUDIO_ALERT_LONG_KEY_TALK + mode on DOUBLE_CLICK). We only want
+     * the prompt tone, not FP-3's mode switch, so play the HOLD-talk clip
+     * directly and leave the chat mode locked on HOLD. */
+#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
+    ai_audio_player_alert(AI_AUDIO_ALERT_LONG_KEY_TALK);
+#endif
+}
+
 #else /* !AK_ASR_BOARD_CLOUD — stub */
 
 OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error)
@@ -186,6 +197,10 @@ void ak_asr_start(void)
 }
 
 void ak_asr_stop(void)
+{
+}
+
+void ak_asr_play_prompt(void)
 {
 }
 
