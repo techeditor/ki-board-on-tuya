@@ -57,8 +57,18 @@ python3 tools/version.py set 0.3.0     # manually set an exact version
 python3 tools/version.py check         # CI/build consistency check
 ```
 
-Automatic bumps are explicit rather than happening on every build, keeping
-repeated builds of one source revision reproducible.
+Patch versions increase automatically when a commit contains staged
+`firmware/app` implementation changes. The pre-commit hook synchronizes and
+stages `VERSION` plus every TuyaOpen profile in the same commit. Re-running a
+failed commit does not bump again, and an explicit `set`/`bump minor`/`bump
+major` is preserved rather than receiving an extra patch increment. Builds do
+not change the version, so repeated builds of one commit remain reproducible.
+
+Enable the tracked hook once per clone (this checkout is configured already):
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ## Build (EC2)
 

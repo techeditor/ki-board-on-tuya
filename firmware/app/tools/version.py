@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parents[1]
 VERSION_FILE = APP_DIR / "VERSION"
 PROFILE_FILES = [APP_DIR / "app_default.config", *sorted((APP_DIR / "config").glob("*.config"))]
+REPO_ROOT = APP_DIR.parents[1]
+MANAGED_FILES = [VERSION_FILE, *PROFILE_FILES]
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CONFIG_RE = re.compile(r'^CONFIG_PROJECT_VERSION="[^"]*"$', re.MULTILINE)
 
@@ -76,6 +79,95 @@ def bumped(version: str, part: str) -> str:
     return f"{major}.{minor}.{patch}"
 
 
+def repo_relative(path: Path) -> str:
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
+def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", *args], cwd=REPO_ROOT, text=True, capture_output=True, check=False
+    )
+    if check and result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise ValueError(f"git {' '.join(args)} failed: {detail}")
+    return result
+
+
+def head_file(path: Path) -> str | None:
+    result = run_git("show", f"HEAD:{repo_relative(path)}", check=False)
+    return result.stdout if result.returncode == 0 else None
+
+
+def staged_firmware_changes() -> list[str]:
+    result = run_git(
+        "diff", "--cached", "--name-only", "--diff-filter=ACMR", "--", "firmware/app"
+    )
+    managed = {repo_relative(path) for path in MANAGED_FILES}
+    return [line for line in result.stdout.splitlines() if line and line not in managed]
+
+
+def ensure_managed_files_are_version_only(version: str) -> None:
+    """Refuse to stage a profile containing unrelated concurrent edits."""
+    for path in MANAGED_FILES:
+        committed = head_file(path)
+        if committed is None:
+            continue
+        if path == VERSION_FILE:
+            expected = version + "\n"
+        else:
+            expected, count = CONFIG_RE.subn(
+                f'CONFIG_PROJECT_VERSION="{version}"', committed
+            )
+            if count != 1:
+                raise ValueError(
+                    f"{path}: committed profile has {count} project-version entries"
+                )
+        if path.read_text(encoding="utf-8") != expected:
+            raise ValueError(
+                f"{path}: contains changes beyond the firmware version; "
+                "refusing to auto-stage concurrent edits"
+            )
+
+
+def auto_bump_staged(dry_run: bool = False) -> str:
+    changes = staged_firmware_changes()
+    current = check_version()
+    if not changes:
+        print("no staged firmware implementation changes; version unchanged")
+        return current
+
+    committed_text = head_file(VERSION_FILE)
+    if committed_text is None:
+        target = current
+        action = "initial version"
+    else:
+        committed = committed_text.strip()
+        committed_parts = validate(committed)
+        current_parts = validate(current)
+        if current_parts == committed_parts:
+            target = bumped(current, "patch")
+            action = "automatic patch bump"
+        elif current_parts > committed_parts:
+            target = current
+            action = "existing manual bump"
+        else:
+            raise ValueError(
+                f"working version {current} is not newer than committed version {committed}"
+            )
+        ensure_managed_files_are_version_only(current)
+
+    if dry_run:
+        print(f"{action}: {current} -> {target}; staged firmware changes: {len(changes)}")
+        return target
+
+    if target != current:
+        set_version(target)
+    check_version()
+    run_git("add", "--", *(repo_relative(path) for path in MANAGED_FILES))
+    print(f"{action}: {current} -> {target}; synchronized and staged version files")
+    return target
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -88,6 +180,14 @@ def main() -> int:
     bump_parser = subparsers.add_parser("bump", help="automatically increment a semantic version part")
     bump_parser.add_argument("part", choices=("major", "minor", "patch"), nargs="?", default="patch")
 
+    auto_parser = subparsers.add_parser(
+        "auto-bump-staged",
+        help="bump patch when staged firmware implementation changes are committed",
+    )
+    auto_parser.add_argument(
+        "--dry-run", action="store_true", help="report the decision without changing files or index"
+    )
+
     args = parser.parse_args()
     try:
         current = read_version()
@@ -98,10 +198,12 @@ def main() -> int:
         elif args.command == "set":
             set_version(args.version)
             print(f"{current} -> {args.version}")
-        else:
+        elif args.command == "bump":
             next_version = bumped(current, args.part)
             set_version(next_version)
             print(f"{current} -> {next_version}")
+        else:
+            auto_bump_staged(args.dry_run)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     return 0

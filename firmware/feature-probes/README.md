@@ -38,9 +38,9 @@ Bring-up（`firmware/bringup/`）验证的是**硬件基础功能**——每个�
 | **FP-1** | **agent-display** | LVGL 场景 + 吉祥物动画 + 通知 UI，按键模拟切换 Agent 状态/通知（移植自 CodeTank）。MVP 的显示层 | ✅ 完成（含真机观感） | `.kiro/specs/feature-probes-agent-display/` |
 | **FP-2** | **ble-gatt-link** | BLE GATT 板↔companion：自定义 GATT 服务，notify 上报按键/文字帧、write 下发状态。**无线地基，FP-3/4/5 都挂在它上** | ✅ 完成（含真机验收） | `.kiro/specs/feature-probes-ble-gatt-link/` |
 | **FP-3** | **tuya-cloud-asr** | 板载 Mic → 涂鸦云 ASR（`ai_chat` HOLD/PTT）→ `AI_USER_EVT_ASR_OK` 取文字 → UART0 JSONL | ✅ 完成（BUILD SUCCESS，含真机云 ASR 验收） | `.kiro/specs/feature-probes-tuya-cloud-asr/` |
-| **FP-4** | **kirocrew-control** | companion 驱动 Kiro Crew 的四类操作：①绑定 agent/对话 ②输入文字 ③发送/执行 ④切换 agent/对话 | 📋 spec 完成（路线 A：本机 session-control API） | `.kiro/specs/feature-probes-kirocrew-control/` |
-| **FP-5** | **pc-asr-activate** | 板键 → companion 激活 Windows 系统 ASR → 文字 → Kiro Crew | ⏳ 规划 | — |
-| **FP-6** | **ble-hid-fallback** | **兜底方案**：无 companion 时板子直接当标准 BLE HID 键盘，向焦点窗口输入文字 + 回车发送 + 快捷键切换对话（NimBLE 手搓 HID 描述符 + SM/配对） | 📋 spec 完成 · 可行性 **NO-GO**（技术可行但高风险，待专门排期 spike） | `.kiro/specs/feature-probes-ble-hid-fallback/` |
+| **FP-4** | **kirocrew-control** | companion 控制 Kiro Crew：K1–K3 切换会话、K4 输入、K5 提交；Hook 将真实 Agent 状态回流板端 | 🟡 本地控制完成；Hook 实际接入与 LCD 回流待完成/验收 | `.kiro/specs/feature-probes-kirocrew-local-control/` |
+| **FP-5** | **pc-asr-activate** | 板键 → companion 激活 Windows 系统 ASR → 文字 → Kiro Crew | ✅ 完成（含 Windows 真机验收，2026-09-14 用户确认） | `.kiro/specs/feature-probes-pc-asr-activate/` |
+| **FP-6** | **ble-hid-fallback** | **兜底方案**：无 companion 时板子直接当标准 BLE HID 键盘，向焦点窗口输入文字 + 回车发送 + 快捷键切换对话（NimBLE 手搓 HID 描述符 + SM/配对） | 🟡 compile+link GO；真机配对/复连/发键验收暂缓 | `.kiro/specs/feature-probes-ble-hid-fallback/` |
 | **FP-7** | **mvp-integration** | 无线 + 双 ASR + 控制 Kiro Crew 端到端串起来 | ⏳ 规划 | — |
 
 > 顺序：FP-2 是地基，先做；FP-3（板端云 ASR）与 FP-4/FP-5（companion 侧）之后可并行；
