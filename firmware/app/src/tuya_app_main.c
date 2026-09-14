@@ -24,6 +24,7 @@
 #include "ak_wifi.h"
 #include "ak_input.h"
 #include "ak_icons16.h"
+#include "ak_session_icons.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
 #include "ak_statuslcd.h"
@@ -166,17 +167,10 @@ typedef enum {
 } ak_voice_ui_state_t;
 
 #define ASR_TRANSCRIPT_MAX       256U
-#define ASR_BLINK_INTERVAL_MS    350U
-#define ASR_SCROLL_INTERVAL_MS   1000U
 #define ASR_RECOGNIZE_TIMEOUT_MS 15000U
 
 static ak_voice_ui_state_t s_voice_ui_state = AK_VOICE_UI_IDLE;
 static uint32_t            s_voice_ui_state_since_ms;
-static uint32_t            s_voice_ui_last_blink_ms;
-static uint32_t            s_asr_last_scroll_ms;
-static uint16_t            s_asr_scroll_line;
-static bool                s_voice_ui_blink_on = true;
-static char                s_asr_transcript[ASR_TRANSCRIPT_MAX] = "Waiting for Tuya ASR...";
 /* ASR callbacks run on the AI event thread. They copy one complete result and
  * publish the volatile flag last; the app thread consumes it before drawing. */
 static char                s_asr_pending_text[ASR_TRANSCRIPT_MAX];
@@ -408,84 +402,22 @@ static uint16_t ak_status_color(const char *state)
     return AK_COL_DKBLUE;
 }
 
-#define LCD_SIDEBAR_W       64U
-#define LCD_SESSION_ROWS    3U
-#define LCD_SESSION_ROW_H   73U
-#define LCD_CHAT_X          (LCD_SIDEBAR_W + 6U)
-#define LCD_CHAT_TEXT_COLS  29U
-#define LCD_CHAT_TEXT_Y     76U
-#define LCD_ASR_TEXT_Y      150U
-#define LCD_ASR_TEXT_COLS   29U
-#define LCD_ASR_LINES       9U
-#define LCD_TEXT_LINE_H     10U
+#define LCD_SIDEBAR_W          64U
+#define LCD_SESSION_ROWS       3U
+#define LCD_SESSION_ROW_H      73U
+#define LCD_CHAT_X             (LCD_SIDEBAR_W + 6U)
+#define LCD_CHAT_TEXT_COLS     29U
+#define LCD_HISTORY_Y          62U
+#define LCD_HISTORY_ROW_H      17U
+#define LCD_HISTORY_CAPACITY   10U
+#define LCD_HISTORY_TEXT_BYTES 128U
 
-/* Wrap ASCII chat text inside the right-hand history panel; non-ASCII -> '.'. */
-static void ak_status_wrap(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t max_lines)
-{
-    const uint16_t cols   = LCD_CHAT_TEXT_COLS;
-    const uint16_t line_h = 10;
-    char           buf[40];
-    uint16_t       col = 0, ln = 0;
+static char    s_chat_history[LCD_HISTORY_CAPACITY][LCD_HISTORY_TEXT_BYTES];
+static uint8_t s_chat_history_count;
 
-    for (const char *p = s; *p && ln < max_lines; ++p) {
-        unsigned char c = (unsigned char)*p;
-        buf[col++]      = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
-        if (col >= cols) {
-            buf[col] = '\0';
-            ak_gfx_text_thin(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
-            col = 0;
-            ln++;
-        }
-    }
-    if (col > 0 && ln < max_lines) {
-        buf[col] = '\0';
-        ak_gfx_text_thin(x, (uint16_t)(y + ln * line_h), buf, fg, AK_COL_BLACK, 1);
-    }
-}
-
-static const char *ak_voice_ui_label(void)
-{
-    switch (s_voice_ui_state) {
-    case AK_VOICE_UI_LISTENING:
-        return "LISTENING";
-    case AK_VOICE_UI_RECOGNIZING:
-        return "RECOGNIZING";
-    case AK_VOICE_UI_IDLE:
-    default:
-        return "IDLE";
-    }
-}
-
-static uint16_t ak_voice_ui_color(void)
-{
-    switch (s_voice_ui_state) {
-    case AK_VOICE_UI_LISTENING:
-        return AK_COL_RED;
-    case AK_VOICE_UI_RECOGNIZING:
-        return AK_COL_YELLOW;
-    case AK_VOICE_UI_IDLE:
-    default:
-        return AK_COL_GREEN;
-    }
-}
-
-/* Draw a small filled circle using horizontal spans. */
-static void ak_voice_ui_dot(uint16_t cx, uint16_t cy, uint16_t color)
-{
-    const int radius = 6;
-    for (int dy = -radius; dy <= radius; dy++) {
-        int dx = 0;
-        while ((dx + 1) * (dx + 1) + dy * dy <= radius * radius) {
-            dx++;
-        }
-        ak_gfx_fill_rect((uint16_t)((int)cx - dx), (uint16_t)((int)cy + dy),
-                         (uint16_t)(2 * dx + 1), 1, color);
-    }
-}
-
-/* Consume one UTF-8 code point. The built-in 8x8 font is ASCII-only, so a
- * non-ASCII code point is shown as one '?' rather than one '?' per UTF-8 byte. */
-static char ak_asr_next_glyph(const char **cursor)
+/* Consume one UTF-8 code point. The 8x8 font is ASCII-only, so each non-ASCII
+ * code point becomes one '?' rather than one '?' per UTF-8 byte. */
+static char ak_history_next_glyph(const char **cursor)
 {
     const unsigned char *p = (const unsigned char *)*cursor;
     unsigned char c = *p++;
@@ -501,65 +433,37 @@ static char ak_asr_next_glyph(const char **cursor)
     return (c >= 0x20U && c < 0x7FU) ? (char)c : ' ';
 }
 
-static uint16_t ak_asr_line_count(const char *text)
+/* Keep the ten most recent text updates for the session currently forwarded
+ * by the companion. Oldest entries are discarded first. */
+static void ak_chat_history_add(const char *text)
 {
-    uint16_t lines = 1;
-    uint16_t col = 0;
-    const char *p = text;
-
-    while (*p != '\0') {
-        if (*p == '\n') {
-            p++;
-            lines++;
-            col = 0;
-            continue;
-        }
-        (void)ak_asr_next_glyph(&p);
-        col++;
-        if (col >= LCD_ASR_TEXT_COLS && *p != '\0') {
-            lines++;
-            col = 0;
-        }
-    }
-    return lines;
-}
-
-static void ak_asr_draw_line(uint16_t line_index, uint16_t scroll_line,
-                             const char *line)
-{
-    if (line_index < scroll_line || line_index >= scroll_line + LCD_ASR_LINES) {
+    if (text == NULL || text[0] == '\0') {
         return;
     }
-    uint16_t visible = (uint16_t)(line_index - scroll_line);
-    ak_gfx_text_thin(LCD_CHAT_X, (uint16_t)(LCD_ASR_TEXT_Y + visible * LCD_TEXT_LINE_H), line,
-                AK_COL_WHITE, AK_COL_BLACK, 1);
+    if (s_chat_history_count == LCD_HISTORY_CAPACITY) {
+        memmove(s_chat_history[0], s_chat_history[1],
+                (LCD_HISTORY_CAPACITY - 1U) * LCD_HISTORY_TEXT_BYTES);
+        s_chat_history_count--;
+    }
+    (void)snprintf(s_chat_history[s_chat_history_count], LCD_HISTORY_TEXT_BYTES,
+                   "%s", text);
+    s_chat_history_count++;
 }
 
-static void ak_asr_draw_transcript(void)
+static void ak_chat_history_draw(void)
 {
-    char line[LCD_ASR_TEXT_COLS + 1U];
-    uint16_t col = 0;
-    uint16_t line_index = 0;
-    const char *p = s_asr_transcript;
+    for (uint8_t i = 0; i < s_chat_history_count; i++) {
+        char line[LCD_CHAT_TEXT_COLS + 1U];
+        const char *p = s_chat_history[i];
+        uint16_t col = 0U;
 
-    while (*p != '\0') {
-        if (*p == '\n') {
-            p++;
-            line[col] = '\0';
-            ak_asr_draw_line(line_index++, s_asr_scroll_line, line);
-            col = 0;
-            continue;
+        while (*p != '\0' && col < LCD_CHAT_TEXT_COLS) {
+            line[col++] = ak_history_next_glyph(&p);
         }
-        line[col++] = ak_asr_next_glyph(&p);
-        if (col >= LCD_ASR_TEXT_COLS) {
-            line[col] = '\0';
-            ak_asr_draw_line(line_index++, s_asr_scroll_line, line);
-            col = 0;
-        }
-    }
-    if (col > 0 || line_index == 0) {
         line[col] = '\0';
-        ak_asr_draw_line(line_index, s_asr_scroll_line, line);
+        ak_gfx_text_thin(LCD_CHAT_X,
+                         (uint16_t)(LCD_HISTORY_Y + i * LCD_HISTORY_ROW_H),
+                         line, AK_COL_WHITE, AK_COL_BLACK, 1);
     }
 }
 
@@ -616,9 +520,9 @@ static void ak_draw_session_sidebar(const char *state)
         uint16_t fg = (i == 0U) ? ak_status_color(state) : AK_COL_GRAY;
 
         ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W - 1U, h, bg);
-        ak_gfx_icon(24U, (uint16_t)(y + 17U), AK_ICON_KIRO_GHOST,
-                    AK_ICON_W, AK_ICON_H, fg, bg);
-        ak_gfx_char_thin(28U, (uint16_t)(y + 42U), labels[i], AK_COL_WHITE, bg, 1);
+        ak_gfx_icon(16U, (uint16_t)(y + 8U), AK_SESSION_ICON_KIRO_GHOST,
+                    AK_SESSION_ICON_W, AK_SESSION_ICON_H, fg, bg);
+        ak_gfx_char_thin(28U, (uint16_t)(y + 50U), labels[i], AK_COL_WHITE, bg, 1);
         if (i > 0U) {
             ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W, 1U, AK_COL_GRAY);
         }
@@ -627,10 +531,10 @@ static void ak_draw_session_sidebar(const char *state)
                      AK_STATUSLCD_H - 22U, AK_COL_GRAY);
 }
 
-/* Render the reference layout: header, three session slots at left, and chat
- * history at right. Until session IDs arrive on the wire, slot A represents
- * the active session while B/C remain neutral placeholders. */
-static void ak_render_status(const char *agent, const char *state, const char *text)
+/* Render one selected-session panel. The companion currently forwards only
+ * the watched session; the wire protocol still has no session ID for binding
+ * the three sidebar slots to independent histories. */
+static void ak_render_status(const char *agent, const char *state)
 {
     if (!ak_statuslcd_ready()) {
         return;
@@ -638,7 +542,6 @@ static void ak_render_status(const char *agent, const char *state, const char *t
     char     link_text[32];
     uint16_t link_color = ak_link_header(link_text, sizeof(link_text));
     char     line[48];
-    uint16_t voice_color = ak_voice_ui_color();
 
     bool usb_connected = false;
     bool ble_connected = false;
@@ -649,52 +552,33 @@ static void ak_render_status(const char *agent, const char *state, const char *t
     ble_connected = (ak_ble_gatt_link_state() != AK_BLE_LINK_ADVERTISING);
 #endif
 
-    /* Header keeps the live transport icons; the reference content layout
-     * begins directly below its existing 22 px height. */
     ak_statuslcd_title_links("Ki-board for Kiro Crew", link_color, s_wifi_connected,
                              usb_connected, ble_connected);
     ak_draw_session_sidebar(state);
 
-    ak_gfx_text_thin(LCD_CHAT_X, 28U, "Chat History", AK_COL_CYAN, AK_COL_BLACK, 1);
-    (void)snprintf(line, sizeof(line), "Session A: %s", agent[0] ? agent : "-");
-    ak_gfx_text_thin(LCD_CHAT_X, 43U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
+    (void)snprintf(line, sizeof(line), "Session: %s", agent[0] ? agent : "-");
+    ak_gfx_text_thin(LCD_CHAT_X, 29U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), "Status: %s", state[0] ? state : "-");
-    ak_gfx_text_thin(LCD_CHAT_X, 55U, line, ak_status_color(state), AK_COL_BLACK, 1);
-    ak_gfx_fill_rect(LCD_SIDEBAR_W, 68U,
-                     AK_STATUSLCD_W - LCD_SIDEBAR_W, 1U, AK_COL_GRAY);
-
-    ak_status_wrap(LCD_CHAT_X, LCD_CHAT_TEXT_Y, text, AK_COL_WHITE, 5U);
-
-    ak_gfx_fill_rect(LCD_SIDEBAR_W, 132U,
-                     AK_STATUSLCD_W - LCD_SIDEBAR_W, 1U, AK_COL_GRAY);
-    (void)snprintf(line, sizeof(line), "ASR: %s", ak_voice_ui_label());
-    ak_gfx_text_thin(LCD_CHAT_X, 137U, line, voice_color, AK_COL_BLACK, 1);
-    ak_voice_ui_dot(300U, 141U,
-                    (s_voice_ui_state == AK_VOICE_UI_LISTENING && !s_voice_ui_blink_on)
-                        ? AK_COL_BLACK
-                        : voice_color);
-    ak_asr_draw_transcript();
+    ak_gfx_text_thin(LCD_CHAT_X, 43U, line,
+                     ak_status_color(state), AK_COL_BLACK, 1);
+    ak_chat_history_draw();
     ak_statuslcd_flush();
 }
 
-/* Redraw just the connection-status header, preserving the last agent status
- * content. Cheap enough to call on every BLE link-state change. */
+/* Redraw the complete screen so connection-state changes preserve the current
+ * session metadata and its ten-entry history. */
 static char s_last_agent[32] = "-";
 static char s_last_state[16] = "idle";
-static char s_last_text[128] = "waiting for Kiro Crew";
 
 static void ak_refresh_link_header(void)
 {
-    ak_render_status(s_last_agent, s_last_state, s_last_text);
+    ak_render_status(s_last_agent, s_last_state);
 }
 
 static void ak_voice_ui_set_state(ak_voice_ui_state_t state)
 {
     s_voice_ui_state = state;
     s_voice_ui_state_since_ms = tal_system_get_millisecond();
-    s_voice_ui_last_blink_ms = s_voice_ui_state_since_ms;
-    s_voice_ui_blink_on = true;
-    ak_refresh_link_header();
 }
 
 static void ak_voice_ui_queue_result(const char *text, bool is_error)
@@ -714,59 +598,26 @@ static void ak_voice_ui_tick(uint32_t now_ms)
 
     if (s_asr_result_pending) {
         bool is_error = s_asr_result_is_error;
-        if (is_error && strcmp(s_asr_pending_text, "asr_empty") == 0) {
-            (void)snprintf(s_asr_transcript, sizeof(s_asr_transcript),
-                           "No speech recognized.");
-        } else if (is_error) {
-            (void)snprintf(s_asr_transcript, sizeof(s_asr_transcript),
-                           "Recognition failed.");
-        } else {
-            (void)snprintf(s_asr_transcript, sizeof(s_asr_transcript), "%s",
-                           s_asr_pending_text);
+        if (!is_error) {
+            ak_chat_history_add(s_asr_pending_text);
+            redraw = true;
         }
         s_asr_result_pending = false;
-        s_asr_scroll_line = 0;
-        s_asr_last_scroll_ms = now_ms;
         s_voice_ui_state = AK_VOICE_UI_IDLE;
         s_voice_ui_state_since_ms = now_ms;
-        s_voice_ui_blink_on = true;
-        redraw = true;
-    }
-
-    if (s_voice_ui_state == AK_VOICE_UI_LISTENING &&
-        (uint32_t)(now_ms - s_voice_ui_last_blink_ms) >= ASR_BLINK_INTERVAL_MS) {
-        s_voice_ui_last_blink_ms = now_ms;
-        s_voice_ui_blink_on = !s_voice_ui_blink_on;
-        redraw = true;
     }
 
     if (s_voice_ui_state == AK_VOICE_UI_RECOGNIZING &&
         (uint32_t)(now_ms - s_voice_ui_state_since_ms) >= ASR_RECOGNIZE_TIMEOUT_MS) {
-        (void)snprintf(s_asr_transcript, sizeof(s_asr_transcript),
-                       "Recognition timed out.");
         s_voice_ui_state = AK_VOICE_UI_IDLE;
         s_voice_ui_state_since_ms = now_ms;
-        s_asr_scroll_line = 0;
-        redraw = true;
-    }
-
-    uint16_t total_lines = ak_asr_line_count(s_asr_transcript);
-    uint16_t max_scroll = (total_lines > LCD_ASR_LINES)
-                              ? (uint16_t)(total_lines - LCD_ASR_LINES)
-                              : 0;
-    if (max_scroll > 0 &&
-        (uint32_t)(now_ms - s_asr_last_scroll_ms) >= ASR_SCROLL_INTERVAL_MS) {
-        s_asr_last_scroll_ms = now_ms;
-        s_asr_scroll_line = (s_asr_scroll_line >= max_scroll)
-                                ? 0
-                                : (uint16_t)(s_asr_scroll_line + 1U);
-        redraw = true;
     }
 
     if (redraw) {
         ak_refresh_link_header();
     }
 }
+
 #endif /* AK_ENABLE_DISPLAY */
 
 /* Handle one inbound JSONL line (PC -> board). Unknown types are ignored. */
@@ -862,8 +713,8 @@ static void on_rx_line(const char *line)
 #if AK_ENABLE_DISPLAY
         snprintf(s_last_agent, sizeof(s_last_agent), "%s", agent);
         snprintf(s_last_state, sizeof(s_last_state), "%s", state);
-        snprintf(s_last_text, sizeof(s_last_text), "%s", text);
-        ak_render_status(agent, state, text);
+        ak_chat_history_add(text);
+        ak_render_status(s_last_agent, s_last_state);
 #endif
     }
     /* ack / pong / unknown: ignore per protocol */
@@ -912,7 +763,7 @@ static void user_main(void)
     if (rt != OPRT_OK) {
         PR_WARN("status LCD init failed: %d (continuing headless)", rt);
     } else {
-        ak_render_status("-", "idle", "waiting for Kiro Crew");
+        ak_render_status("-", "idle");
     }
 #endif
 

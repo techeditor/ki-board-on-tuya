@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "ak_icons16.h"
+#include "ak_session_icons.h"
 #include "ak_input_fsm.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
@@ -233,7 +234,8 @@ static void test_status_icons(void)
     CHECK(sizeof(AK_ICON_NO_USB) == AK_ICON_BYTES, "no-USB icon byte count");
     CHECK(sizeof(AK_ICON_BLUETOOTH) == AK_ICON_BYTES, "BLE icon byte count");
     CHECK(sizeof(AK_ICON_NO_BLUETOOTH) == AK_ICON_BYTES, "no-BLE icon byte count");
-    CHECK(sizeof(AK_ICON_KIRO_GHOST) == AK_ICON_BYTES, "Kiro ghost icon byte count");
+    CHECK(sizeof(AK_SESSION_ICON_KIRO_GHOST) == AK_SESSION_ICON_BYTES,
+          "32x32 Kiro ghost icon byte count");
     CHECK(memcmp(AK_ICON_WIFI, AK_ICON_NO_WIFI, AK_ICON_BYTES) != 0,
           "WiFi connected/disconnected bitmaps differ");
     CHECK(memcmp(AK_ICON_USB, AK_ICON_NO_USB, AK_ICON_BYTES) != 0,
