@@ -1,58 +1,64 @@
-//! Install AK Companion status hooks using Kiro Crew's current standalone v1
-//! hook format.
+//! Install AK Companion status hooks in Kiro Crew's global ScriptHookStore.
 //!
-//! Kiro Crew manages and may restore built-in agent JSON files on startup, so
-//! those files are not a durable extension point. The supported user-level
-//! location is `~/.kiro/crew/hooks/*.json` (or `$KIRO_HOME/crew/hooks/*.json`).
-//! A single global file covers every Crew agent and activates without restart.
+//! Kiro Crew 0.6.0 persists the hooks shown in Agent Capabilities > Hooks in
+//! `~/.kiro/crew/hooks.json` (or `$KIRO_HOME/crew/hooks.json`). This is separate
+//! from the CLI 2.x ACP Agent Hooks embedded in Agent JSON files and from the
+//! CLI 3.0 standalone v1 `.kiro/hooks/*.json` format.
+//!
+//! The store is shared with webhook continuation records, so every mutation:
+//! * takes Crew's `hooks.json.lock` sidecar lock;
+//! * re-reads while holding the lock;
+//! * changes only Companion-owned entries in the top-level `hooks` array;
+//! * preserves every other top-level key and every non-AK hook.
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
-pub const HOOK_FILE_NAME: &str = "ak-companion-status.json";
+pub const HOOK_FILE_NAME: &str = "hooks.json";
 pub const HOOK_NAME_PREFIX: &str = "ak-companion-status-";
 pub const HOOK_MARKER: &str = "--hook";
-pub const HOOK_TRIGGERS: [(&str, &str); 4] = [
-    ("SessionStart", "session-start"),
-    ("UserPromptSubmit", "prompt-submit"),
-    ("PostToolUse", "post-tool-use"),
-    ("Stop", "stop"),
+pub const HOOK_EVENTS: [(&str, &str, &str); 4] = [
+    ("AgentSpawn", "agent-spawn", "akspawn"),
+    ("UserPromptSubmit", "prompt-submit", "akprompt"),
+    ("PostToolUse", "post-tool-use", "akpost"),
+    ("Stop", "stop", "akstop"),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HookStatus {
-    /// Command written into every AK Companion hook action.
+    /// Command written into every AK Companion ScriptHook entry.
     pub command: String,
-    /// Resolved user-level Kiro Crew hooks directory.
+    /// Kiro Crew configuration directory containing `hooks.json`.
     pub hooks_dir: String,
-    /// Dedicated standalone hook file managed by Companion.
+    /// Shared ScriptHookStore file managed cooperatively by Crew and Companion.
     pub hook_file: String,
-    /// Number of required lifecycle triggers currently installed (0..=4).
+    /// Number of required lifecycle events correctly configured (0..=4).
     pub installed_events: u8,
     pub fully_installed: bool,
     pub any_installed: bool,
 }
 
-/// Resolve the user-level Crew hooks directory. `KIRO_HOME` points at the Kiro
-/// configuration root (the directory that contains `agents` and `crew`).
+/// Resolve Kiro Crew's configuration directory. `KIRO_HOME` points at the Kiro
+/// root containing `agents` and `crew`.
 pub fn hooks_dir() -> Option<PathBuf> {
     if let Ok(kiro_home) = std::env::var("KIRO_HOME") {
         let value = kiro_home.trim();
         if !value.is_empty() {
-            return Some(PathBuf::from(value).join("crew").join("hooks"));
+            return Some(PathBuf::from(value).join("crew"));
         }
     }
     let home = dirs::home_dir().or_else(|| std::env::var("HOME").ok().map(PathBuf::from))?;
-    Some(home.join(".kiro").join("crew").join("hooks"))
+    Some(home.join(".kiro").join("crew"))
 }
 
 pub fn hook_file() -> Option<PathBuf> {
     hooks_dir().map(|dir| dir.join(HOOK_FILE_NAME))
 }
 
-/// Quote the executable so paths with spaces survive the platform shell.
+/// Quote the executable so paths with spaces survive Crew's platform shell.
 pub fn hook_command(companion_exe: &str) -> String {
     format!("\"{companion_exe}\" {HOOK_MARKER}")
 }
@@ -64,17 +70,37 @@ pub fn current_exe_path() -> String {
         .unwrap_or_else(|| "companion".to_string())
 }
 
-fn canonical_hook(trigger: &str, slug: &str, command: &str) -> Value {
+fn canonical_hook(event: &str, slug: &str, id: &str, command: &str, old: Option<&Value>) -> Value {
+    let last_run = old
+        .and_then(|h| h.get("last_run"))
+        .cloned()
+        .unwrap_or(json!(0.0));
+    let last_status = old
+        .and_then(|h| h.get("last_status"))
+        .cloned()
+        .unwrap_or(json!(""));
+    let last_error = old
+        .and_then(|h| h.get("last_error"))
+        .cloned()
+        .unwrap_or(json!(""));
+    let run_count = old
+        .and_then(|h| h.get("run_count"))
+        .cloned()
+        .unwrap_or(json!(0));
     json!({
+        "id": id,
         "name": format!("{HOOK_NAME_PREFIX}{slug}"),
-        "description": "Forward Kiro Crew lifecycle status to AK Companion",
-        "trigger": trigger,
-        "action": {
-            "type": "command",
-            "command": command,
-        },
+        "event": event,
+        "matcher": "",
+        "matcher_mode": "glob",
+        "command": command,
+        "skills": [],
         "timeout": 5,
         "enabled": true,
+        "last_run": last_run,
+        "last_status": last_status,
+        "last_error": last_error,
+        "run_count": run_count,
     })
 }
 
@@ -85,70 +111,61 @@ fn is_our_hook(hook: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Count required triggers represented by Companion-owned entries.
-pub fn count_installed(config: &Value) -> u8 {
+/// Count required ScriptHook events with the expected command and enabled state.
+pub fn count_installed(config: &Value, command: &str) -> u8 {
     let Some(hooks) = config.get("hooks").and_then(Value::as_array) else {
         return 0;
     };
-    HOOK_TRIGGERS
+    HOOK_EVENTS
         .iter()
-        .filter(|(trigger, _)| {
+        .filter(|(event, _, _)| {
             hooks.iter().any(|hook| {
                 is_our_hook(hook)
-                    && hook.get("trigger").and_then(Value::as_str) == Some(*trigger)
-                    && hook
-                        .pointer("/action/command")
-                        .and_then(Value::as_str)
-                        .map(|command| command.contains(HOOK_MARKER))
-                        .unwrap_or(false)
+                    && hook.get("event").and_then(Value::as_str) == Some(*event)
+                    && hook.get("command").and_then(Value::as_str) == Some(command)
+                    && hook.get("enabled").and_then(Value::as_bool) == Some(true)
             })
         })
         .count() as u8
 }
 
-/// Merge the four canonical AK entries into a standalone v1 hook document.
-/// Non-AK entries in the same file are preserved. Existing AK entries are
-/// replaced as a group, making command-path updates and duplicate cleanup
-/// deterministic and idempotent.
+/// Merge the four canonical entries into Crew's shared ScriptHookStore object.
+/// Existing Companion entries are replaced as a group; all foreign entries and
+/// top-level webhook registration keys are retained.
 pub fn apply_install(config: &mut Value, command: &str) -> Result<bool, String> {
     let before = config.clone();
     let root = config
         .as_object_mut()
-        .ok_or("AK hook file must contain a JSON object")?;
-
-    match root.get("version") {
-        None => {
-            root.insert("version".to_string(), Value::String("v1".to_string()));
-        }
-        Some(Value::String(version)) if version == "v1" => {}
-        Some(_) => return Err("AK hook file has an unsupported schema version".to_string()),
-    }
-
+        .ok_or("Kiro Crew hooks.json must contain a JSON object")?;
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| Value::Array(Vec::new()))
         .as_array_mut()
-        .ok_or("AK hook file 'hooks' must be an array")?;
+        .ok_or("Kiro Crew hooks.json 'hooks' must be an array")?;
+
+    let old_hooks = hooks.clone();
     hooks.retain(|hook| !is_our_hook(hook));
-    hooks.extend(
-        HOOK_TRIGGERS
-            .iter()
-            .map(|(trigger, slug)| canonical_hook(trigger, slug, command)),
-    );
+    hooks.extend(HOOK_EVENTS.iter().map(|(event, slug, id)| {
+        let old = old_hooks.iter().find(|hook| {
+            is_our_hook(hook) && hook.get("event").and_then(Value::as_str) == Some(*event)
+        });
+        canonical_hook(event, slug, id, command, old)
+    }));
     Ok(*config != before)
 }
 
-/// Remove only Companion-owned entries. Returns whether the document changed.
+/// Remove only Companion-owned entries. Other script hooks and webhook records
+/// in the shared object remain untouched.
 pub fn apply_remove(config: &mut Value) -> Result<bool, String> {
-    let Some(root) = config.as_object_mut() else {
-        return Err("AK hook file must contain a JSON object".to_string());
-    };
+    let root = config
+        .as_object_mut()
+        .ok_or("Kiro Crew hooks.json must contain a JSON object")?;
     let Some(hooks) = root.get_mut("hooks") else {
         return Ok(false);
     };
     let hooks = hooks
         .as_array_mut()
-        .ok_or("AK hook file 'hooks' must be an array")?;
+        .ok_or("Kiro Crew hooks.json 'hooks' must be an array")?;
     let before = hooks.len();
     hooks.retain(|hook| !is_our_hook(hook));
     Ok(hooks.len() != before)
@@ -165,65 +182,84 @@ fn read_config(path: &Path) -> Result<Option<Value>, String> {
         .map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
+fn lock_file(path: &Path) -> Result<File, String> {
+    let lock_path = path.with_file_name(format!("{HOOK_FILE_NAME}.lock"));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| format!("open {}: {error}", lock_path.display()))?;
+    file.lock()
+        .map_err(|error| format!("lock {}: {error}", lock_path.display()))?;
+    Ok(file)
+}
+
 fn write_config(path: &Path, config: &Value) -> Result<(), String> {
+    let mut body = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    body.push('\n');
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| format!("open {}: {error}", path.display()))?;
+    use std::io::Write;
+    file.write_all(body.as_bytes())
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("sync {}: {error}", path.display()))
+}
+
+fn with_locked_config<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut Value) -> Result<T, String>,
+) -> Result<T, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
-    let mut body = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
-    body.push('\n');
-    std::fs::write(path, body).map_err(|error| format!("write {}: {error}", path.display()))
+    let _lock = lock_file(path)?;
+    let mut config = read_config(path)?.unwrap_or_else(|| json!({ "hooks": [] }));
+    let result = mutate(&mut config)?;
+    write_config(path, &config)?;
+    Ok(result)
 }
 
 fn status_at(command: &str, dir: &Path, path: &Path) -> Result<HookStatus, String> {
     let installed_events = read_config(path)?
         .as_ref()
-        .map(count_installed)
+        .map(|config| count_installed(config, command))
         .unwrap_or(0);
     Ok(HookStatus {
         command: command.to_string(),
         hooks_dir: dir.display().to_string(),
         hook_file: path.display().to_string(),
         installed_events,
-        fully_installed: installed_events == HOOK_TRIGGERS.len() as u8,
+        fully_installed: installed_events == HOOK_EVENTS.len() as u8,
         any_installed: installed_events > 0,
     })
 }
 
 pub fn status(command: &str) -> Result<HookStatus, String> {
-    let dir = hooks_dir().ok_or("cannot resolve Kiro Crew hooks directory")?;
+    let dir = hooks_dir().ok_or("cannot resolve Kiro Crew configuration directory")?;
     let path = dir.join(HOOK_FILE_NAME);
     status_at(command, &dir, &path)
 }
 
 pub fn install(command: &str) -> Result<HookStatus, String> {
-    let dir = hooks_dir().ok_or("cannot resolve Kiro Crew hooks directory")?;
+    let dir = hooks_dir().ok_or("cannot resolve Kiro Crew configuration directory")?;
     let path = dir.join(HOOK_FILE_NAME);
-    let mut config = read_config(&path)?.unwrap_or_else(|| json!({ "version": "v1", "hooks": [] }));
-    if apply_install(&mut config, command)? {
-        write_config(&path, &config)?;
-    }
+    with_locked_config(&path, |config| apply_install(config, command))?;
     status_at(command, &dir, &path)
 }
 
 pub fn remove(command: &str) -> Result<HookStatus, String> {
-    let dir = hooks_dir().ok_or("cannot resolve Kiro Crew hooks directory")?;
+    let dir = hooks_dir().ok_or("cannot resolve Kiro Crew configuration directory")?;
     let path = dir.join(HOOK_FILE_NAME);
-    let Some(mut config) = read_config(&path)? else {
-        return status_at(command, &dir, &path);
-    };
-    if apply_remove(&mut config)? {
-        let empty = config
-            .get("hooks")
-            .and_then(Value::as_array)
-            .map(Vec::is_empty)
-            .unwrap_or(false);
-        if empty {
-            std::fs::remove_file(&path)
-                .map_err(|error| format!("remove {}: {error}", path.display()))?;
-        } else {
-            write_config(&path, &config)?;
-        }
+    if path.exists() {
+        with_locked_config(&path, apply_remove)?;
     }
     status_at(command, &dir, &path)
 }
@@ -245,57 +281,73 @@ mod tests {
     }
 
     #[test]
-    fn install_creates_four_v1_global_hooks() {
-        let mut config = json!({ "version": "v1", "hooks": [] });
+    fn install_creates_four_crew_script_hooks() {
+        let mut config = json!({ "hooks": [] });
         assert!(apply_install(&mut config, &command()).unwrap());
-        assert_eq!(count_installed(&config), 4);
+        assert_eq!(count_installed(&config, &command()), 4);
         assert_eq!(config["hooks"].as_array().unwrap().len(), 4);
-        assert_eq!(config["hooks"][0]["trigger"], "SessionStart");
-        assert_eq!(config["hooks"][3]["trigger"], "Stop");
+        assert_eq!(config["hooks"][0]["event"], "AgentSpawn");
+        assert_eq!(config["hooks"][3]["event"], "Stop");
+        assert!(config.get("version").is_none());
     }
 
     #[test]
     fn install_is_idempotent_and_updates_command() {
-        let mut config = json!({ "version": "v1", "hooks": [] });
+        let mut config = json!({ "hooks": [] });
         assert!(apply_install(&mut config, &command()).unwrap());
         assert!(!apply_install(&mut config, &command()).unwrap());
-        assert!(apply_install(&mut config, "\"D:\\new.exe\" --hook").unwrap());
+        let changed = "\"D:\\AK\\companion.exe\" --hook";
+        assert!(apply_install(&mut config, changed).unwrap());
         assert_eq!(config["hooks"].as_array().unwrap().len(), 4);
-        assert_eq!(
-            config["hooks"][0]["action"]["command"],
-            "\"D:\\new.exe\" --hook"
-        );
+        assert_eq!(count_installed(&config, changed), 4);
     }
 
     #[test]
-    fn install_and_remove_preserve_non_ak_entries() {
+    fn install_and_remove_preserve_foreign_hooks_and_webhook_keys() {
         let custom = json!({
-            "name": "custom-audit",
-            "trigger": "PostToolUse",
-            "action": { "type": "command", "command": "echo audit" }
+            "id": "custom",
+            "name": "test",
+            "event": "UserPromptSubmit",
+            "command": "echo hello",
+            "enabled": true
         });
-        let mut config = json!({ "version": "v1", "hooks": [custom.clone()] });
+        let webhook = json!({ "context": "resume me" });
+        let mut config = json!({
+            "hooks": [custom.clone()],
+            "registered-webhook": webhook.clone()
+        });
         apply_install(&mut config, &command()).unwrap();
         assert_eq!(config["hooks"].as_array().unwrap().len(), 5);
+        assert_eq!(config["registered-webhook"], webhook);
         assert!(apply_remove(&mut config).unwrap());
         assert_eq!(config["hooks"], json!([custom]));
+        assert_eq!(config["registered-webhook"], webhook);
     }
 
     #[test]
-    fn partial_status_counts_distinct_required_triggers() {
-        let mut config = json!({ "version": "v1", "hooks": [] });
+    fn reinstall_preserves_runtime_status_fields() {
+        let mut config = json!({ "hooks": [] });
         apply_install(&mut config, &command()).unwrap();
-        config["hooks"].as_array_mut().unwrap().pop();
-        assert_eq!(count_installed(&config), 3);
+        config["hooks"][0]["run_count"] = json!(7);
+        config["hooks"][0]["last_status"] = json!("ok");
+        apply_install(&mut config, &command()).unwrap();
+        assert_eq!(config["hooks"][0]["run_count"], 7);
+        assert_eq!(config["hooks"][0]["last_status"], "ok");
     }
 
     #[test]
-    fn malformed_or_unknown_schema_is_refused() {
+    fn partial_or_disabled_status_is_not_fully_installed() {
+        let mut config = json!({ "hooks": [] });
+        apply_install(&mut config, &command()).unwrap();
+        config["hooks"][0]["enabled"] = json!(false);
+        assert_eq!(count_installed(&config, &command()), 3);
+    }
+
+    #[test]
+    fn malformed_store_is_refused() {
         let mut array = json!([]);
         assert!(apply_install(&mut array, &command()).is_err());
-        let mut version = json!({ "version": "v2", "hooks": [] });
-        assert!(apply_install(&mut version, &command()).is_err());
-        let mut hooks = json!({ "version": "v1", "hooks": {} });
+        let mut hooks = json!({ "hooks": {} });
         assert!(apply_install(&mut hooks, &command()).is_err());
     }
 }

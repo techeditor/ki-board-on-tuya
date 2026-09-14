@@ -876,14 +876,15 @@ mod app {
         hook_install::hook_command(&exe)
     }
 
-    /// Report global standalone hook status without modifying anything.
+    /// Report global Crew ScriptHookStore status without modifying anything.
     #[tauri::command]
     fn kc_hook_status(exe: Option<String>) -> Result<hook_install::HookStatus, String> {
         hook_install::status(&resolve_hook_command(exe))
     }
 
-    /// Install the four lifecycle actions into one user-level standalone v1
-    /// Crew hook file. The file applies globally and activates without restart.
+    /// Install four lifecycle commands into Crew's shared hooks.json store.
+    /// Crew must be restarted after an external file update so its in-memory
+    /// ScriptHookStore reloads the entries.
     #[tauri::command]
     fn kc_hook_install(
         app: AppHandle,
@@ -898,7 +899,7 @@ mod app {
         Ok(status)
     }
 
-    /// Remove only AK Companion entries from the global standalone hook file.
+    /// Remove only AK Companion entries from Crew's shared hooks.json store.
     #[tauri::command]
     fn kc_hook_remove(
         app: AppHandle,
@@ -912,10 +913,10 @@ mod app {
         Ok(status)
     }
 
-    /// Open the supported user-level Crew hooks directory in Explorer.
+    /// Open the Crew configuration directory containing hooks.json in Explorer.
     #[tauri::command]
     fn kc_open_hooks_folder() -> Result<String, String> {
-        let dir = hook_install::hooks_dir().ok_or("cannot resolve Kiro Crew hooks directory")?;
+        let dir = hook_install::hooks_dir().ok_or("cannot resolve Kiro Crew configuration directory")?;
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("create {}: {e}", dir.display()))?;
         std::process::Command::new("explorer.exe")

@@ -54,15 +54,15 @@ pub struct HookEvent {
     /// | …. Accepts either `hook_event_name` (Kiro's own key) or `event`.
     #[serde(default, alias = "hook_event_name")]
     pub event: String,
-    /// The Kiro session id (from `$KIRO_SESSION_ID`), used to key per-session
-    /// status. Accepts `session_id` or `sessionId`.
-    #[serde(default, alias = "sessionId")]
+    /// Stable session identity. CLI hooks provide `session_id`/`sessionId` or
+    /// `$KIRO_SESSION_ID`; Crew ScriptHookStore provides `parent_session_key`.
+    #[serde(default, alias = "sessionId", alias = "parent_session_key", alias = "session_key")]
     pub session_id: String,
     /// Present on `postToolUse`: the tool that just ran.
     #[serde(default, alias = "toolName")]
     pub tool_name: Option<String>,
-    /// Present on `stop`: the assistant's final response text.
-    #[serde(default, alias = "assistantResponse")]
+    /// Present on Stop: CLI uses `assistant_response`; Crew uses `assistant_text`.
+    #[serde(default, alias = "assistantResponse", alias = "assistant_text")]
     pub assistant_response: Option<String>,
 }
 
@@ -106,9 +106,10 @@ fn truncate_response(s: &str) -> String {
 /// but the name is not in the JSON), so it defaults to `"kirocrew"`; the app
 /// layer may override it from the bound session.
 pub fn map_hook_event(ev: &HookEvent) -> DisplayState {
-    let (state, text) = match ev.event.as_str() {
-        "agentSpawn" => ("running", "agent started".to_string()),
-        "postToolUse" => {
+    let normalized = ev.event.to_ascii_lowercase();
+    let (state, text) = match normalized.as_str() {
+        "agentspawn" | "sessionstart" => ("running", "agent started".to_string()),
+        "posttooluse" => {
             let tool = ev.tool_name.as_deref().unwrap_or("tool");
             ("tool", format!("using {tool}"))
         }
@@ -121,10 +122,9 @@ pub fn map_hook_event(ev: &HookEvent) -> DisplayState {
             };
             ("idle", text)
         }
-        "userPromptSubmit" => ("received", "prompt received".to_string()),
-        // Unknown / finer states fall back to a live "running" so the board at
-        // least shows activity rather than dropping the event.
-        other => ("running", other.to_string()),
+        "userpromptsubmit" => ("received", "prompt received".to_string()),
+        // Unknown / finer states retain the original spelling for diagnostics.
+        _ => ("running", ev.event.clone()),
     };
     DisplayState {
         agent_name: "kirocrew".to_string(),
@@ -385,46 +385,57 @@ fn handle_request(mut req: tiny_http::Request, token: &str, cb: &dyn Fn(DisplayS
 
 // ───────────────────────────── --hook client ─────────────────────────────
 
-/// Deliver a hook event to a running sink, reading the sink's `{port, token}`
-/// from the handoff file. Used by the `companion --hook` mode. Cross-platform
-/// (reuses `reqwest` blocking, already a dep). Times out fast and never blocks
-/// the agent turn: if the handoff file / sink is absent it returns `Ok(())`
-/// silently so the hook mode can always `exit 0`.
+/// Deliver a hook event to a running sink. Delivery failures are returned for
+/// Crew's Hook Test/details UI to expose; `run_hook_mode` still exits zero so a
+/// missing Companion can never fail an agent turn.
 pub fn post_hook_event(ev: &HookEvent) -> Result<(), String> {
-    let Some(handoff) = read_handoff() else {
-        // No sink running — nothing to do, do not fail the agent turn.
-        return Ok(());
-    };
+    let handoff = read_handoff().ok_or_else(|| {
+        let path = handoff_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unresolved>".to_string());
+        format!("status sink handoff missing or invalid: {path}; start the Companion sink")
+    })?;
     let url = format!("http://127.0.0.1:{}/status", handoff.port);
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(800))
         .build()
-        .map_err(|e| format!("hook client: {e}"))?;
-    // Best-effort POST; a connection error just means the sink went away.
-    let _ = client
+        .map_err(|e| format!("build hook HTTP client: {e}"))?;
+    let response = client
         .post(&url)
         .header(STATUS_TOKEN_HEADER, &handoff.token)
         .json(ev)
-        .send();
+        .send()
+        .map_err(|e| format!("POST {url}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("POST {url}: HTTP {}", response.status()));
+    }
     Ok(())
 }
 
-/// The `companion --hook` entry point (cross-platform, called from `main.rs`
-/// BEFORE Tauri starts). Reads the raw Kiro hook JSON from STDIN, augments the
-/// event with `$KIRO_SESSION_ID` when the body omitted it, POSTs it to the
-/// sink, and returns — always fast, always non-fatal to the caller.
+/// Read one raw Crew/CLI hook event from STDIN and forward it. Diagnostics go
+/// to stderr (visible from Crew's Hook Test and hook run details), while the
+/// process remains non-fatal to the agent turn.
 pub fn run_hook_mode() {
     let mut buf = String::new();
-    // Read STDIN; empty / unreadable stdin just yields an empty event.
-    let _ = std::io::stdin().read_to_string(&mut buf);
-    let mut ev: HookEvent = serde_json::from_str(&buf).unwrap_or_default();
+    if let Err(error) = std::io::stdin().read_to_string(&mut buf) {
+        eprintln!("[AK-HOOK] read stdin: {error}");
+        return;
+    }
+    let mut ev: HookEvent = match serde_json::from_str(&buf) {
+        Ok(event) => event,
+        Err(error) => {
+            eprintln!("[AK-HOOK] parse stdin JSON: {error}");
+            return;
+        }
+    };
     if ev.session_id.trim().is_empty() {
         if let Ok(sid) = std::env::var("KIRO_SESSION_ID") {
             ev.session_id = sid;
         }
     }
-    // Ignore the result: the hook must never fail the agent turn.
-    let _ = post_hook_event(&ev);
+    if let Err(error) = post_hook_event(&ev) {
+        eprintln!("[AK-HOOK] {error}");
+    }
 }
 
 /// Probe helper for tests / callers: is a port bindable on loopback right now?
@@ -442,7 +453,7 @@ mod tests {
     #[test]
     fn agent_spawn_maps_to_running() {
         let ev = HookEvent {
-            event: "agentSpawn".into(),
+            event: "AgentSpawn".into(),
             session_id: "s1".into(),
             ..Default::default()
         };
@@ -456,7 +467,7 @@ mod tests {
     #[test]
     fn post_tool_use_maps_to_tool_with_name() {
         let ev = HookEvent {
-            event: "postToolUse".into(),
+            event: "PostToolUse".into(),
             session_id: "s2".into(),
             tool_name: Some("web_search".into()),
             ..Default::default()
@@ -469,7 +480,7 @@ mod tests {
     #[test]
     fn post_tool_use_without_name_falls_back() {
         let ev = HookEvent {
-            event: "postToolUse".into(),
+            event: "PostToolUse".into(),
             ..Default::default()
         };
         assert_eq!(map_hook_event(&ev).text, "using tool");
@@ -479,7 +490,7 @@ mod tests {
     fn stop_maps_to_idle_with_truncated_response() {
         let long = "a".repeat(100);
         let ev = HookEvent {
-            event: "stop".into(),
+            event: "Stop".into(),
             session_id: "s3".into(),
             assistant_response: Some(long),
             ..Default::default()
@@ -494,14 +505,14 @@ mod tests {
     #[test]
     fn stop_with_empty_response_says_done() {
         let ev = HookEvent {
-            event: "stop".into(),
+            event: "Stop".into(),
             assistant_response: Some("   ".into()),
             ..Default::default()
         };
         assert_eq!(map_hook_event(&ev).text, "done");
 
         let ev2 = HookEvent {
-            event: "stop".into(),
+            event: "Stop".into(),
             ..Default::default()
         };
         assert_eq!(map_hook_event(&ev2).text, "done");
@@ -522,7 +533,7 @@ mod tests {
     #[test]
     fn user_prompt_submit_maps_to_received() {
         let ev = HookEvent {
-            event: "userPromptSubmit".into(),
+            event: "UserPromptSubmit".into(),
             ..Default::default()
         };
         let d = map_hook_event(&ev);
@@ -568,6 +579,14 @@ mod tests {
         assert_eq!(raw.event, "postToolUse");
         assert_eq!(raw.session_id, "abc");
         assert_eq!(raw.tool_name.as_deref(), Some("grep"));
+
+        let crew: HookEvent = serde_json::from_str(
+            r#"{"hook_event_name":"Stop","parent_session_key":"dashboard:chat-1","assistant_text":"done"}"#,
+        )
+        .unwrap();
+        assert_eq!(crew.event, "Stop");
+        assert_eq!(crew.session_id, "dashboard:chat-1");
+        assert_eq!(crew.assistant_response.as_deref(), Some("done"));
 
         let slim: HookEvent =
             serde_json::from_str(r#"{"event":"stop","session_id":"z","assistant_response":"hi"}"#)

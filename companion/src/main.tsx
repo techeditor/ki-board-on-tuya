@@ -190,7 +190,7 @@ function App() {
   // FP-4b Route STATUS (option A): the pinned "watched chat". "" = follow all
   // sessions. Non-empty = only that session's status drives the board LCD.
   const [pinnedSession, setPinnedSession] = useState("");
-  // FP-4b: one standalone v1 hook file applies to every Crew agent.
+  // FP-4b: Crew ScriptHookStore hooks apply globally to dashboard agent turns.
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
 
   const boardPorts = useMemo(
@@ -504,7 +504,7 @@ function App() {
     setPinnedSession("");
   }
 
-  // FP-4b: global standalone hook install/remove/status.
+  // FP-4b: global Crew ScriptHookStore install/remove/status.
   async function hookRefresh() {
     setHookStatus(await invoke<HookStatus>("kc_hook_status", { exe: null }));
   }
@@ -1118,10 +1118,10 @@ function App() {
 
               <label style={{ marginTop: 8 }}>Global Crew hook installation</label>
               <p className="hint" style={{ marginTop: 4 }}>
-                Installs one standalone v1 hook file for every Crew agent under
-                <code>{hookStatus?.hooks_dir ?? "~/.kiro/crew/hooks"}</code>. It covers
-                <em> SessionStart / UserPromptSubmit / PostToolUse / Stop</em>, activates
-                automatically, and never modifies managed Agent JSON files.
+                Adds four global entries to Crew's shared ScriptHookStore at
+                <code>{hookStatus?.hooks_dir ?? "~/.kiro/crew"}</code>. It covers
+                <em> AgentSpawn / UserPromptSubmit / PostToolUse / Stop</em> and never
+                modifies the separate ACP Agent Hooks shown below it in Crew.
               </p>
               <div className="lcd" style={{ marginTop: 6 }}>
                 <span>HOOK</span>
@@ -1129,21 +1129,21 @@ function App() {
                   {!hookStatus
                     ? "-- (checking)"
                     : hookStatus.fully_installed
-                    ? "INSTALLED · 4/4"
+                    ? "CONFIGURED · 4/4"
                     : hookStatus.any_installed
                     ? `PARTIAL · ${hookStatus.installed_events}/4`
                     : "NOT INSTALLED"}
                 </strong>
               </div>
               <p className="hint" style={{ marginTop: 4 }}>
-                <code>{hookStatus?.hook_file ?? "~/.kiro/crew/hooks/ak-companion-status.json"}</code>
+                <code>{hookStatus?.hook_file ?? "~/.kiro/crew/hooks.json"}</code>
               </p>
               <div className="actions" style={{ marginTop: 6 }}>
                 <button className="secondary" disabled={ssBusy} onClick={() => runSs(hookRefresh)}>
                   Refresh
                 </button>
                 <button className="secondary" disabled={ssBusy} onClick={() => runSs(hookOpenFolder)}>
-                  Open hooks folder
+                  Open Crew folder
                 </button>
                 <button disabled={ssBusy} onClick={() => runSs(hookInstall)}>
                   Install globally
@@ -1157,8 +1157,9 @@ function App() {
                 </button>
               </div>
               <p className="hint" style={{ marginTop: 4, opacity: 0.7 }}>
-                No Kiro Crew restart is required. Reinstalling is idempotent and also refreshes
-                the Companion executable path after a rebuild.
+                After install, reinstall, or removal, click Apply & Restart in Kiro Crew (or
+                restart Crew) so its in-memory HookStore reloads hooks.json. Reinstalling is
+                idempotent and refreshes the Companion executable path.
               </p>
 
               <div className="actions" style={{ marginTop: 6 }}>
@@ -1189,7 +1190,7 @@ function App() {
                     {hookStatus?.command ?? '"<path-to-companion.exe>" --hook'}
                   </div>
                   <p className="hint">
-                    The standalone hook file invokes this command for every Crew agent. The hook
+                    Each Crew ScriptHook invokes this command for dashboard agent turns. The hook
                     reads the sink port and token from
                     <code> %APPDATA%\ak-companion\hook.json</code> (Windows) /
                     <code> ~/.config/ak-companion/hook.json</code> (else). Starting the sink writes
