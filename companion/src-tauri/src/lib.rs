@@ -883,8 +883,8 @@ mod app {
         hook_install::status(&resolve_hook_command(exe))
     }
 
-    /// Install `companion --hook` into agentSpawn/postToolUse/stop for the
-    /// explicitly selected local agents (idempotent). Returns status for all
+    /// Install `companion --hook` into agentSpawn/userPromptSubmit/postToolUse/stop
+    /// for the explicitly selected local agents (idempotent). Returns status for all
     /// agents so the UI picker remains complete.
     #[tauri::command]
     fn kc_hook_install(

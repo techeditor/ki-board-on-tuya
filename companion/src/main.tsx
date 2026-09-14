@@ -87,6 +87,7 @@ type ChatAliases = string[];
 
 const SLOT_DEFAULT_NAMES = ["A", "B", "C"] as const;
 const ALIAS_MAX_CHARS = 7;
+const HOOK_EVENT_COUNT = 4;
 
 const defaultStatus: Status = {
   device_connected: false,
@@ -1157,8 +1158,9 @@ function App() {
               <label style={{ marginTop: 8 }}>Hook installation (choose local agents)</label>
               <p className="hint" style={{ marginTop: 4 }}>
                 Choose which agents should run <code>companion --hook</code> for
-                <em> agentSpawn / postToolUse / stop</em>. Install and Remove affect only the
-                checked agents under <code>{hookStatus?.agents_dir ?? "~/.kiro/agents"}</code>;
+                <em> agentSpawn / userPromptSubmit / postToolUse / stop</em>. Install and Remove
+                affect only the checked agents under
+                <code>{hookStatus?.agents_dir ?? "~/.kiro/agents"}</code>;
                 hand-authored hooks and unchecked agents are left untouched.
               </p>
               <div className="lcd" style={{ marginTop: 6 }}>
@@ -1171,7 +1173,7 @@ function App() {
                     : hookStatus.fully_installed
                     ? `INSTALLED · ${hookStatus.agents.length}/${hookStatus.agents.length}`
                     : hookStatus.any_installed
-                    ? `PARTIAL · ${hookStatus.agents.filter((a) => a.installed_events === 3).length}/${hookStatus.agents.length}`
+                    ? `PARTIAL · ${hookStatus.agents.filter((a) => a.installed_events === HOOK_EVENT_COUNT).length}/${hookStatus.agents.length}`
                     : "NOT INSTALLED"}
                 </strong>
               </div>
@@ -1212,10 +1214,10 @@ function App() {
                   {hookStatus.agents.map((a) => {
                     const selected = selectedHookAgents.includes(a.agent);
                     const installState =
-                      a.installed_events === 3
+                      a.installed_events === HOOK_EVENT_COUNT
                         ? "installed"
                         : a.installed_events > 0
-                        ? `partial ${a.installed_events}/3`
+                        ? `partial ${a.installed_events}/${HOOK_EVENT_COUNT}`
                         : "not installed";
                     return (
                       <label
@@ -1300,8 +1302,9 @@ function App() {
                   <p className="hint">
                     Add this command to your <strong>local</strong> agent config
                     (<code>~/.kiro/agents/&lt;name&gt;.json</code>) under <code>hooks</code> for
-                    <code> agentSpawn</code>, <code>postToolUse</code> and <code>stop</code>. The
-                    hook reads the sink's port + token from
+                    <code> agentSpawn</code>, <code>userPromptSubmit</code>,
+                    <code>postToolUse</code> and <code>stop</code>. The hook reads the sink's
+                    port + token from
                     <code> %LOCALAPPDATA%\\ak-companion\\hook.json</code> (Windows) /
                     <code> ~/.config/ak-companion/hook.json</code> (else), so no token needs to
                     be pasted into the config — starting the sink writes it. Example:
@@ -1309,9 +1312,10 @@ function App() {
                   <div className="terminal" style={{ whiteSpace: "pre-wrap" }}>
 {`{
   "hooks": {
-    "agentSpawn":  [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
-    "postToolUse": [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
-    "stop":        [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }]
+    "agentSpawn":      [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
+    "userPromptSubmit":[{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
+    "postToolUse":     [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }],
+    "stop":            [{ "command": "\\"C:/path/to/companion.exe\\" --hook" }]
   }
 }`}
                   </div>

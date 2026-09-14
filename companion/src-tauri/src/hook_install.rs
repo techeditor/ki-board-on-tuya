@@ -12,12 +12,13 @@
 //! executed via `%ComSpec% /c "<command>"`, so the working form is a `command`
 //! string like `"C:\path\companion.exe" --hook` injected into each agent
 //! config's `hooks.<event>` array. "Global" here = *every* agent file under the
-//! Kiro agents dir gets the three lifecycle hooks.
+//! Kiro agents dir gets the four lifecycle hooks.
 //!
 //! ## Idempotent + reversible
 //! * `install_selected` adds one `{command}` entry to `agentSpawn` /
-//!   `postToolUse` / `stop` for each selected agent, skipping any agent/event
-//!   that already has a `--hook` command (so re-running never duplicates).
+//!   `userPromptSubmit` / `postToolUse` / `stop` for each selected agent,
+//!   skipping any agent/event that already has a `--hook` command (so re-running
+//!   never duplicates).
 //! * `remove_selected` deletes the `--hook` entries only from selected agents,
 //!   leaving unchecked agents and hand-authored hooks untouched. An emptied
 //!   event array is removed; an emptied `hooks` object is left as `{}`.
@@ -36,10 +37,11 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-/// The three Kiro lifecycle events the status link wires. `agentSpawn` marks the
-/// agent starting, `postToolUse` reports each tool the agent runs, `stop`
-/// carries the final response — together they drive the board LCD.
-pub const HOOK_EVENTS: [&str; 3] = ["agentSpawn", "postToolUse", "stop"];
+/// The four Kiro lifecycle events the status link wires. `agentSpawn` marks the
+/// agent starting, `userPromptSubmit` marks a received prompt, `postToolUse`
+/// reports each tool the agent runs, and `stop` carries the final response —
+/// together they drive the board LCD.
+pub const HOOK_EVENTS: [&str; 4] = ["agentSpawn", "userPromptSubmit", "postToolUse", "stop"];
 
 /// Marker every companion-authored hook command contains, so `remove` can find
 /// exactly our entries and leave hand-authored hooks alone.
@@ -50,8 +52,8 @@ pub const HOOK_MARKER: &str = "--hook";
 pub struct AgentHookState {
     /// Agent name (file stem, e.g. `kirocrew`).
     pub agent: String,
-    /// How many of the three lifecycle events currently carry our `--hook`
-    /// entry (0..=3). 3 = fully installed, 0 = absent, 1-2 = partial.
+    /// How many of the four lifecycle events currently carry our `--hook`
+    /// entry (0..=4). 4 = fully installed, 0 = absent, 1-3 = partial.
     pub installed_events: u8,
 }
 
@@ -64,7 +66,7 @@ pub struct HookStatus {
     pub agents_dir: String,
     /// Per-agent breakdown.
     pub agents: Vec<AgentHookState>,
-    /// True when EVERY agent has all three events wired.
+    /// True when EVERY agent has all four events wired.
     pub fully_installed: bool,
     /// True when at least one agent has at least one event wired.
     pub any_installed: bool,
@@ -114,7 +116,7 @@ fn event_has_our_hook(events: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-/// Count how many of the three lifecycle events already carry our hook, given an
+/// Count how many of the four lifecycle events already carry our hook, given an
 /// agent config's top-level JSON. Pure — unit-tested.
 pub fn count_installed(config: &Value) -> u8 {
     let hooks = config.get("hooks");
@@ -124,7 +126,7 @@ pub fn count_installed(config: &Value) -> u8 {
         .count() as u8
 }
 
-/// Inject our hook into all three events of one agent config (idempotent).
+/// Inject our hook into all four events of one agent config (idempotent).
 /// Returns true if the config was modified. Pure — unit-tested.
 pub fn apply_install(config: &mut Value, command: &str) -> bool {
     let mut changed = false;
@@ -337,10 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn install_adds_three_events_to_empty_config() {
+    fn install_adds_four_events_to_empty_config() {
         let mut cfg = json!({ "name": "kirocrew" });
         assert!(apply_install(&mut cfg, &cmd()));
-        assert_eq!(count_installed(&cfg), 3);
+        assert_eq!(count_installed(&cfg), 4);
         // Each event has exactly one entry with our command.
         for ev in HOOK_EVENTS {
             let arr = cfg["hooks"][ev].as_array().unwrap();
@@ -373,6 +375,7 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert!(arr.iter().any(|e| e["command"] == "echo audit"));
         assert!(arr.iter().any(|e| e["command"] == cmd()));
+        assert!(event_has_our_hook(cfg["hooks"].get("userPromptSubmit")));
     }
 
     #[test]
@@ -408,7 +411,7 @@ mod tests {
         apply_install(&mut cfg, &cmd());
         // Manually drop one event to simulate a partial install.
         cfg["hooks"].as_object_mut().unwrap().remove("stop");
-        assert_eq!(count_installed(&cfg), 2);
+        assert_eq!(count_installed(&cfg), 3);
     }
 
     #[test]
