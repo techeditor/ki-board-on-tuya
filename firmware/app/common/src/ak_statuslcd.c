@@ -11,6 +11,7 @@
 #include "ak_icons16.h"
 #include "tal_api.h"
 #include "tdd_disp_st7789.h"
+#include "tdd_display_spi.h"
 #include "tdl_display_draw.h"
 #include "tdl_display_manage.h"
 
@@ -24,11 +25,28 @@ static TDL_DISP_DEV_INFO_T    s_info;
 static TDL_DISP_FRAME_BUFF_T *s_frame = NULL;
 static bool                   s_ready = false;
 static volatile bool          s_flush_done = true;
+static DISP_SPI_BASE_CFG_T    s_spi_cfg;
 
 static void ak_statuslcd_on_flush_done(TDL_DISP_FRAME_BUFF_T *frame)
 {
     (void)frame;
     s_flush_done = true;
+}
+
+static OPERATE_RET ak_statuslcd_restore_window(void)
+{
+    OPERATE_RET rt;
+    uint16_t x_end = (uint16_t)(AK_STATUSLCD_W - 1U);
+    uint16_t y_end = (uint16_t)(AK_STATUSLCD_H - 1U);
+    uint8_t columns[4] = {0U, 0U, (uint8_t)(x_end >> 8), (uint8_t)x_end};
+    uint8_t rows[4] = {0U, 0U, (uint8_t)(y_end >> 8), (uint8_t)y_end};
+
+    TUYA_CALL_ERR_RETURN(tdd_disp_spi_send_cmd(&s_spi_cfg, ST7789_CASET));
+    TUYA_CALL_ERR_RETURN(tdd_disp_spi_send_data(&s_spi_cfg, columns,
+                                                 sizeof(columns)));
+    TUYA_CALL_ERR_RETURN(tdd_disp_spi_send_cmd(&s_spi_cfg, ST7789_RASET));
+    TUYA_CALL_ERR_RETURN(tdd_disp_spi_send_data(&s_spi_cfg, rows, sizeof(rows)));
+    return OPRT_OK;
 }
 
 /*
@@ -170,6 +188,19 @@ OPERATE_RET ak_statuslcd_init(void)
     config.power.pin            = AK_LCD_POWER_PIN;
     config.power.active_level   = AK_LCD_CONTROL_ACTIVE;
 
+    memset(&s_spi_cfg, 0, sizeof(s_spi_cfg));
+    s_spi_cfg.width     = config.width;
+    s_spi_cfg.height    = config.height;
+    s_spi_cfg.pixel_fmt = config.pixel_fmt;
+    s_spi_cfg.cs_pin    = config.cs_pin;
+    s_spi_cfg.dc_pin    = config.dc_pin;
+    s_spi_cfg.rst_pin   = config.rst_pin;
+    s_spi_cfg.port      = config.port;
+    s_spi_cfg.spi_clk   = config.spi_clk;
+    s_spi_cfg.cmd_caset = ST7789_CASET;
+    s_spi_cfg.cmd_raset = ST7789_RASET;
+    s_spi_cfg.cmd_ramwr = ST7789_RAMWR;
+
     tdd_disp_spi_st7789_set_init_seq(s_st7789_init_seq);
 
     rt = tdd_disp_spi_st7789_register(STATUSLCD_NAME, &config);
@@ -224,9 +255,15 @@ void ak_statuslcd_flush(void)
     /* The SPI TDD queues the framebuffer pointer and returns immediately. Do
      * not let the renderer overwrite that PSRAM until the display task has
      * completed every DMA chunk and invokes free_cb. */
+    OPERATE_RET rt = ak_statuslcd_restore_window();
+    if (rt != OPRT_OK) {
+        PR_ERR("status LCD window restore failed: %d", rt);
+        return;
+    }
+
     s_flush_done = false;
     s_frame->free_cb = ak_statuslcd_on_flush_done;
-    OPERATE_RET rt = tdl_disp_dev_flush(s_disp, s_frame);
+    rt = tdl_disp_dev_flush(s_disp, s_frame);
     if (rt != OPRT_OK) {
         s_frame->free_cb = NULL;
         s_flush_done = true;

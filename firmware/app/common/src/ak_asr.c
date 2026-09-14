@@ -227,6 +227,16 @@ void ak_asr_play_availability_prompt(bool cloud_available)
 
 #endif /* AK_ASR_BOARD_CLOUD */
 
+bool ak_asr_audio_busy(void)
+{
+#if AK_ASR_BOARD_CLOUD && defined(ENABLE_COMP_AI_AUDIO) && \
+    (ENABLE_COMP_AI_AUDIO == 1)
+    return s_ai_ready && ai_audio_player_is_playing();
+#else
+    return false;
+#endif
+}
+
 OPERATE_RET ak_asr_set_volume(uint8_t volume)
 {
     s_volume = volume > 100U ? 100U : volume;

@@ -194,6 +194,8 @@ static uint32_t            s_voice_ui_state_since_ms;
 static char                s_asr_pending_text[ASR_TRANSCRIPT_MAX];
 static volatile bool       s_asr_result_pending;
 static volatile bool       s_asr_result_is_error;
+static bool                s_lcd_redraw_pending;
+static uint32_t            s_lcd_audio_guard_until_ms;
 
 static ak_settings_model_t s_settings;
 static bool                s_settings_active;
@@ -920,6 +922,12 @@ static void ak_settings_draw(void)
     if (!ak_statuslcd_ready()) {
         return;
     }
+    uint32_t now_ms = tal_system_get_millisecond();
+    if ((int32_t)(s_lcd_audio_guard_until_ms - now_ms) > 0 ||
+        ak_asr_audio_busy()) {
+        s_lcd_redraw_pending = true;
+        return;
+    }
 
     ak_gfx_clear(AK_COL_BLACK);
     ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, LCD_SESSION_SELECTED_BG);
@@ -952,6 +960,7 @@ static void ak_settings_draw(void)
     ak_gfx_text_thin(4U, 227U, "Center Confirm", AK_COL_GRAY,
                      AK_COL_BLACK, 1);
     ak_statuslcd_flush();
+    s_lcd_redraw_pending = false;
 }
 
 static OPERATE_RET ak_settings_apply_selected(void)
@@ -1113,6 +1122,12 @@ static void ak_render_status(void)
     if (!ak_statuslcd_ready()) {
         return;
     }
+    uint32_t now_ms = tal_system_get_millisecond();
+    if ((int32_t)(s_lcd_audio_guard_until_ms - now_ms) > 0 ||
+        ak_asr_audio_busy()) {
+        s_lcd_redraw_pending = true;
+        return;
+    }
     if (s_settings_active) {
         ak_settings_draw();
         return;
@@ -1149,6 +1164,7 @@ static void ak_render_status(void)
     ak_chat_history_draw(session);
     ak_status_bar_draw();
     ak_statuslcd_flush();
+    s_lcd_redraw_pending = false;
 }
 
 static void ak_refresh_link_header(void)
@@ -1280,17 +1296,30 @@ static void ak_voice_route_update(bool announce)
 #endif
         }
 
-        /* Built-in clips are the closest available spoken feedback. Initial
-         * fallback says network failed; recovery says network connected. */
-        if (announce && s_voice_route.fallback && (!was_initialized || !was_fallback)) {
-            ak_asr_play_availability_prompt(false);
-        } else if (announce && was_initialized && was_fallback && s_voice_route.effective == AK_VOICE_CLOUD) {
-            ak_asr_play_availability_prompt(true);
-        }
+        bool play_failure_prompt =
+            announce && s_voice_route.fallback &&
+            (!was_initialized || !was_fallback);
+        bool play_recovery_prompt =
+            announce && was_initialized && was_fallback &&
+            s_voice_route.effective == AK_VOICE_CLOUD;
 
 #if AK_ENABLE_DISPLAY
+        /* Finish the status frame before starting asynchronous MP3 playback.
+         * LCD redraws requested while audio is active are deferred below. */
         ak_refresh_link_header();
+        if (play_failure_prompt || play_recovery_prompt) {
+            s_lcd_audio_guard_until_ms =
+                tal_system_get_millisecond() + 250U;
+            /* Redraw once more after playback to recover from any panel-state
+             * disturbance caused by the speaker/audio DMA startup. */
+            s_lcd_redraw_pending = true;
+        }
 #endif
+        if (play_failure_prompt) {
+            ak_asr_play_availability_prompt(false);
+        } else if (play_recovery_prompt) {
+            ak_asr_play_availability_prompt(true);
+        }
         if (was_initialized && previous != s_voice_route.effective) {
             send_voice_source();
         }
@@ -1655,6 +1684,11 @@ static void user_main(void)
 
 #if AK_ENABLE_DISPLAY
         ak_voice_ui_tick(now);
+        if (s_lcd_redraw_pending &&
+            (int32_t)(s_lcd_audio_guard_until_ms - now) <= 0 &&
+            !ak_asr_audio_busy()) {
+            ak_render_status();
+        }
         if (s_wifi_status_dirty) {
             s_wifi_status_dirty = false;
             ak_wifi_state_t wifi_state = s_wifi_lcd_state;

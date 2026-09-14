@@ -69,4 +69,7 @@ void ak_asr_play_prompt(void);
  *  ASR recovers. No-op until the real AI audio backend is initialized. */
 void ak_asr_play_availability_prompt(bool cloud_available);
 
+/** True while the board audio player is actively outputting a prompt or TTS. */
+bool ak_asr_audio_busy(void);
+
 #endif /* AK_ASR_H */
