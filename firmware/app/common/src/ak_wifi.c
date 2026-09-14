@@ -69,18 +69,34 @@ static void __netmgr_status_cb(netmgr_type_e type, netmgr_status_e status)
     }
 }
 
+/* netconn_wifi does not implement NETCONN_CMD_SET_STATUS_CB in the current
+ * TuyaOpen SDK. Subscribe to netmgr's public link-status event instead. */
+static int __netmgr_link_status_event(void *data)
+{
+    if (data != NULL) {
+        __netmgr_status_cb(NETCONN_WIFI, *(netmgr_status_e *)data);
+    }
+    return 0;
+}
+
 OPERATE_RET ak_wifi_init(ak_wifi_status_cb on_status)
 {
     s_on_status = on_status;
-    /* Route netmgr link transitions into our status callback. */
-    void (*cb)(netmgr_type_e, netmgr_status_e) = __netmgr_status_cb;
-    (void)netmgr_conn_set(NETCONN_AUTO, NETCONN_CMD_SET_STATUS_CB, (void *)&cb);
 
-    /* netmgr may already be online before this callback is registered (cloud
-     * bring-up runs first), so publish its current state immediately too. */
+    /* Subscribe before querying so a link-up transition cannot fall into the
+     * gap between the initial status read and event registration. */
+    OPERATE_RET rt = tal_event_subscribe(EVENT_LINK_STATUS_CHG, "ak_wifi",
+                                         __netmgr_link_status_event,
+                                         SUBSCRIBE_TYPE_NORMAL);
+    if (rt != OPRT_OK) {
+        PR_WARN("ak_wifi: subscribe link status failed: %d", rt);
+    }
+
+    /* Cloud bring-up may already have connected before this module starts. Use
+     * the concrete Wi-Fi interface; AUTO can still point at its initial slot. */
     netmgr_status_e status = NETMGR_LINK_DOWN;
-    if (netmgr_conn_get(NETCONN_AUTO, NETCONN_CMD_STATUS, &status) == OPRT_OK) {
-        __netmgr_status_cb(NETCONN_AUTO, status);
+    if (netmgr_conn_get(NETCONN_WIFI, NETCONN_CMD_STATUS, &status) == OPRT_OK) {
+        __netmgr_status_cb(NETCONN_WIFI, status);
     }
     return OPRT_OK;
 }

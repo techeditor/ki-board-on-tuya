@@ -205,6 +205,7 @@ static void send_voice_source(void);
 static void ak_voice_ui_set_state(ak_voice_ui_state_t state);
 static void ak_voice_ui_queue_result(const char *text, bool is_error);
 static void ak_voice_ui_tick(uint32_t now_ms);
+static void ak_select_session_key(const char *id);
 #endif
 
 /* Input event -> key/nav JSONL frame on the active transport. */
@@ -213,6 +214,12 @@ static void on_input_event(ak_input_kind_t kind, const char *id, ak_input_event_
     char        frame[FRAME_BUFFER_SIZE];
     const char *action = ak_input_event_str(event);
     int         length;
+
+#if AK_ENABLE_DISPLAY
+    if (kind == AK_INPUT_KIND_KEY && event == AK_INPUT_EVENT_DOWN) {
+        ak_select_session_key(id);
+    }
+#endif
 
     s_sequence++;
     if (kind == AK_INPUT_KIND_KEY) {
@@ -411,9 +418,21 @@ static uint16_t ak_status_color(const char *state)
 #define LCD_HISTORY_ROW_H      17U
 #define LCD_HISTORY_CAPACITY   10U
 #define LCD_HISTORY_TEXT_BYTES 128U
+#define LCD_SESSION_SELECTED_BG AK_RGB565(0x8EU, 0x48U, 0xFFU)
 
-static char    s_chat_history[LCD_HISTORY_CAPACITY][LCD_HISTORY_TEXT_BYTES];
-static uint8_t s_chat_history_count;
+typedef struct {
+    char    agent[32];
+    char    state[16];
+    char    history[LCD_HISTORY_CAPACITY][LCD_HISTORY_TEXT_BYTES];
+    uint8_t history_count;
+} ak_session_ui_t;
+
+static ak_session_ui_t s_sessions[LCD_SESSION_ROWS] = {
+    {.agent = "-", .state = "idle"},
+    {.agent = "-", .state = "idle"},
+    {.agent = "-", .state = "idle"},
+};
+static uint8_t s_selected_session;
 
 /* Consume one UTF-8 code point. The 8x8 font is ASCII-only, so each non-ASCII
  * code point becomes one '?' rather than one '?' per UTF-8 byte. */
@@ -435,26 +454,26 @@ static char ak_history_next_glyph(const char **cursor)
 
 /* Keep the ten most recent text updates for the session currently forwarded
  * by the companion. Oldest entries are discarded first. */
-static void ak_chat_history_add(const char *text)
+static void ak_chat_history_add(ak_session_ui_t *session, const char *text)
 {
-    if (text == NULL || text[0] == '\0') {
+    if (session == NULL || text == NULL || text[0] == '\0') {
         return;
     }
-    if (s_chat_history_count == LCD_HISTORY_CAPACITY) {
-        memmove(s_chat_history[0], s_chat_history[1],
+    if (session->history_count == LCD_HISTORY_CAPACITY) {
+        memmove(session->history[0], session->history[1],
                 (LCD_HISTORY_CAPACITY - 1U) * LCD_HISTORY_TEXT_BYTES);
-        s_chat_history_count--;
+        session->history_count--;
     }
-    (void)snprintf(s_chat_history[s_chat_history_count], LCD_HISTORY_TEXT_BYTES,
+    (void)snprintf(session->history[session->history_count], LCD_HISTORY_TEXT_BYTES,
                    "%s", text);
-    s_chat_history_count++;
+    session->history_count++;
 }
 
-static void ak_chat_history_draw(void)
+static void ak_chat_history_draw(const ak_session_ui_t *session)
 {
-    for (uint8_t i = 0; i < s_chat_history_count; i++) {
+    for (uint8_t i = 0; i < session->history_count; i++) {
         char line[LCD_CHAT_TEXT_COLS + 1U];
-        const char *p = s_chat_history[i];
+        const char *p = session->history[i];
         uint16_t col = 0U;
 
         while (*p != '\0' && col < LCD_CHAT_TEXT_COLS) {
@@ -507,22 +526,23 @@ static uint16_t ak_link_header(char *out, uint32_t out_len)
 #endif
 }
 
-static void ak_draw_session_sidebar(const char *state)
+static void ak_draw_session_sidebar(void)
 {
     static const char labels[LCD_SESSION_ROWS] = {'A', 'B', 'C'};
 
     for (uint16_t i = 0; i < LCD_SESSION_ROWS; i++) {
+        bool selected = (i == s_selected_session);
         uint16_t y = (uint16_t)(22U + i * LCD_SESSION_ROW_H);
         uint16_t h = (i + 1U == LCD_SESSION_ROWS)
                          ? (uint16_t)(AK_STATUSLCD_H - y)
                          : LCD_SESSION_ROW_H;
-        uint16_t bg = (i == 0U) ? AK_COL_DKBLUE : AK_COL_BLACK;
-        uint16_t fg = (i == 0U) ? ak_status_color(state) : AK_COL_GRAY;
+        uint16_t bg = selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
+        uint16_t fg = selected ? AK_COL_WHITE : AK_COL_GRAY;
 
         ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W - 1U, h, bg);
         ak_gfx_icon(16U, (uint16_t)(y + 8U), AK_SESSION_ICON_KIRO_GHOST,
                     AK_SESSION_ICON_W, AK_SESSION_ICON_H, fg, bg);
-        ak_gfx_char_thin(28U, (uint16_t)(y + 50U), labels[i], AK_COL_WHITE, bg, 1);
+        ak_gfx_char_thin(28U, (uint16_t)(y + 50U), labels[i], fg, bg, 1);
         if (i > 0U) {
             ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W, 1U, AK_COL_GRAY);
         }
@@ -531,14 +551,13 @@ static void ak_draw_session_sidebar(const char *state)
                      AK_STATUSLCD_H - 22U, AK_COL_GRAY);
 }
 
-/* Render one selected-session panel. The companion currently forwards only
- * the watched session; the wire protocol still has no session ID for binding
- * the three sidebar slots to independent histories. */
-static void ak_render_status(const char *agent, const char *state)
+/* Render the selected A/B/C session and its independent ten-entry history. */
+static void ak_render_status(void)
 {
     if (!ak_statuslcd_ready()) {
         return;
     }
+    const ak_session_ui_t *session = &s_sessions[s_selected_session];
     char     link_text[32];
     uint16_t link_color = ak_link_header(link_text, sizeof(link_text));
     char     line[48];
@@ -554,25 +573,41 @@ static void ak_render_status(const char *agent, const char *state)
 
     ak_statuslcd_title_links("Ki-board for Kiro Crew", link_color, s_wifi_connected,
                              usb_connected, ble_connected);
-    ak_draw_session_sidebar(state);
+    ak_draw_session_sidebar();
 
-    (void)snprintf(line, sizeof(line), "Session: %s", agent[0] ? agent : "-");
+    (void)snprintf(line, sizeof(line), "Session %c: %s",
+                   (char)('A' + s_selected_session),
+                   session->agent[0] ? session->agent : "-");
     ak_gfx_text_thin(LCD_CHAT_X, 29U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
-    (void)snprintf(line, sizeof(line), "Status: %s", state[0] ? state : "-");
+    (void)snprintf(line, sizeof(line), "Status: %s",
+                   session->state[0] ? session->state : "-");
     ak_gfx_text_thin(LCD_CHAT_X, 43U, line,
-                     ak_status_color(state), AK_COL_BLACK, 1);
-    ak_chat_history_draw();
+                     ak_status_color(session->state), AK_COL_BLACK, 1);
+    ak_chat_history_draw(session);
     ak_statuslcd_flush();
 }
 
-/* Redraw the complete screen so connection-state changes preserve the current
- * session metadata and its ten-entry history. */
-static char s_last_agent[32] = "-";
-static char s_last_state[16] = "idle";
-
 static void ak_refresh_link_header(void)
 {
-    ak_render_status(s_last_agent, s_last_state);
+    ak_render_status();
+}
+
+static void ak_select_session_key(const char *id)
+{
+    uint8_t selected;
+
+    if (strcmp(id, "k1") == 0) {
+        selected = 0U;
+    } else if (strcmp(id, "k2") == 0) {
+        selected = 1U;
+    } else if (strcmp(id, "k3") == 0) {
+        selected = 2U;
+    } else {
+        return;
+    }
+
+    s_selected_session = selected;
+    ak_render_status();
 }
 
 static void ak_voice_ui_set_state(ak_voice_ui_state_t state)
@@ -599,7 +634,7 @@ static void ak_voice_ui_tick(uint32_t now_ms)
     if (s_asr_result_pending) {
         bool is_error = s_asr_result_is_error;
         if (!is_error) {
-            ak_chat_history_add(s_asr_pending_text);
+            ak_chat_history_add(&s_sessions[s_selected_session], s_asr_pending_text);
             redraw = true;
         }
         s_asr_result_pending = false;
@@ -711,10 +746,11 @@ static void on_rx_line(const char *line)
         ak_json_str(line, "text", text, sizeof(text));
         PR_NOTICE("display: agent=%s state=%s", agent, state);
 #if AK_ENABLE_DISPLAY
-        snprintf(s_last_agent, sizeof(s_last_agent), "%s", agent);
-        snprintf(s_last_state, sizeof(s_last_state), "%s", state);
-        ak_chat_history_add(text);
-        ak_render_status(s_last_agent, s_last_state);
+        ak_session_ui_t *session = &s_sessions[s_selected_session];
+        snprintf(session->agent, sizeof(session->agent), "%s", agent);
+        snprintf(session->state, sizeof(session->state), "%s", state);
+        ak_chat_history_add(session, text);
+        ak_render_status();
 #endif
     }
     /* ack / pong / unknown: ignore per protocol */
@@ -763,7 +799,7 @@ static void user_main(void)
     if (rt != OPRT_OK) {
         PR_WARN("status LCD init failed: %d (continuing headless)", rt);
     } else {
-        ak_render_status("-", "idle");
+        ak_render_status();
     }
 #endif
 
