@@ -31,6 +31,12 @@ pub enum Chord {
     Down,
     Left,
     Right,
+    /// Backspace — delete the character before the composer caret.
+    Backspace,
+    /// Ctrl+Backspace — delete the word before the composer caret.
+    DeleteWord,
+    /// Ctrl+A, Backspace — clear the current composer sentence.
+    ClearInput,
     /// Ctrl+K — open the Kiro Crew command bar.
     CtrlK,
     /// Alt+N — jump to chat N (N = 1..=9). Deterministic, unlike a command-bar
@@ -57,6 +63,9 @@ impl Chord {
             "down" => Some(Chord::Down),
             "left" => Some(Chord::Left),
             "right" => Some(Chord::Right),
+            "backspace" | "delete_char" | "delete-char" => Some(Chord::Backspace),
+            "deleteword" | "delete_word" | "delete-word" => Some(Chord::DeleteWord),
+            "clearinput" | "clear_input" | "clear-input" => Some(Chord::ClearInput),
             "ctrlk" | "ctrl+k" | "command_bar" | "commandbar" => Some(Chord::CtrlK),
             "prevchat" | "prev_chat" | "prev-chat" => Some(Chord::PrevChat),
             "nextchat" | "next_chat" | "next-chat" => Some(Chord::NextChat),
@@ -130,6 +139,9 @@ fn is_trigger(action: KeyAction) -> bool {
     matches!(action, KeyAction::Down | KeyAction::Long)
 }
 
+/// Must match firmware/app/common/include/ak_input_fsm.h.
+const BOARD_LONG_PRESS_MS: u32 = 800;
+
 /// Pure mapping: board event + context → control action. No IO.
 ///
 /// Mapping table (design R2.3), using Kiro Crew's real default shortcuts:
@@ -141,10 +153,14 @@ fn is_trigger(action: KeyAction) -> bool {
 /// | `key k1..k3` `Long`/`Up`       | `None` — jump fired on `Down`; the rest of the press is a no-op |
 /// | `key k4` (down/long)           | `None` — K4 is push-to-talk; text arrives later as `macro` |
 /// | `key k5` (down/long)           | `Chord(Enter)` — submit / continue  |
-/// | `nav left/right`               | `Chord(PrevChat/NextChat)` — Alt+←/→ |
-/// | `nav up/down`                  | `Chord(Up/Down)` — arrow keys       |
-/// | `nav center` (down/long)       | `Chord(Enter)`                      |
-/// | anything else / any `up` edge  | `None`                              |
+/// | `nav left` `Up` (< 800 ms)  | `Chord(Backspace)` — delete one character |
+/// | `nav left` `Long`           | `Chord(DeleteWord)` — Ctrl+Backspace     |
+/// | `nav up` `Up` (< 800 ms)    | `Chord(Up)` — move to previous line      |
+/// | `nav up` `Long`             | `Chord(ClearInput)` — Ctrl+A, Backspace  |
+/// | `nav right` `Down`          | `Chord(NextChat)` — Alt+Right            |
+/// | `nav down` `Down`           | `Chord(Down)` — arrow key                |
+/// | `nav center` `Down`         | `Chord(Enter)`                            |
+/// | anything else / key `up`    | `None`                                    |
 pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
     match ev {
         // Recognized speech text -> type into the chat composer (NO send). Both
@@ -202,14 +218,22 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
             }
         }
 
-        Inbound::Nav { payload, .. } if is_trigger(payload.action) => match payload.dir {
-            NavDir::Up => ControlAction::Chord(Chord::Up),
-            NavDir::Down => ControlAction::Chord(Chord::Down),
-            // Joystick left/right = previous/next chat (Alt+←/→) — deterministic.
-            NavDir::Left => ControlAction::Chord(Chord::PrevChat),
-            NavDir::Right => ControlAction::Chord(Chord::NextChat),
-            NavDir::Center => ControlAction::Chord(Chord::Enter),
-            NavDir::Unknown => ControlAction::None,
+        // Composer editing after ASR insertion. A short Left action is delayed
+        // until Up so a future Long event can replace it rather than deleting
+        // one character first. The long-tail Up is ignored via held_ms.
+        Inbound::Nav { payload, .. } => match (payload.dir, payload.action) {
+            (NavDir::Left, KeyAction::Up) if payload.held_ms < BOARD_LONG_PRESS_MS => {
+                ControlAction::Chord(Chord::Backspace)
+            }
+            (NavDir::Left, KeyAction::Long) => ControlAction::Chord(Chord::DeleteWord),
+            (NavDir::Up, KeyAction::Up) if payload.held_ms < BOARD_LONG_PRESS_MS => {
+                ControlAction::Chord(Chord::Up)
+            }
+            (NavDir::Up, KeyAction::Long) => ControlAction::Chord(Chord::ClearInput),
+            (NavDir::Right, KeyAction::Down) => ControlAction::Chord(Chord::NextChat),
+            (NavDir::Down, KeyAction::Down) => ControlAction::Chord(Chord::Down),
+            (NavDir::Center, KeyAction::Down) => ControlAction::Chord(Chord::Enter),
+            _ => ControlAction::None,
         },
 
         // Key/nav `up` edges, voice edges, ping/pong/ack, hello_ack, unknown.
@@ -262,6 +286,7 @@ mod windows_impl {
     // Virtual-key codes we use for chords / the command bar.
     const VK_RETURN: u16 = 0x0D;
     const VK_ESCAPE: u16 = 0x1B;
+    const VK_BACK: u16 = 0x08;
     const VK_LEFT: u16 = 0x25;
     const VK_UP: u16 = 0x26;
     const VK_RIGHT: u16 = 0x27;
@@ -269,6 +294,7 @@ mod windows_impl {
     const VK_CONTROL: u16 = 0x11;
     const VK_MENU: u16 = 0x12; // Alt
     const VK_SHIFT: u16 = 0x10;
+    const VK_A: u16 = 0x41; // 'A'
     const VK_K: u16 = 0x4B; // 'K'
     const VK_N: u16 = 0x4E; // 'N'
 
@@ -392,6 +418,28 @@ mod windows_impl {
         send(&[vkey_event(vk, false), vkey_event(vk, true)])
     }
 
+    /// LCTRL + <vk> as one SendInput batch.
+    fn ctrl_tap(vk: u16) -> Result<(), String> {
+        send(&[
+            vkey_event(VK_CONTROL, false),
+            vkey_event(vk, false),
+            vkey_event(vk, true),
+            vkey_event(VK_CONTROL, true),
+        ])
+    }
+
+    /// Ctrl+A followed by Backspace clears the focused composer.
+    fn clear_input() -> Result<(), String> {
+        send(&[
+            vkey_event(VK_CONTROL, false),
+            vkey_event(VK_A, false),
+            vkey_event(VK_A, true),
+            vkey_event(VK_CONTROL, true),
+            vkey_event(VK_BACK, false),
+            vkey_event(VK_BACK, true),
+        ])
+    }
+
     /// LCTRL↓ K↓ K↑ LCTRL↑ — the command-bar hotkey.
     fn ctrl_k() -> Result<(), String> {
         send(&[
@@ -434,6 +482,9 @@ mod windows_impl {
             Chord::Down => tap(VK_DOWN),
             Chord::Left => tap(VK_LEFT),
             Chord::Right => tap(VK_RIGHT),
+            Chord::Backspace => tap(VK_BACK),
+            Chord::DeleteWord => ctrl_tap(VK_BACK),
+            Chord::ClearInput => clear_input(),
             Chord::CtrlK => ctrl_k(),
             Chord::JumpChat(n) if (1..=9).contains(&n) => alt_tap(0x30 + n as u16), // Alt+'1'..'9'
             Chord::JumpChat(n) => Err(format!("JumpChat({n}) out of range 1..=9")),
@@ -755,9 +806,17 @@ mod tests {
     }
 
     fn nav(dir: NavDir, action: KeyAction) -> Inbound {
+        nav_held(dir, action, 0)
+    }
+
+    fn nav_held(dir: NavDir, action: KeyAction, held_ms: u32) -> Inbound {
         Inbound::Nav {
             seq: Some(1),
-            payload: NavPayload { dir, action, held_ms: 0 },
+            payload: NavPayload {
+                dir,
+                action,
+                held_ms,
+            },
         }
     }
 
@@ -777,6 +836,9 @@ mod tests {
         assert_eq!(Chord::parse("esc"), Some(Chord::Esc));
         assert_eq!(Chord::parse("escape"), Some(Chord::Esc));
         assert_eq!(Chord::parse(" up "), Some(Chord::Up));
+        assert_eq!(Chord::parse("backspace"), Some(Chord::Backspace));
+        assert_eq!(Chord::parse("delete-word"), Some(Chord::DeleteWord));
+        assert_eq!(Chord::parse("clear_input"), Some(Chord::ClearInput));
         assert_eq!(Chord::parse("ctrl+k"), Some(Chord::CtrlK));
         assert_eq!(Chord::parse("command_bar"), Some(Chord::CtrlK));
         assert_eq!(Chord::parse("prevchat"), Some(Chord::PrevChat));
@@ -920,35 +982,78 @@ mod tests {
         assert_eq!(route_input(&key("k4", KeyAction::Down), &ctx), ControlAction::None);
     }
 
-    // ── Router: nav → arrows / prev-next chat / center ─────────
+    // ── Router: nav → composer editing / navigation / submit ───
 
     #[test]
-    fn nav_directions_route_to_expected_chords() {
+    fn nav_left_short_release_deletes_one_character() {
         let ctx = ControlCtx::default();
         assert_eq!(
-            route_input(&nav(NavDir::Up, KeyAction::Down), &ctx),
+            route_input(&nav(NavDir::Left, KeyAction::Down), &ctx),
+            ControlAction::None
+        );
+        assert_eq!(
+            route_input(&nav_held(NavDir::Left, KeyAction::Up, 120), &ctx),
+            ControlAction::Chord(Chord::Backspace)
+        );
+    }
+
+    #[test]
+    fn nav_left_long_deletes_one_word_without_release_repeat() {
+        let ctx = ControlCtx::default();
+        assert_eq!(
+            route_input(
+                &nav_held(NavDir::Left, KeyAction::Long, BOARD_LONG_PRESS_MS),
+                &ctx
+            ),
+            ControlAction::Chord(Chord::DeleteWord)
+        );
+        assert_eq!(
+            route_input(&nav_held(NavDir::Left, KeyAction::Up, 1200), &ctx),
+            ControlAction::None
+        );
+    }
+
+    #[test]
+    fn nav_up_short_moves_to_previous_line_and_long_clears_input() {
+        let ctx = ControlCtx::default();
+        assert_eq!(route_input(&nav(NavDir::Up, KeyAction::Down), &ctx), ControlAction::None);
+        assert_eq!(
+            route_input(&nav_held(NavDir::Up, KeyAction::Up, 120), &ctx),
             ControlAction::Chord(Chord::Up)
+        );
+        assert_eq!(
+            route_input(&nav_held(NavDir::Up, KeyAction::Long, BOARD_LONG_PRESS_MS), &ctx),
+            ControlAction::Chord(Chord::ClearInput)
+        );
+        assert_eq!(
+            route_input(&nav_held(NavDir::Up, KeyAction::Up, 1200), &ctx),
+            ControlAction::None
+        );
+    }
+
+    #[test]
+    fn nav_right_down_moves_to_next_chat_and_down_moves_caret() {
+        let ctx = ControlCtx::default();
+        assert_eq!(
+            route_input(&nav(NavDir::Right, KeyAction::Down), &ctx),
+            ControlAction::Chord(Chord::NextChat)
         );
         assert_eq!(
             route_input(&nav(NavDir::Down, KeyAction::Down), &ctx),
             ControlAction::Chord(Chord::Down)
         );
-        assert_eq!(
-            route_input(&nav(NavDir::Left, KeyAction::Down), &ctx),
-            ControlAction::Chord(Chord::PrevChat)
-        );
-        assert_eq!(
-            route_input(&nav(NavDir::Right, KeyAction::Down), &ctx),
-            ControlAction::Chord(Chord::NextChat)
-        );
     }
 
     #[test]
-    fn nav_center_routes_to_enter() {
+    fn nav_center_routes_to_enter_on_down_only() {
         let ctx = ControlCtx::default();
         assert_eq!(
             route_input(&nav(NavDir::Center, KeyAction::Down), &ctx),
             ControlAction::Chord(Chord::Enter)
+        );
+        assert_eq!(
+            route_input(&nav(NavDir::Center, KeyAction::Long), &ctx),
+            ControlAction::None
         );
     }
 
@@ -963,9 +1068,12 @@ mod tests {
     }
 
     #[test]
-    fn nav_up_edge_does_not_trigger() {
+    fn nav_right_up_edge_does_not_trigger() {
         let ctx = ControlCtx::default();
-        assert_eq!(route_input(&nav(NavDir::Up, KeyAction::Up), &ctx), ControlAction::None);
+        assert_eq!(
+            route_input(&nav(NavDir::Right, KeyAction::Up), &ctx),
+            ControlAction::None
+        );
     }
 
     #[test]
