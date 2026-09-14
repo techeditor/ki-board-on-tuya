@@ -12,6 +12,7 @@
 #include "ak_input_fsm.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
+#include "ak_voice_route.h"
 
 static int g_failures = 0;
 
@@ -286,6 +287,39 @@ static void test_dclick(void)
     CHECK(!dclick_short_press(&dc, &t, 50), "short press after long: only re-arms");
 }
 
+static void test_voice_route(void)
+{
+    printf("test_voice_route\n");
+    ak_voice_route_t route;
+
+    ak_voice_route_init(&route);
+    CHECK(route.preferred == AK_VOICE_CLOUD, "Tuya ASR is preferred by default");
+    CHECK(route.effective == AK_VOICE_CLOUD, "initial route advertises Tuya ASR");
+    CHECK(!route.fallback, "initial route is not yet degraded");
+
+    CHECK(ak_voice_route_refresh(&route, false), "unavailable cloud changes route");
+    CHECK(route.preferred == AK_VOICE_CLOUD, "fallback preserves Tuya preference");
+    CHECK(route.effective == AK_VOICE_SYSTEM, "unavailable cloud falls back to PC");
+    CHECK(route.fallback, "automatic PC route is marked fallback");
+    CHECK(!ak_voice_route_refresh(&route, false), "repeated unavailable poll is stable");
+
+    CHECK(ak_voice_route_refresh(&route, true), "cloud recovery changes route");
+    CHECK(route.effective == AK_VOICE_CLOUD, "cloud recovery restores Tuya ASR");
+    CHECK(!route.fallback, "recovered route clears fallback");
+
+    ak_voice_route_set_preference(&route, AK_VOICE_SYSTEM);
+    CHECK(ak_voice_route_refresh(&route, true), "manual PC preference changes route");
+    CHECK(route.effective == AK_VOICE_SYSTEM, "manual PC selection stays on PC");
+    CHECK(!route.fallback, "manual PC selection is not a fallback");
+    CHECK(!ak_voice_route_refresh(&route, false), "cloud loss cannot alter manual PC route");
+
+    ak_voice_route_set_preference(&route, AK_VOICE_CLOUD);
+    CHECK(ak_voice_route_refresh(&route, false), "cloud preference degrades when unavailable");
+    CHECK(route.effective == AK_VOICE_SYSTEM && route.fallback, "requested cloud echoes effective PC fallback");
+    CHECK_STR(ak_voice_source_str(AK_VOICE_CLOUD), "cloud", "cloud source string");
+    CHECK_STR(ak_voice_source_str(AK_VOICE_SYSTEM), "system", "system source string");
+}
+
 int main(void)
 {
     printf("== ak host tests ==\n");
@@ -293,6 +327,7 @@ int main(void)
     test_long_press();
     test_debounce_bounce();
     test_dclick();
+    test_voice_route();
     test_protocol();
     test_rx();
     test_status_icons();

@@ -178,6 +178,20 @@ void ak_asr_play_prompt(void)
 #endif
 }
 
+void ak_asr_play_availability_prompt(bool cloud_available)
+{
+    /* Reuse SDK-local clips; do not synthesize or download audio. The caller
+     * invokes this only on route transitions, so MQTT reconnect chatter cannot
+     * replay the same prompt repeatedly. */
+#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
+    if (s_ai_ready) {
+        ai_audio_player_alert(cloud_available ? AI_AUDIO_ALERT_NETWORK_CONNECTED : AI_AUDIO_ALERT_NETWORK_FAIL);
+    }
+#else
+    (void)cloud_available;
+#endif
+}
+
 #else /* !AK_ASR_BOARD_CLOUD — stub */
 
 OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error)
@@ -202,6 +216,11 @@ void ak_asr_stop(void)
 
 void ak_asr_play_prompt(void)
 {
+}
+
+void ak_asr_play_availability_prompt(bool cloud_available)
+{
+    (void)cloud_available;
 }
 
 #endif /* AK_ASR_BOARD_CLOUD */

@@ -983,7 +983,7 @@ mod app {
                 connection_id: 0,
                 logs: Vec::new(),
                 last_error: String::new(),
-                voice_source: VoiceSource::System,
+                voice_source: VoiceSource::default(),
                 kc_controller: KiroCrewController::new(None),
                 kc_router: ControlRouter::new(crate::kirocrew_control::ControlCtx {
                     jump_chats,

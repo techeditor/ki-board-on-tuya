@@ -57,4 +57,9 @@ void ak_asr_stop(void);
  *  prompt; does NOT start capture or change chat mode. */
 void ak_asr_play_prompt(void);
 
+/** Announce a cloud-ASR availability edge using built-in local clips:
+ *  NETWORK_FAIL when falling back to PC ASR and NETWORK_CONNECTED when cloud
+ *  ASR recovers. No-op until the real AI audio backend is initialized. */
+void ak_asr_play_availability_prompt(bool cloud_available);
+
 #endif /* AK_ASR_H */

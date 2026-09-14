@@ -117,7 +117,7 @@ function App() {
   const logBufRef = useRef<string[]>([]);
   const rawBufRef = useRef<string[]>([]);
   const [pausedCount, setPausedCount] = useState(0);
-  const [voiceSource, setVoiceSource] = useState<"cloud" | "system">("system");
+  const [voiceSource, setVoiceSource] = useState<"cloud" | "system">("cloud");
   // WiFi provisioning (DEVICE panel): send SSID/pass to the board over the link.
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPass, setWifiPass] = useState("");

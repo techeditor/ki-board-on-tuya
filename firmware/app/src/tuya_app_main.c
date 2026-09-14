@@ -28,6 +28,7 @@
 #include "ak_protocol.h"
 #include "ak_rx.h"
 #include "ak_statuslcd.h"
+#include "ak_voice_route.h"
 #include "tal_api.h"
 #include "tkl_output.h"
 
@@ -142,14 +143,16 @@ static volatile bool            s_wifi_status_dirty = false;
 static volatile ak_wifi_state_t s_wifi_lcd_state    = AK_WIFI_DISCONNECTED;
 #endif
 
-/* Which ASR path a K4 (PTT) press uses. "system" = board only emits
- * voice.start; the PC companion runs its own ASR (Win+H). "cloud" = board mic +
- * Tuya cloud ASR (requires AK_ASR_BOARD_CLOUD + authorized/networked device).
- * Selectable from EITHER end: the PC pushes a `config` frame, or the board
- * toggles locally and reports a `voice_source` frame. Defaults to system since
- * the cloud backend is a compile-time option that is off by default. */
-typedef enum { AK_VOICE_SYSTEM = 0, AK_VOICE_CLOUD } ak_voice_source_t;
-static ak_voice_source_t s_voice_source = AK_VOICE_SYSTEM;
+/* ASR routing keeps a user preference separate from the effective K4 route.
+ * Default preference is Tuya cloud ASR. If cloud readiness drops, K4 falls
+ * back to PC ASR immediately; it returns to cloud when readiness recovers,
+ * unless the user explicitly selected PC ASR. */
+#define AK_VOICE_ROUTE_CHECK_MS 500U
+static ak_voice_route_t s_voice_route;
+static bool             s_voice_route_initialized;
+static uint32_t         s_voice_route_last_check_ms;
+/* True only for automatic cloud -> PC degradation, not a manual PC choice. */
+static bool s_voice_fallback_active;
 /* Route is latched on K4 DOWN. Cloud waits for the LONG event (matching FP-3
  * HOLD semantics); system emits start immediately and always receives its UP. */
 static bool s_ptt_cloud_route   = false;
@@ -181,11 +184,6 @@ static volatile bool       s_asr_result_is_error;
 
 /* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
 #define AK_PTT_KEY_ID "k4"
-
-static const char *ak_voice_source_str(ak_voice_source_t s)
-{
-    return (s == AK_VOICE_CLOUD) ? "cloud" : "system";
-}
 
 static void transport_write_frame(const char *frame, int length)
 {
@@ -240,7 +238,7 @@ static void on_input_event(ak_input_kind_t kind, const char *id, ak_input_event_
          * prompt, mirroring FP-3. Feeding runs on every edge; a hold fires LONG
          * which the detector excludes, so hold-to-talk never trips it. */
         if (ak_dclick_feed(&s_ptt_dclick, event, tal_system_get_millisecond(), held_ms) &&
-            s_voice_source == AK_VOICE_CLOUD && ak_asr_available()) {
+            s_voice_route.effective == AK_VOICE_CLOUD && ak_asr_available()) {
             ak_asr_play_prompt();
         }
         on_ptt_event(event);
@@ -270,9 +268,8 @@ static void send_voice_source(void)
 {
     char frame[FRAME_BUFFER_SIZE];
     s_sequence++;
-    transport_write_frame(frame,
-                          ak_proto_voice_source(frame, sizeof(frame), s_sequence,
-                                                ak_voice_source_str(s_voice_source)));
+    transport_write_frame(
+        frame, ak_proto_voice_source(frame, sizeof(frame), s_sequence, ak_voice_source_str(s_voice_route.effective)));
 }
 
 /* Cloud-ASR result callback: forward recognized text to the PC as an `asr`
@@ -330,8 +327,7 @@ static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
 static void on_ptt_event(ak_input_event_t event)
 {
     if (event == AK_INPUT_EVENT_DOWN) {
-        s_ptt_cloud_route =
-            (s_voice_source == AK_VOICE_CLOUD && ak_asr_available());
+        s_ptt_cloud_route   = (s_voice_route.effective == AK_VOICE_CLOUD && ak_asr_available());
         s_ptt_cloud_started = false;
         if (s_ptt_cloud_route) {
 #if AK_ENABLE_DISPLAY
@@ -472,12 +468,14 @@ static void ak_status_bar_set_wifi(ak_wifi_state_t state)
 
 static void ak_status_bar_draw(void)
 {
+    const char *text  = s_voice_fallback_active ? "Tuya ASR unavailable -> PC ASR" : s_status_bar_text;
+    uint16_t    color = s_voice_fallback_active ? AK_COL_ORANGE : s_status_bar_color;
+
     ak_gfx_fill_rect(0U, LCD_STATUS_BAR_Y, AK_STATUSLCD_W,
                      LCD_STATUS_BAR_H, AK_COL_BLACK);
     ak_gfx_fill_rect(0U, LCD_STATUS_BAR_Y, AK_STATUSLCD_W,
                      1U, LCD_SESSION_SELECTED_BG);
-    ak_gfx_text_thin(4U, (uint16_t)(LCD_STATUS_BAR_Y + 4U),
-                     s_status_bar_text, s_status_bar_color, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, (uint16_t)(LCD_STATUS_BAR_Y + 4U), text, color, AK_COL_BLACK, 1);
 }
 
 /* Consume one UTF-8 code point. The 8x8 font is ASCII-only, so each non-ASCII
@@ -825,6 +823,54 @@ static void ak_voice_ui_tick(uint32_t now_ms)
 
 #endif /* AK_ENABLE_DISPLAY */
 
+/* Reconcile the preferred ASR engine with current Tuya cloud readiness.
+ * Transitions are edge-triggered: source frames, LCD redraws, and local audio
+ * prompts happen once per state change rather than once per polling interval. */
+static void ak_voice_route_update(bool announce)
+{
+    bool              was_initialized = s_voice_route_initialized;
+    bool              was_fallback    = s_voice_route.fallback;
+    ak_voice_source_t previous        = s_voice_route.effective;
+    bool              cloud_available = ak_asr_available();
+    bool              changed         = ak_voice_route_refresh(&s_voice_route, cloud_available);
+
+    s_voice_fallback_active = s_voice_route.fallback;
+    if (!was_initialized || changed) {
+        if (s_voice_route.fallback) {
+            PR_WARN("Tuya ASR unavailable; falling back to PC ASR");
+#if AK_ENABLE_DISPLAY
+            ak_status_bar_set("Tuya ASR unavailable -> PC ASR", AK_COL_ORANGE);
+#endif
+        } else if (s_voice_route.effective == AK_VOICE_CLOUD) {
+            PR_NOTICE("Tuya ASR %s; using board microphone", was_fallback ? "restored" : "ready");
+#if AK_ENABLE_DISPLAY
+            ak_status_bar_set(was_fallback ? "Tuya ASR restored" : "Tuya ASR ready", AK_COL_GREEN);
+#endif
+        } else {
+            PR_NOTICE("PC ASR selected explicitly");
+#if AK_ENABLE_DISPLAY
+            ak_status_bar_set("PC ASR selected", AK_COL_CYAN);
+#endif
+        }
+
+        /* Built-in clips are the closest available spoken feedback. Initial
+         * fallback says network failed; recovery says network connected. */
+        if (announce && s_voice_route.fallback && (!was_initialized || !was_fallback)) {
+            ak_asr_play_availability_prompt(false);
+        } else if (announce && was_initialized && was_fallback && s_voice_route.effective == AK_VOICE_CLOUD) {
+            ak_asr_play_availability_prompt(true);
+        }
+
+#if AK_ENABLE_DISPLAY
+        ak_refresh_link_header();
+#endif
+        if (was_initialized && previous != s_voice_route.effective) {
+            send_voice_source();
+        }
+    }
+    s_voice_route_initialized = true;
+}
+
 /* Handle one inbound JSONL line (PC -> board). Unknown types are ignored. */
 static void on_rx_line(const char *line)
 {
@@ -863,15 +909,16 @@ static void on_rx_line(const char *line)
         if (ak_json_str(line, "voice_engine", engine, sizeof(engine))) {
             ak_voice_source_t want =
                 (strcmp(engine, "cloud") == 0) ? AK_VOICE_CLOUD : AK_VOICE_SYSTEM;
-            if (want != s_voice_source) {
-                s_voice_source = want;
-                PR_NOTICE("voice source -> %s (from PC config)", ak_voice_source_str(want));
-#if AK_ENABLE_DISPLAY
-                ak_refresh_link_header();
-#endif
+            ak_voice_source_t before = s_voice_route.effective;
+            ak_voice_route_set_preference(&s_voice_route, want);
+            PR_NOTICE("voice preference -> %s (from PC config)", ak_voice_source_str(want));
+            ak_voice_route_update(true);
+            /* Echo unchanged effective state too: a requested cloud route may
+             * remain system while Tuya ASR is unavailable. Route transitions
+             * are already reported by ak_voice_route_update(). */
+            if (before == s_voice_route.effective) {
+                send_voice_source();
             }
-            /* Echo the resulting source so the UI reflects the applied value. */
-            send_voice_source();
         }
         send_ack(seq);
     } else if (strcmp(type, "wifi") == 0) {
@@ -957,6 +1004,7 @@ static void user_main(void)
         return;
     }
     ak_dclick_init(&s_ptt_dclick);
+    ak_voice_route_init(&s_voice_route);
 
 #if AK_ENABLE_DISPLAY
     /* Status LCD FIRST — before any AI / Wi-Fi bring-up. The board-side cloud
@@ -1030,8 +1078,8 @@ static void user_main(void)
         ak_render_status();
 #endif
     }
-    PR_NOTICE("Voice source: %s (cloud backend %s)", ak_voice_source_str(s_voice_source),
-              ak_asr_available() ? "ready" : "stub/off");
+    PR_NOTICE("Voice preference: %s (cloud backend %s)", ak_voice_source_str(s_voice_route.preferred),
+              ak_asr_available() ? "ready" : "unavailable");
 
     /* Wi-Fi provisioning (netmgr in the cloud profile, stub otherwise). The PC
      * pushes credentials over a `wifi` frame; results return as wifi_status. */
@@ -1059,8 +1107,13 @@ static void user_main(void)
         PR_ERR("cloud start failed; device will not reach the Tuya cloud");
     }
 
-    now            = tal_system_get_millisecond();
-    last_heartbeat = now;
+    /* Default preference is Tuya ASR. Resolve it now: if the cloud/AI agent is
+     * not ready yet, use PC ASR immediately and monitor for recovery below. */
+    ak_voice_route_update(true);
+
+    now                         = tal_system_get_millisecond();
+    last_heartbeat              = now;
+    s_voice_route_last_check_ms = now;
 
     ak_rx_reader_init(&s_rx);
 #if AK_TRANSPORT_DUAL
@@ -1078,6 +1131,11 @@ static void user_main(void)
 
     while (1) {
         now = tal_system_get_millisecond();
+
+        if ((uint32_t)(now - s_voice_route_last_check_ms) >= AK_VOICE_ROUTE_CHECK_MS) {
+            s_voice_route_last_check_ms = now;
+            ak_voice_route_update(true);
+        }
 
 #if AK_ENABLE_DISPLAY
         ak_voice_ui_tick(now);

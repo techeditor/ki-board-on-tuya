@@ -21,6 +21,12 @@ pub enum VoiceSource {
     System,
 }
 
+impl Default for VoiceSource {
+    fn default() -> Self {
+        VoiceSource::Cloud
+    }
+}
+
 impl VoiceSource {
     /// Parse the UI/board `voice_engine` string; unknown values fall back to Cloud.
     pub fn parse(s: &str) -> VoiceSource {
@@ -179,6 +185,11 @@ mod stub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_is_default_source() {
+        assert_eq!(VoiceSource::default(), VoiceSource::Cloud);
+    }
 
     #[test]
     fn system_start_activates() {
