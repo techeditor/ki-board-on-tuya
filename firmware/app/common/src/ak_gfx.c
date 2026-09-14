@@ -8,8 +8,9 @@
 #include "ak_font8x8.h"
 #include "tdl_display_draw.h"
 
-static TDL_DISP_FRAME_BUFF_T *s_fb      = NULL;
-static bool                   s_is_swap = false;
+static TDL_DISP_FRAME_BUFF_T *s_fb         = NULL;
+static bool                   s_is_swap    = false;
+static uint8_t                s_brightness = 100U;
 
 void ak_gfx_bind(TDL_DISP_FRAME_BUFF_T *fb, bool is_swap)
 {
@@ -17,12 +18,34 @@ void ak_gfx_bind(TDL_DISP_FRAME_BUFF_T *fb, bool is_swap)
     s_is_swap = is_swap;
 }
 
+void ak_gfx_set_brightness(uint8_t brightness)
+{
+    if (brightness < 10U) {
+        brightness = 10U;
+    } else if (brightness > 100U) {
+        brightness = 100U;
+    }
+    s_brightness = brightness;
+}
+
+static uint16_t ak_gfx_scale_color(uint16_t color)
+{
+    uint32_t red   = (uint32_t)((color >> 11) & 0x1FU);
+    uint32_t green = (uint32_t)((color >> 5) & 0x3FU);
+    uint32_t blue  = (uint32_t)(color & 0x1FU);
+
+    red   = red * s_brightness / 100U;
+    green = green * s_brightness / 100U;
+    blue  = blue * s_brightness / 100U;
+    return (uint16_t)((red << 11) | (green << 5) | blue);
+}
+
 void ak_gfx_clear(uint16_t color)
 {
     if (s_fb == NULL) {
         return;
     }
-    tdl_disp_draw_fill_full(s_fb, color, s_is_swap);
+    tdl_disp_draw_fill_full(s_fb, ak_gfx_scale_color(color), s_is_swap);
 }
 
 void ak_gfx_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
@@ -46,7 +69,7 @@ void ak_gfx_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t c
         .x1 = (uint16_t)(x + w - 1),
         .y1 = (uint16_t)(y + h - 1),
     };
-    tdl_disp_draw_fill(s_fb, &rect, color, s_is_swap);
+    tdl_disp_draw_fill(s_fb, &rect, ak_gfx_scale_color(color), s_is_swap);
 }
 
 static uint8_t ak_gfx_thin_row(uint8_t code, uint8_t row)

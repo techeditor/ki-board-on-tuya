@@ -38,6 +38,9 @@
  */
 void ak_gfx_bind(TDL_DISP_FRAME_BUFF_T *fb, bool is_swap);
 
+/** @brief Scale subsequently drawn RGB565 colors to 10..100 percent. */
+void ak_gfx_set_brightness(uint8_t brightness);
+
 /** @brief Fill the whole bound frame buffer with a solid RGB565 color. */
 void ak_gfx_clear(uint16_t color);
 

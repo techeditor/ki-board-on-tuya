@@ -156,13 +156,9 @@ OPERATE_RET ak_statuslcd_init(void)
     config.dc_pin    = AK_LCD_DC_PIN;
     config.rst_pin   = AK_LCD_RST_PIN;
 
-    config.bl.type               = TUYA_DISP_BL_TP_PWM;
-    config.bl.pwm.id             = AK_LCD_BACKLIGHT_PWM;
-    config.bl.pwm.cfg.frequency  = 1000U;
-    config.bl.pwm.cfg.duty       = 10000U;
-    config.bl.pwm.cfg.cycle      = 10000U;
-    config.bl.pwm.cfg.polarity   = TUYA_PWM_POSITIVE;
-    config.bl.pwm.cfg.count_mode = TUYA_PWM_CNT_UP;
+    config.bl.type              = TUYA_DISP_BL_TP_GPIO;
+    config.bl.gpio.pin          = AK_LCD_BACKLIGHT_PIN;
+    config.bl.gpio.active_level = AK_LCD_CONTROL_ACTIVE;
     config.power.pin            = AK_LCD_POWER_PIN;
     config.power.active_level   = AK_LCD_CONTROL_ACTIVE;
 
@@ -207,7 +203,8 @@ OPERATE_RET ak_statuslcd_set_brightness(uint8_t brightness)
     if (!s_ready || s_disp == NULL) {
         return OPRT_NOT_FOUND;
     }
-    return tdl_disp_set_brightness(s_disp, brightness > 100U ? 100U : brightness);
+    ak_gfx_set_brightness(brightness);
+    return OPRT_OK;
 }
 
 void ak_statuslcd_flush(void)
