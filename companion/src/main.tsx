@@ -1037,9 +1037,9 @@ function App() {
 
         {activeView === "kirocrew" && (
           <>
-            <Panel title="Bindings — K1–K3 chat slots A/B/C">
+            <Panel title="Bindings — Chat A/B/C">
               <p className="hint">
-                Bind K1–K3 to Kiro Crew chat shortcuts and optionally name each AK slot.
+                Bind Chat A, B, and C to Kiro Crew chat shortcuts and optionally name each slot.
                 Names are saved when you press Enter or click elsewhere, then shown on the AK;
                 leave a name blank to display its default <strong>A, B, or C</strong>. Use up to
                 {ALIAS_MAX_CHARS} English letters, numbers, spaces, or symbols.
@@ -1051,53 +1051,47 @@ function App() {
                 const defaultName = SLOT_DEFAULT_NAMES[slot - 1];
                 return (
                   <div key={slot} className="binding-row">
-                    <div className="binding-title-row">
-                      <div className="binding-title">
-                        <strong>{`K${slot}`}</strong>
-                        <span className="good-text">
-                          {n ? `Alt+${n} · chat ${n}` : "--"}
-                        </span>
-                      </div>
-                      <input
-                        className="binding-alias-input"
-                        value={alias}
-                        maxLength={ALIAS_MAX_CHARS}
-                        disabled={bindBusy}
-                        aria-label={`K${slot} alias; blank uses ${defaultName}`}
-                        placeholder={`Alias · default ${defaultName}`}
-                        onChange={(event) => bindAliasDraft(slot, event.target.value)}
-                        onBlur={(event) =>
-                          runBind(() => bindAliasSave(slot, event.currentTarget.value))
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") event.currentTarget.blur();
-                        }}
-                      />
-                    </div>
-                    <div className="actions binding-actions">
-                      <label>Chat #</label>
-                      <select
-                        value={n ?? ""}
-                        disabled={bindBusy}
-                        aria-label={`K${slot} chat number`}
-                        onChange={(event) =>
-                          runBind(() => bindSet(slot, Number(event.target.value)))
-                        }
-                      >
-                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-                          <option key={num} value={num}>
-                            {num}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        className="secondary"
-                        disabled={bindBusy}
-                        onClick={() => runBind(() => bindClear(slot))}
-                      >
-                        Reset chat to {slot}
-                      </button>
-                    </div>
+                    <strong className="binding-slot-label">
+                      {`Chat ${defaultName} (K${slot}):`}
+                    </strong>
+                    <input
+                      className="binding-alias-input"
+                      value={alias}
+                      maxLength={ALIAS_MAX_CHARS}
+                      disabled={bindBusy}
+                      aria-label={`Chat ${defaultName} name; blank uses ${defaultName}`}
+                      placeholder={`Name · default ${defaultName}`}
+                      onChange={(event) => bindAliasDraft(slot, event.target.value)}
+                      onBlur={(event) =>
+                        runBind(() => bindAliasSave(slot, event.currentTarget.value))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                    />
+                    <span className="binding-alt-label">Alt+</span>
+                    <select
+                      className="binding-chat-select"
+                      value={n ?? ""}
+                      disabled={bindBusy}
+                      aria-label={`Chat ${defaultName} shortcut number`}
+                      onChange={(event) =>
+                        runBind(() => bindSet(slot, Number(event.target.value)))
+                      }
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                        <option key={num} value={num}>
+                          {num}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="secondary binding-reset"
+                      disabled={bindBusy}
+                      onClick={() => runBind(() => bindClear(slot))}
+                    >
+                      Reset to {slot}
+                    </button>
                   </div>
                 );
               })}
@@ -1276,7 +1270,7 @@ function App() {
               </div>
 
               <p className="hint watched-model-hint">
-                K1–K3 send a Kiro Crew shortcut (Alt+1–9) for the selected Chat #.
+                Chat A–C send a Kiro Crew shortcut (Alt+1–9) for the selected Chat #.
                 Watch chooses which live chat can update the keyboard screen.
               </p>
 
@@ -1287,7 +1281,7 @@ function App() {
                   className={watchedView === "compact" ? "watched-tab active" : "watched-tab"}
                   onClick={() => setWatchedView("compact")}
                 >
-                  Compact · Bind K1–K3
+                  Compact
                 </button>
                 <button
                   role="tab"
@@ -1323,17 +1317,17 @@ function App() {
                             {s.state.toUpperCase()}
                           </span>
                           <div className="watched-slot-binding">
-                            <span>Bind keyboard key</span>
+                            <span>Bind chat</span>
                             <div className="watched-slot-actions" aria-label="Quick bind keys">
                               {[1, 2, 3].map((slot) => (
                               <button
                                 key={slot}
                                 className={bindSessions[slot - 1] === s.session_id ? "bound" : "secondary"}
                                 disabled={bindBusy}
-                                aria-label={`Bind ${s.session_id} to K${slot}`}
+                                aria-label={`Bind ${s.session_id} to Chat ${SLOT_DEFAULT_NAMES[slot - 1]}`}
                                 onClick={() => startQuickBind(s.session_id, slot)}
                               >
-                                K{slot}
+                                {SLOT_DEFAULT_NAMES[slot - 1]}
                               </button>
                               ))}
                             </div>
@@ -1350,12 +1344,12 @@ function App() {
                         </div>
                         <div className="watched-compact-meta">
                           {boundSlot
-                            ? `Keyboard K${boundSlot} → Kiro Crew Chat #${binds[boundSlot - 1]} (Alt+${binds[boundSlot - 1]}) · screen label ${bindAliases[boundSlot - 1] || SLOT_DEFAULT_NAMES[boundSlot - 1]}`
+                            ? `Chat ${SLOT_DEFAULT_NAMES[boundSlot - 1]} → Kiro Crew Chat #${binds[boundSlot - 1]} (Alt+${binds[boundSlot - 1]}) · screen label ${bindAliases[boundSlot - 1] || SLOT_DEFAULT_NAMES[boundSlot - 1]}`
                             : s.text}
                         </div>
                         {draftForSession && quickBindDraft && (
                           <div className="quick-bind-editor">
-                            <strong>Bind keyboard K{quickBindDraft.slot}</strong>
+                            <strong>Bind Chat {SLOT_DEFAULT_NAMES[quickBindDraft.slot - 1]}</strong>
                             <label htmlFor={`quick-chat-${quickBindDraft.slot}`}>Kiro Crew Chat #</label>
                             <select
                               id={`quick-chat-${quickBindDraft.slot}`}

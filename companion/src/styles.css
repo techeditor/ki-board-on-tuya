@@ -549,6 +549,10 @@ button.watched-tab.active {
 
 button.watched-watch { min-width: 66px; }
 
+.watched-compact-row > button.watched-watch {
+  align-self: end;
+}
+
 button.watched-watch.active {
   border-color: var(--accent-hover);
   background: var(--accent);
@@ -676,6 +680,10 @@ button.watched-watch.active {
 }
 
 .binding-row {
+  display: grid;
+  grid-template-columns: 122px minmax(150px, 1fr) auto 64px auto;
+  align-items: center;
+  gap: 8px;
   margin-top: 12px;
 }
 
@@ -683,45 +691,30 @@ button.watched-watch.active {
   margin-top: 6px;
 }
 
-.binding-title-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.binding-slot-label,
+.binding-alt-label,
+.binding-reset {
+  white-space: nowrap;
 }
 
-.binding-title {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex: 1 1 auto;
-  min-width: 150px;
+.binding-slot-label {
+  color: var(--text);
   font-size: 13px;
 }
 
-.binding-alias-input {
-  flex: 0 1 210px;
-  width: min(210px, 45%);
-  min-width: 130px;
+.binding-alt-label {
+  color: var(--success);
+  font-weight: 700;
 }
 
-.binding-actions {
-  margin-top: 6px;
-  flex-wrap: nowrap;
-  align-items: center;
+.binding-alias-input,
+.binding-chat-select {
+  width: 100%;
+  min-width: 0;
 }
 
-.binding-actions label {
-  margin: 0;
-  white-space: nowrap;
-}
-
-.binding-actions select {
-  width: auto;
-  min-width: 56px;
-}
-
-.binding-actions button {
-  white-space: nowrap;
+.binding-reset {
+  min-width: 112px;
 }
 
 @media (max-width: 620px) {
@@ -744,14 +737,12 @@ button.watched-watch.active {
   .watched-detail-head { grid-template-columns: minmax(0, 1fr) auto; }
   .watched-detail-head .watched-watch { grid-column: 1 / -1; }
 
-  .binding-title-row {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 6px;
+  .binding-row {
+    grid-template-columns: 1fr auto 64px auto;
   }
 
+  .binding-slot-label,
   .binding-alias-input {
-    width: 100%;
-    min-width: 0;
+    grid-column: 1 / -1;
   }
 }
