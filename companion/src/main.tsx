@@ -181,6 +181,7 @@ function App() {
   const [voiceActive, setVoiceActive] = useState(false);
   const [activeView, setActiveView] = useState<"device" | "input" | "kirocrew" | "logs">("device");
   const [uiError, setUiError] = useState("");
+  const statusPollInFlightRef = useRef(false);
   const usbProvisioningAvailable = status.device_connected && status.transport === "usb";
 
   // FP-4b route B ("Local Control", the hands) state: focus a Kiro Crew window
@@ -606,7 +607,17 @@ function App() {
   useEffect(() => {
     refreshRuntime().catch(() => undefined);
     const timer = window.setInterval(() => {
-      invoke<Status>("get_status").then(setStatus).catch(() => undefined);
+      // Never pile up status requests behind a blocked backend mutex. One
+      // outstanding poll is enough; the persistent backend watchdog records
+      // lock stalls for post-mortem diagnosis.
+      if (statusPollInFlightRef.current) return;
+      statusPollInFlightRef.current = true;
+      invoke<Status>("get_status")
+        .then(setStatus)
+        .catch((error) => console.warn("get_status failed", error))
+        .finally(() => {
+          statusPollInFlightRef.current = false;
+        });
     }, 1500);
 
     const unlistenLog = listen<string>("companion-log", (event) => {

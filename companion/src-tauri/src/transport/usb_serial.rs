@@ -13,6 +13,7 @@
 //! code compiles and the pure matching logic is tested everywhere.
 
 use super::{BoardTransport, LineSender, TransportKind};
+use crate::diagnostics;
 use crate::protocol::{self, LineAccumulator};
 use serde::Serialize;
 use serde_json::Value;
@@ -21,7 +22,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// WCH vendor id shared by the CH340 / CH342 / CH343 bridges.
 pub const WCH_VID: u16 = 0x1A86;
@@ -57,6 +58,7 @@ impl UsbSerialTransport {
             .filter(|port| !port.is_empty())
             .or_else(discover_board_port)
             .ok_or("board USB serial port not found")?;
+        diagnostics::record("INFO", "usb-connect", &format!("opening endpoint={selected}"));
 
         let mut port = serialport::new(&selected, BAUD_RATE)
             .data_bits(serialport::DataBits::Eight)
@@ -78,6 +80,7 @@ impl UsbSerialTransport {
             .map_err(|err| format!("clone serial port failed: {err}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         spawn_reader(reader, lines, stop.clone());
+        diagnostics::record("INFO", "usb-connect", "reader started");
 
         Ok(Self {
             endpoint: selected,
@@ -179,10 +182,13 @@ pub fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 /// receiver on the other end of `lines` is dropped.
 fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender, stop: Arc<AtomicBool>) {
     thread::spawn(move || {
+        diagnostics::record("INFO", "usb-reader", "thread started");
         let mut acc = LineAccumulator::new();
         let mut chunk = [0u8; 512];
+        let mut last_error_log = Instant::now() - Duration::from_secs(5);
         loop {
             if stop.load(Ordering::SeqCst) {
+                diagnostics::record("INFO", "usb-reader", "stop requested");
                 return; // disconnect requested -> release the cloned port
             }
             match reader.read(&mut chunk) {
@@ -190,6 +196,7 @@ fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender, stop: Arc<At
                 Ok(n) => {
                     for line in acc.push(&chunk[..n]) {
                         if lines.send(line).is_err() {
+                            diagnostics::record("INFO", "usb-reader", "receiver dropped");
                             return; // receiver dropped -> connection gone
                         }
                     }
@@ -197,7 +204,13 @@ fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender, stop: Arc<At
                 Err(ref err) if err.kind() == std::io::ErrorKind::TimedOut => {
                     // Idle read timeout is normal; loop back to re-check `stop`.
                 }
-                Err(_) => thread::sleep(Duration::from_millis(50)),
+                Err(error) => {
+                    if last_error_log.elapsed() >= Duration::from_secs(5) {
+                        diagnostics::record("WARN", "usb-reader", &format!("read failed: {error}"));
+                        last_error_log = Instant::now();
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
             }
         }
     });

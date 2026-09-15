@@ -16,6 +16,7 @@
 //!   because Tauri needs WebKitGTK, which is absent on the Linux CI host.
 
 pub mod asr;
+pub mod diagnostics;
 pub mod inject;
 pub mod kirocrew_control;
 pub mod bind_store;
@@ -190,6 +191,7 @@ pub fn run() {
 
 #[cfg(target_os = "windows")]
 mod app {
+    use crate::diagnostics;
     use crate::pc_asr::{self, VoiceAction, VoiceSource};
     use crate::protocol::{self, Inbound};
     use crate::hook_install;
@@ -204,8 +206,9 @@ mod app {
     use serde_json::Value;
     use std::collections::HashMap;
     use std::sync::mpsc::{self, Receiver};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, TryLockError};
     use std::thread;
+    use std::time::{Duration, Instant};
     use tauri::{AppHandle, Emitter, Manager, State};
 
     struct Inner {
@@ -288,17 +291,105 @@ mod app {
         let _ = app.emit("companion-log", message);
     }
 
-    fn write_board(state: &Shared, payload: &Value) -> Result<(), String> {
+    fn payload_kind(payload: &Value) -> &str {
+        payload.get("type").and_then(Value::as_str).unwrap_or("unknown")
+    }
+
+    fn write_board_guarded(
+        state: &Shared,
+        payload: &Value,
+        require_usb: bool,
+    ) -> Result<(), String> {
+        let kind = payload_kind(payload);
+        let routine = matches!(kind, "ack" | "pong");
+        let started = Instant::now();
+        if !routine {
+            diagnostics::record("DEBUG", "board-tx", &format!("begin type={kind}"));
+        }
+        let lock_started = Instant::now();
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        let lock_wait = lock_started.elapsed();
+        if lock_wait >= Duration::from_millis(250) {
+            diagnostics::record(
+                "WARN",
+                "state-lock",
+                &format!("board write waited {}ms type={kind}", lock_wait.as_millis()),
+            );
+        }
+        if require_usb {
+            crate::ensure_usb_provisioning_transport(inner.transport.is_some(), inner.kind)?;
+        }
         let transport = inner.transport.as_mut().ok_or("device is not connected")?;
-        transport.write_json(payload)
+        let result = transport.write_json(payload);
+        let elapsed = started.elapsed();
+        let slow_or_failed = result.is_err() || elapsed >= Duration::from_millis(250);
+        if !routine || slow_or_failed {
+            diagnostics::record(
+                if slow_or_failed { "WARN" } else { "DEBUG" },
+                "board-tx",
+                &format!(
+                    "end type={kind} elapsed_ms={} result={}",
+                    elapsed.as_millis(),
+                    if result.is_ok() { "ok" } else { "error" }
+                ),
+            );
+        }
+        result
+    }
+
+    fn write_board(state: &Shared, payload: &Value) -> Result<(), String> {
+        write_board_guarded(state, payload, false)
     }
 
     fn write_board_usb_only(state: &Shared, payload: &Value) -> Result<(), String> {
-        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        crate::ensure_usb_provisioning_transport(inner.transport.is_some(), inner.kind)?;
-        let transport = inner.transport.as_mut().ok_or("device is not connected")?;
-        transport.write_json(payload)
+        write_board_guarded(state, payload, true)
+    }
+
+    fn spawn_state_watchdog(state: Shared) {
+        let result = thread::Builder::new()
+            .name("companion-watchdog".to_string())
+            .spawn(move || {
+                let mut busy_since: Option<Instant> = None;
+                let mut last_report = Instant::now();
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    match state.inner.try_lock() {
+                        Ok(_) => {
+                            if let Some(started) = busy_since.take() {
+                                diagnostics::record(
+                                    "INFO",
+                                    "state-lock",
+                                    &format!("mutex recovered after {}ms", started.elapsed().as_millis()),
+                                );
+                            }
+                        }
+                        Err(TryLockError::WouldBlock) => {
+                            let started = busy_since.get_or_insert_with(Instant::now);
+                            if started.elapsed() >= Duration::from_secs(2)
+                                && last_report.elapsed() >= Duration::from_secs(5)
+                            {
+                                diagnostics::record(
+                                    "WARN",
+                                    "state-lock",
+                                    &format!("mutex busy for {}ms", started.elapsed().as_millis()),
+                                );
+                                last_report = Instant::now();
+                            }
+                        }
+                        Err(TryLockError::Poisoned(_)) => {
+                            diagnostics::record("ERROR", "state-lock", "mutex poisoned");
+                            return;
+                        }
+                    }
+                }
+            });
+        if let Err(error) = result {
+            diagnostics::record(
+                "ERROR",
+                "watchdog",
+                &format!("failed to start state watchdog: {error}"),
+            );
+        }
     }
 
     #[tauri::command]
@@ -366,6 +457,11 @@ mod app {
         port_name: Option<String>,
     ) -> Result<(), String> {
         let transport_kind = transport.as_deref().unwrap_or("usb");
+        diagnostics::record(
+            "INFO",
+            "connect",
+            &format!("begin transport={transport_kind}"),
+        );
         let shared = state.inner();
         // Only one transport at a time. If something is already connected, do
         // NOT silently tear it down — tell the user to disconnect first. This
@@ -398,6 +494,7 @@ mod app {
                     .ok_or("BLE connect requires a device id (scan and pick one)")?;
                 let transport =
                     BleGattTransport::connect(device_id, line_tx).map_err(|err| {
+                        diagnostics::record("ERROR", "connect", &format!("BLE failed: {err}"));
                         log_line(&app, format!("[ERROR] ble transport: {err}"));
                         err
                     })?;
@@ -406,6 +503,7 @@ mod app {
             _ => {
                 let transport =
                     UsbSerialTransport::connect(port_name.clone(), line_tx).map_err(|err| {
+                        diagnostics::record("ERROR", "connect", &format!("USB failed: {err}"));
                         log_line(&app, format!("[ERROR] transport: {err}"));
                         err
                     })?;
@@ -448,11 +546,13 @@ mod app {
             &app,
             format!("[INFO] connected transport={kind:?} endpoint={endpoint}"),
         );
+        diagnostics::record("INFO", "connect", &format!("ready transport={kind:?}"));
         Ok(())
     }
 
     #[tauri::command]
     fn disconnect_device(state: State<Shared>) -> Result<(), String> {
+        diagnostics::record("INFO", "disconnect", "begin");
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
         // Best-effort graceful goodbye BEFORE we drop the transport: plain UART
         // has no hardware disconnect signal, so without this the board's link
@@ -471,6 +571,8 @@ mod app {
         inner.endpoint.clear();
         inner.device_settings_synced = false;
         inner.connection_id = inner.connection_id.wrapping_add(1);
+        drop(inner);
+        diagnostics::record("INFO", "disconnect", "complete");
         Ok(())
     }
 
@@ -1057,6 +1159,11 @@ mod app {
         connection_id: u64,
     ) {
         thread::spawn(move || {
+            diagnostics::record(
+                "INFO",
+                "board-reader",
+                &format!("started connection_id={connection_id}"),
+            );
             while let Ok(line) = line_rx.recv() {
                 // Stop if this connection has been superseded.
                 let live = state
@@ -1065,12 +1172,20 @@ mod app {
                     .map(|inner| inner.transport.is_some() && inner.connection_id == connection_id)
                     .unwrap_or(false);
                 if !live {
+                    diagnostics::record("INFO", "board-reader", "stopped: connection superseded");
                     break;
                 }
                 if let Some(frame) = protocol::decode_line(&line) {
                     handle_frame(&app, &state, frame);
+                } else {
+                    diagnostics::record(
+                        "WARN",
+                        "board-reader",
+                        &format!("discarded undecodable line bytes={}", line.len()),
+                    );
                 }
             }
+            diagnostics::record("INFO", "board-reader", "channel closed");
         });
     }
 
@@ -1252,6 +1367,8 @@ mod app {
                 kc_binds,
             }),
         });
+        spawn_state_watchdog(state.clone());
+        diagnostics::record("INFO", "lifecycle", "Tauri state initialized");
 
         tauri::Builder::default()
             .manage(state)

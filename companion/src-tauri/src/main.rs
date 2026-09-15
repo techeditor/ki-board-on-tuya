@@ -1,7 +1,7 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use agentic_keyboard_companion_lib::status_sink;
+use agentic_keyboard_companion_lib::{diagnostics, status_sink};
 
 fn main() {
     // FP-4b Decision 2: the Kiro agent hook is a MODE of this same binary,
@@ -14,5 +14,6 @@ fn main() {
         std::process::exit(0);
     }
 
+    let _diagnostic_log = diagnostics::init();
     agentic_keyboard_companion_lib::run();
 }

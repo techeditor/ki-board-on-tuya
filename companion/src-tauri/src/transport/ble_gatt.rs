@@ -37,6 +37,7 @@
 //! Linux (btleplug's BlueZ/DBus backend) and builds on Windows (WinRT backend).
 
 use super::{BoardTransport, LineSender, TransportKind};
+use crate::diagnostics;
 use crate::protocol::{self, LineAccumulator};
 use btleplug::api::{
     Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
@@ -121,6 +122,7 @@ impl BleGattTransport {
     /// The caller (Tauri `connect_device`) sends the protocol `hello` greeting
     /// **after** this returns — BLE, unlike USB, is not greet-immediately.
     pub fn connect(device_id: String, lines: LineSender) -> Result<Self, String> {
+        diagnostics::record("INFO", "ble-connect", "worker setup begin");
         let stop = Arc::new(AtomicBool::new(false));
         // Command channel: sync side -> async loop.
         let (cmd_tx, cmd_rx) = tokio_mpsc::channel::<BleCommand>(32);
@@ -133,6 +135,7 @@ impl BleGattTransport {
         let worker = thread::Builder::new()
             .name("ble-gatt".into())
             .spawn(move || {
+                diagnostics::record("INFO", "ble-worker", "thread started");
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -150,24 +153,30 @@ impl BleGattTransport {
                     ready_tx,
                     thread_stop,
                 ));
+                diagnostics::record("INFO", "ble-worker", "thread stopped");
             })
             .map_err(|err| format!("spawn ble thread failed: {err}"))?;
 
         // Wait for the loop to report readiness. A dropped sender (thread died
         // before signalling) surfaces as a connect error rather than a hang.
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(())) => {
+                diagnostics::record("INFO", "ble-connect", "notification subscription ready");
+                Ok(Self {
                 device_id,
                 commands: Some(cmd_tx),
                 stop,
                 worker: Some(worker),
-            }),
+            })
+            }
             Ok(Err(err)) => {
+                diagnostics::record("ERROR", "ble-connect", &format!("setup failed: {err}"));
                 stop.store(true, Ordering::SeqCst);
                 let _ = worker.join();
                 Err(err)
             }
             Err(_) => {
+                diagnostics::record("ERROR", "ble-connect", "worker exited before readiness");
                 stop.store(true, Ordering::SeqCst);
                 let _ = worker.join();
                 Err("ble event loop exited before connecting".into())
@@ -234,6 +243,7 @@ async fn event_loop(
     stop: Arc<AtomicBool>,
 ) {
     // ── connect phase ──────────────────────────────────────────────
+    diagnostics::record("INFO", "ble-event", "connect phase begin");
     let connected = match connect_peripheral(&device_id).await {
         Ok(v) => v,
         Err(err) => {
@@ -243,12 +253,14 @@ async fn event_loop(
     };
     let (peripheral, notify_char, write_char) = connected;
 
+    diagnostics::record("INFO", "ble-event", "subscribe begin");
     if let Err(err) = peripheral.subscribe(&notify_char).await {
         let _ = ready.send(Err(format!("subscribe to notify char failed: {err}")));
         let _ = peripheral.disconnect().await;
         return;
     }
 
+    diagnostics::record("INFO", "ble-event", "subscribe complete; opening notifications");
     let mut notifications = match peripheral.notifications().await {
         Ok(stream) => stream,
         Err(err) => {
@@ -259,6 +271,7 @@ async fn event_loop(
     };
 
     // Subscription is live — unblock connect().
+    diagnostics::record("INFO", "ble-event", "notifications ready");
     let _ = ready.send(Ok(()));
 
     // ── run phase ──────────────────────────────────────────────────
@@ -286,6 +299,7 @@ async fn event_loop(
                     Some(_) => { /* notification from another char: ignore */ }
                     None => {
                         // Stream ended (peer disconnected). Stop the loop.
+                        diagnostics::record("WARN", "ble-event", "notification stream ended");
                         break;
                     }
                 }
@@ -295,9 +309,9 @@ async fn event_loop(
                     Some(BleCommand::Write(bytes)) => {
                         if let Err(err) = write_frame(&peripheral, &write_char, &bytes).await {
                             // A failed write is non-fatal to the loop; the next
-                            // write may succeed. Surface nothing here (the sync
-                            // side already returned Ok for the queued send).
-                            let _ = err;
+                            // write may succeed. Persist the failure because the
+                            // synchronous sender only knows that it was queued.
+                            diagnostics::record("WARN", "ble-write", &err);
                         }
                     }
                     Some(BleCommand::Disconnect) | None => break,
@@ -308,8 +322,10 @@ async fn event_loop(
     }
 
     // ── teardown ───────────────────────────────────────────────────
+    diagnostics::record("INFO", "ble-event", "teardown begin");
     let _ = peripheral.unsubscribe(&notify_char).await;
     let _ = peripheral.disconnect().await;
+    diagnostics::record("INFO", "ble-event", "teardown complete");
 }
 
 /// Locate, connect, discover services, and resolve the NOTIFY + WRITE
@@ -317,17 +333,20 @@ async fn event_loop(
 async fn connect_peripheral(
     device_id: &str,
 ) -> Result<(Peripheral, Characteristic, Characteristic), String> {
+    diagnostics::record("INFO", "ble-connect", "resolving adapter");
     let adapter = first_adapter().await?;
 
     // The id was produced by scan() from `peripheral.id()`; match on its string
     // form so we do not depend on a platform-specific id parse.
     // A brief scan makes sure the peripheral is in the adapter's cache.
+    diagnostics::record("INFO", "ble-connect", "adapter scan begin");
     adapter
         .start_scan(ScanFilter::default())
         .await
         .map_err(|err| format!("start_scan failed: {err}"))?;
     tokio::time::sleep(Duration::from_secs(SCAN_SECS)).await;
     let _ = adapter.stop_scan().await;
+    diagnostics::record("INFO", "ble-connect", "adapter scan complete");
 
     let peripherals = adapter
         .peripherals()
@@ -338,14 +357,17 @@ async fn connect_peripheral(
         .find(|p| p.id().to_string() == device_id)
         .ok_or_else(|| format!("ble device {device_id} not found (still advertising?)"))?;
 
+    diagnostics::record("INFO", "ble-connect", "peripheral connect begin");
     peripheral
         .connect()
         .await
         .map_err(|err| format!("connect failed: {err}"))?;
+    diagnostics::record("INFO", "ble-connect", "peripheral connected; service discovery begin");
     peripheral
         .discover_services()
         .await
         .map_err(|err| format!("discover services failed: {err}"))?;
+    diagnostics::record("INFO", "ble-connect", "service discovery complete");
 
     let chars = peripheral.characteristics();
 
@@ -434,12 +456,14 @@ pub fn scan() -> Result<Vec<BleDeviceInfo>, String> {
 
 async fn scan_async() -> Result<Vec<BleDeviceInfo>, String> {
     let adapter = first_adapter().await?;
+    diagnostics::record("INFO", "ble-connect", "adapter scan begin");
     adapter
         .start_scan(ScanFilter::default())
         .await
         .map_err(|err| format!("start_scan failed: {err}"))?;
     tokio::time::sleep(Duration::from_secs(SCAN_SECS)).await;
     let _ = adapter.stop_scan().await;
+    diagnostics::record("INFO", "ble-connect", "adapter scan complete");
 
     let peripherals = adapter
         .peripherals()
