@@ -793,7 +793,7 @@ static uint16_t ak_status_color(const char *state)
 #define LCD_SESSION_SELECTED_BG AK_RGB565(0x8EU, 0x48U, 0xFFU)
 #define LCD_AGENT_RESPONSE_BG   AK_RGB565(0x6FU, 0x36U, 0xCCU)
 #define LCD_HEADER_DISCONNECTED_BG AK_RGB565(0xFFU, 0xE6U, 0x99U)
-#define LCD_HEADER_CONNECTED_BG    AK_RGB565(0x96U, 0xE6U, 0xA6U)
+#define LCD_HEADER_CONNECTED_BG    AK_RGB565(0x65U, 0xFFU, 0x65U)
 
 typedef struct {
     char    agent[32];
