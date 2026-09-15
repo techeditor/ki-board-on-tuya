@@ -702,11 +702,11 @@ function App() {
 
     setActivationQrError("");
     import("qrcode")
-      .then(({ toDataURL }) =>
-        toDataURL(url, { errorCorrectionLevel: "M", margin: 1, width: 188 }),
+      .then(({ toString }) =>
+        toString(url, { type: "svg", errorCorrectionLevel: "M", margin: 1, width: 188 }),
       )
-      .then((dataUrl) => {
-        if (!cancelled) setActivationQrData(dataUrl);
+      .then((svg) => {
+        if (!cancelled) setActivationQrData(svg);
       })
       .catch((error) => {
         if (!cancelled) {
@@ -1157,7 +1157,12 @@ function App() {
                     <div className="activation-qr-row">
                       <div className="activation-qr">
                         {activationQrData ? (
-                          <img src={activationQrData} alt="SmartLife device activation QR code" />
+                          <div
+                            className="activation-qr-svg"
+                            aria-label="SmartLife device activation QR code"
+                            role="img"
+                            dangerouslySetInnerHTML={{ __html: activationQrData }}
+                          />
                         ) : (
                           <span>{activationQrError || "Generating QR code…"}</span>
                         )}

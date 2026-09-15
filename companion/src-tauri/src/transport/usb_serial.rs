@@ -101,9 +101,13 @@ impl BoardTransport for UsbSerialTransport {
 
     fn write_json(&mut self, payload: &Value) -> Result<(), String> {
         let line = protocol::encode_json_line(payload)?;
+        /* write_all preserves JSONL frame ordering. Do not flush every frame:
+         * on Windows CH340/CH34x, SerialPort::flush waits for the driver TX
+         * queue to drain and can block 0.3-2 seconds while the caller still
+         * owns the global Companion state mutex. Disconnect performs the one
+         * explicit flush needed before closing the port. */
         self.port
             .write_all(&line)
-            .and_then(|_| self.port.flush())
             .map_err(|err| format!("serial write failed: {err}"))
     }
 

@@ -994,7 +994,8 @@ button.activation-toggle:active {
   color: #111111;
 }
 
-.activation-qr img {
+.activation-qr-svg,
+.activation-qr-svg svg {
   display: block;
   width: 144px;
   height: 144px;
