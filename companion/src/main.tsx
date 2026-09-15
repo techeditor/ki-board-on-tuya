@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { create as createQrCode } from "qrcode";
 import "./styles.css";
 
 // ─── Types mirroring the Rust backend (src-tauri/src/lib.rs) ────────────────
@@ -67,6 +68,21 @@ function activationLabel(state: string) {
     case "disabled": return "Cloud setup unavailable";
     default: return "Configure WiFi to start";
   }
+}
+
+type QrDrawing = { size: number; path: string };
+
+function buildQrDrawing(url: string): QrDrawing | null {
+  if (!url.startsWith("https://smartapp.tuya.com/s/p?")) return null;
+  const qr = createQrCode(url, { errorCorrectionLevel: "M" });
+  const size = qr.modules.size;
+  let path = "";
+  for (let row = 0; row < size; row += 1) {
+    for (let col = 0; col < size; col += 1) {
+      if (qr.modules.get(row, col)) path += `M${col} ${row}h1v1h-1z`;
+    }
+  }
+  return { size, path };
 }
 
 type SerialPortInfo = {
@@ -210,8 +226,6 @@ function App() {
     qr_url: "",
   });
   const [activationExpanded, setActivationExpanded] = useState(false);
-  const [activationQrData, setActivationQrData] = useState("");
-  const [activationQrError, setActivationQrError] = useState("");
   // Device license (UUID/AuthKey) provisioning.
   const [licUuid, setLicUuid] = useState("");
   const [licAuthkey, setLicAuthkey] = useState("");
@@ -232,6 +246,16 @@ function App() {
   const [uiError, setUiError] = useState("");
   const statusPollInFlightRef = useRef(false);
   const usbProvisioningAvailable = status.device_connected && status.transport === "usb";
+  const activationQrDrawing = useMemo(
+    () => activationStatus.state === "scan_qr"
+      ? buildQrDrawing(activationStatus.qr_url)
+      : null,
+    [activationStatus.state, activationStatus.qr_url],
+  );
+  const activationQrError = activationStatus.state === "scan_qr" &&
+    activationStatus.qr_url !== "" && activationQrDrawing === null
+    ? "The keyboard returned an unexpected activation URL."
+    : "";
 
   // FP-4b route B ("Local Control", the hands) state: focus a Kiro Crew window
   // and inject keystrokes.
@@ -413,7 +437,6 @@ function App() {
     setWifiBusy(true);
     setActivationStatus({ state: "connecting_router", qr_url: "" });
     setActivationExpanded(false);
-    setActivationQrData("");
     try {
       setUiError("");
       setWifiStatus("sending…");
@@ -685,38 +708,6 @@ function App() {
 
   async function hookRemove() {
     setHookStatus(await invoke<HookStatus>("kc_hook_remove", { exe: null }));
-
-  useEffect(() => {
-    let cancelled = false;
-    const url = activationStatus.qr_url;
-    if (activationStatus.state !== "scan_qr" || !url) {
-      setActivationQrData("");
-      setActivationQrError("");
-      return () => { cancelled = true; };
-    }
-    if (!url.startsWith("https://smartapp.tuya.com/s/p?")) {
-      setActivationQrData("");
-      setActivationQrError("The keyboard returned an unexpected activation URL.");
-      return () => { cancelled = true; };
-    }
-
-    setActivationQrError("");
-    import("qrcode")
-      .then(({ toString }) =>
-        toString(url, { type: "svg", errorCorrectionLevel: "M", margin: 1, width: 188 }),
-      )
-      .then((svg) => {
-        if (!cancelled) setActivationQrData(svg);
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setActivationQrData("");
-          setActivationQrError(error instanceof Error ? error.message : String(error));
-        }
-      });
-    return () => { cancelled = true; };
-  }, [activationStatus.state, activationStatus.qr_url]);
-
   }
 
   useEffect(() => {
@@ -1156,13 +1147,21 @@ function App() {
                   {activationStatus.state === "scan_qr" && (
                     <div className="activation-qr-row">
                       <div className="activation-qr">
-                        {activationQrData ? (
+                        {activationQrDrawing ? (
                           <div
                             className="activation-qr-svg"
                             aria-label="SmartLife device activation QR code"
                             role="img"
-                            dangerouslySetInnerHTML={{ __html: activationQrData }}
-                          />
+                          >
+                            <svg
+                              viewBox={`-1 -1 ${activationQrDrawing.size + 2} ${activationQrDrawing.size + 2}`}
+                              shapeRendering="crispEdges"
+                              xmlns="http://www.w3.org/2000/svg"
+                            >
+                              <rect x="-1" y="-1" width={activationQrDrawing.size + 2} height={activationQrDrawing.size + 2} fill="#fff" />
+                              <path d={activationQrDrawing.path} fill="#000" />
+                            </svg>
+                          </div>
                         ) : (
                           <span>{activationQrError || "Generating QR code…"}</span>
                         )}
