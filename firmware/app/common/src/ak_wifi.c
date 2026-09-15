@@ -16,6 +16,8 @@
 static ak_wifi_status_cb s_on_status = NULL;
 static ak_wifi_state_t   s_current_state = AK_WIFI_DISCONNECTED;
 static char              s_current_ssid[AK_WIFI_SSID_CAPACITY] = "";
+static volatile bool     s_config_disconnect_pending = false;
+static int8_t            s_license_present_cache = -1; /* -1 unknown, 0 missing, 1 present */
 
 static void report_status(ak_wifi_state_t state, const char *ssid)
 {
@@ -63,6 +65,7 @@ const char *ak_license_result_str(ak_license_result_t r)
 
 #include "netmgr.h"
 #include "netconn_wifi.h"
+#include "tal_wifi.h"
 #include "tuya_authorize.h"
 #include "tuya_iot.h"
 #if AK_ENABLE_LICENSE_DEBUG_READ
@@ -80,11 +83,21 @@ static void __netmgr_status_cb(netmgr_type_e type, netmgr_status_e status)
     switch (status) {
     case NETMGR_LINK_UP:
     case NETMGR_LINK_UP_SWITH:
+        s_config_disconnect_pending = false;
         report_status(AK_WIFI_CONNECTED, s_current_ssid);
         break;
     case NETMGR_LINK_DOWN:
     default:
-        report_status(AK_WIFI_DISCONNECTED, s_current_ssid);
+        /* Reconfiguring while already linked requires one deliberate disconnect
+         * before TuyaOpen will reconnect with the newly copied credentials.
+         * Keep the UI in connecting for that expected edge; later failures are
+         * reported as disconnected normally. */
+        if (s_config_disconnect_pending) {
+            s_config_disconnect_pending = false;
+            report_status(AK_WIFI_CONNECTING, s_current_ssid);
+        } else {
+            report_status(AK_WIFI_DISCONNECTED, s_current_ssid);
+        }
         break;
     }
 }
@@ -137,11 +150,13 @@ bool ak_wifi_available(void)
 void ak_wifi_connect(const char *ssid, const char *pass)
 {
     netconn_wifi_info_t info;
+    netmgr_status_e     status_before = NETMGR_LINK_DOWN;
 
     if (ssid == NULL || ssid[0] == '\0') {
         report_status(AK_WIFI_FAILED, "");
         return;
     }
+    (void)netmgr_conn_get(NETCONN_WIFI, NETCONN_CMD_STATUS, &status_before);
     memset(&info, 0, sizeof(info));
     strncpy(info.ssid, ssid, sizeof(info.ssid) - 1);
     if (pass) {
@@ -158,14 +173,34 @@ void ak_wifi_connect(const char *ssid, const char *pass)
         return;
     }
 
+    bool was_linked = status_before == NETMGR_LINK_UP ||
+                      status_before == NETMGR_LINK_UP_SWITH;
+    s_config_disconnect_pending = was_linked;
     report_status(AK_WIFI_CONNECTING, info.ssid);
     rt = netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_SSID_PSWD, &info);
     if (rt != OPRT_OK) {
+        s_config_disconnect_pending = false;
         PR_ERR("ak_wifi: netmgr set SSID_PSWD failed: %d", rt);
         report_status(AK_WIFI_FAILED, s_current_ssid);
+        return;
     }
-    /* On success the connect result arrives asynchronously via the netmgr
-     * status callback (__netmgr_status_cb). */
+
+    /* TuyaOpen's __netconn_wifi_connect() returns immediately when its internal
+     * state is already LINKUP. That leaves the old radio link alive, emits no
+     * new LINK_UP event, and strands Companion at "connecting". Disconnect
+     * after copying the new credentials: the SDK's disconnect event transitions
+     * LINKUP -> READY and schedules a reconnect using the new values. */
+    if (was_linked) {
+        rt = tal_wifi_station_disconnect();
+        if (rt != OPRT_OK) {
+            s_config_disconnect_pending = false;
+            PR_ERR("ak_wifi: disconnect before credential reconnect failed: %d", rt);
+            report_status(AK_WIFI_FAILED, s_current_ssid);
+        }
+    }
+    /* Otherwise the connect result arrives asynchronously via the netmgr status
+     * callback. The deliberate LINK_DOWN above remains "connecting"; the next
+     * real failure is reported as disconnected, and LINK_UP reports connected. */
 }
 
 ak_license_result_t ak_license_write(const char *uuid, const char *authkey)
@@ -179,16 +214,24 @@ ak_license_result_t ak_license_write(const char *uuid, const char *authkey)
         return AK_LICENSE_FAILED;
     }
     PR_NOTICE("ak_license: UUID/AuthKey written to storage");
+    s_license_present_cache = 1;
     return AK_LICENSE_WRITTEN;
 }
 
 bool ak_license_present(void)
 {
+    if (s_license_present_cache >= 0) {
+        return s_license_present_cache == 1;
+    }
+
     tuya_iot_license_t lic = {0};
     if (tuya_authorize_read(&lic) != OPRT_OK) {
+        s_license_present_cache = 0;
         return false;
     }
-    return lic.uuid != NULL && lic.uuid[0] != '\0';
+    bool present = lic.uuid != NULL && lic.uuid[0] != '\0';
+    s_license_present_cache = present ? 1 : 0;
+    return present;
 }
 
 bool ak_license_debug_read(ak_license_debug_info_t *info)

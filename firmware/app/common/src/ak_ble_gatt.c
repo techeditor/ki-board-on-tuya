@@ -29,6 +29,12 @@
 #include "tal_wifi.h"
 #include "tkl_bluetooth.h"
 
+/* NimBLE exposes this public host-state query, but including ble_gap.h in the
+ * same translation unit as Tuya TAL/TKL headers redefines LIST_HEAD and pulls
+ * an unexported tuya_ble_mempool.h. Keep the exact public signature here so the
+ * BLE-specific module can query state without crossing that SDK packaging bug. */
+extern int ble_gap_adv_active(void);
+
 #define BLE_NAME_PREFIX          "Agentic Keyboard-"
 #define BLE_NAME_SUFFIX_HEX_LEN  6U
 #define BLE_NAME_MAX_LEN         ((sizeof(BLE_NAME_PREFIX) - 1U) + BLE_NAME_SUFFIX_HEX_LEN)
@@ -56,6 +62,7 @@ static volatile uint16_t   s_conn_handle;
 static volatile uint16_t   s_notify_handle;
 static volatile uint16_t   s_notify_payload_max;
 static uint32_t            s_last_adv_maintain_ms;
+static bool                s_usb_suspended;
 static volatile bool       s_greet_pending; /* set on subscribe, cleared by take_greet */
 static TAL_BLE_PEER_INFO_T s_peer;
 
@@ -150,15 +157,30 @@ static void prepare_device_name(void)
     s_scan_rsp_len = (uint8_t)(name_len + 2);
 }
 
-static void start_advertising(void)
+static OPERATE_RET start_advertising(void)
 {
+    if (s_usb_suspended) {
+        return OPRT_OK;
+    }
+
     prepare_device_name();
     TAL_BLE_DATA_T adv = {.len = sizeof(s_adv_data), .p_data = s_adv_data};
     TAL_BLE_DATA_T rsp = {.len = s_scan_rsp_len, .p_data = s_scan_rsp};
     /* update works both while another advertiser is active and while stopped;
      * data_set alone may fail to replace Tuya's already-running advertisement. */
-    (void)tal_ble_advertising_data_update(&adv, &rsp);
-    (void)tal_ble_advertising_start(TUYAOS_BLE_DEFAULT_ADV_PARAM);
+    OPERATE_RET rt = tal_ble_advertising_data_update(&adv, &rsp);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+
+    /* The old watchdog called start once per second even while advertising,
+     * making NimBLE return rc=2 (already active) and flooding UART1. Query the
+     * real host state instead of relying on a local flag: Tuya's BLE manager
+     * can stop advertising behind our callback during the ownership handoff. */
+    if (ble_gap_adv_active()) {
+        return OPRT_OK;
+    }
+    return tal_ble_advertising_start(TUYAOS_BLE_DEFAULT_ADV_PARAM);
 }
 
 /* ------------------------------------------------------------ BLE events */
@@ -330,6 +352,7 @@ static void reset_link_state(void)
     s_notify_handle        = INVALID_BLE_HANDLE;
     s_notify_payload_max   = ATT_DEFAULT_PAYLOAD;
     s_last_adv_maintain_ms = 0;
+    s_usb_suspended       = false;
     s_greet_pending        = false;
 }
 
@@ -363,17 +386,42 @@ OPERATE_RET ak_ble_gatt_takeover(void)
     return OPRT_OK;
 }
 
+void ak_ble_gatt_suspend_for_usb(void)
+{
+    s_usb_suspended = true;
+    s_greet_pending = false;
+
+    /* Only stop an AK-owned advertisement. The app never calls this while
+     * provisioning (s_ak_ble_active is false then), so Tuya phone-pairing BLE
+     * remains available. A BLE connection cannot coexist with Companion USB;
+     * Companion itself enforces disconnect-before-switch. */
+    if (!s_connected && ble_gap_adv_active()) {
+        OPERATE_RET rt = tal_ble_advertising_stop();
+        if (rt != OPRT_OK) {
+            PR_WARN("BLE advertisement stop for USB failed: %d", rt);
+        } else {
+            PR_NOTICE("AK BLE advertisement stopped; Companion selected USB");
+        }
+    }
+}
+
 void ak_ble_gatt_maintain(uint32_t now_ms)
 {
-    if (s_connected || (uint32_t)(now_ms - s_last_adv_maintain_ms) < ADV_MAINTAIN_INTERVAL_MS) {
+    if (s_usb_suspended || s_connected ||
+        (uint32_t)(now_ms - s_last_adv_maintain_ms) < ADV_MAINTAIN_INTERVAL_MS) {
         return;
     }
     s_last_adv_maintain_ms = now_ms;
 
-    /* netmgr's Tuya BLE monitor stops advertising once MQTT connects. Reapply
-     * our data and start here; start is intentionally best-effort because an
-     * already-running advertiser is the desired state on some BLE ports. */
-    start_advertising();
+    /* Tuya's BLE manager can stop advertising during its ownership handoff.
+     * Restart only when the host is actually idle; never call start every
+     * second on a live advertiser (which produced the repeated rc=2 logs). */
+    if (!ble_gap_adv_active()) {
+        OPERATE_RET rt = start_advertising();
+        if (rt != OPRT_OK) {
+            PR_WARN("AK BLE advertisement restart failed: %d", rt);
+        }
+    }
 }
 
 int ak_ble_gatt_read(uint8_t *data, uint32_t length)

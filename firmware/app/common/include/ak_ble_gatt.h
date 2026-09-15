@@ -73,9 +73,19 @@ int ak_ble_gatt_write(const void *data, uint32_t length);
 bool ak_ble_gatt_take_greet(void);
 
 /**
- * Keep the Agentic Keyboard-XXXXXX advertisement alive while disconnected. The Tuya cloud
- * netmgr also initializes its BLE manager and may stop advertising after MQTT
- * connects; the product loop calls this periodically to restore AK ownership.
+ * Stop the AK advertisement after Companion has selected and connected USB.
+ * This latches for the current boot: USB/BLE are mutually exclusive and USB
+ * hot-unplug does not automatically switch the board to BLE.
+ *
+ * In provisioning mode AK BLE is not active, so the caller must invoke this
+ * only for an AK-owned BLE backend; Tuya phone-pairing BLE remains untouched.
+ */
+void ak_ble_gatt_suspend_for_usb(void);
+
+/**
+ * Keep the Agentic Keyboard-XXXXXX advertisement alive while disconnected.
+ * Checks the real NimBLE advertising state before starting, so an already-live
+ * advertisement is never restarted every second. No-op after USB suspension.
  */
 void ak_ble_gatt_maintain(uint32_t now_ms);
 

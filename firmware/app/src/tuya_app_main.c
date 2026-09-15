@@ -36,10 +36,11 @@
 #include "tkl_output.h"
 
 #if AK_TRANSPORT_DUAL
-/* DUAL: UART0 + BLE GATT at the same time. Every frame goes to BOTH backends —
- * ak_uart_write always writes UART0; ak_ble_gatt_write NOTIFYs only while a
- * central is subscribed and drops otherwise — so "send on the connected link"
- * falls out naturally. Reads poll both and merge into the one ak_rx assembler. */
+/* DUAL firmware supports UART0 and BLE GATT, while Companion selects exactly
+ * one PC transport. Before selection, UART remains available and AK BLE may
+ * advertise. A USB hello locks this boot to UART and disables AK BLE; a BLE
+ * subscription keeps UART idle. Reads still share one ak_rx assembler, but
+ * Companion's disconnect-before-switch rule prevents source interleaving. */
 #include "ak_ble_gatt.h"
 #include "ak_uart.h"
 #define AK_TRANSPORT_NAME "dual"
@@ -48,6 +49,7 @@
 
 static bool     s_transport_rx_is_usb = false;
 static bool     s_ak_ble_active       = false;
+static bool     s_usb_selected        = false;
 static uint32_t s_ak_ble_retry_at_ms  = 0U;
 
 static bool ak_transport_rx_is_usb(void)
@@ -294,9 +296,11 @@ static void send_system_info_uart(void)
     const char *ble_name  = "";
     const char *ble_state = "disabled";
 #if AK_TRANSPORT_DUAL
-    ak_ble_link_state_t link = ak_ble_gatt_link_state();
-    ble_name                 = ak_ble_gatt_device_name();
-    ble_state                = ak_ble_gatt_link_state_str(link);
+    if (s_ak_ble_active) {
+        ak_ble_link_state_t link = ak_ble_gatt_link_state();
+        ble_name                 = ak_ble_gatt_device_name();
+        ble_state                = ak_ble_gatt_link_state_str(link);
+    }
 #endif
 
     char frame[SYSTEM_INFO_FRAME_BUFFER_SIZE];
@@ -322,6 +326,66 @@ static void send_system_info_uart(void)
 #endif
 }
 
+/* Emit a human-readable transport lifecycle line on UART0. PR_NOTICE goes to
+ * UART1 and is not visible to Companion, so every LCD transport prompt also
+ * gets this JSONL log frame on the trusted diagnostics channel. */
+static void send_log_uart(const char *tag, const char *message)
+{
+#if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
+    char frame[FRAME_BUFFER_SIZE];
+    if (!transport_lock()) {
+        return;
+    }
+    uint32_t sequence = ++s_sequence;
+    int length = ak_proto_log(frame, sizeof(frame), sequence, tag, message);
+    if (length > 0 && length < (int)sizeof(frame)) {
+        int written = ak_uart_write(frame, (uint32_t)length);
+        if (written != length) {
+            PR_WARN("UART0 log short write: %d/%d", written, length);
+        }
+    } else {
+        PR_WARN("UART0 log frame too large: %d", length);
+    }
+    transport_unlock();
+#else
+    (void)tag;
+    (void)message;
+#endif
+}
+
+
+static const char *boot_reset_reason_str(TUYA_RESET_REASON_E reason)
+{
+    switch (reason) {
+    case TUYA_RESET_REASON_POWERON:
+        return "power-on";
+    case TUYA_RESET_REASON_HW_WDOG:
+        return "hardware-watchdog";
+    case TUYA_RESET_REASON_FAULT:
+        return "access-fault";
+    case TUYA_RESET_REASON_SW_WDOG:
+        return "software-watchdog";
+    case TUYA_RESET_REASON_SOFTWARE:
+        return "software-reset";
+    case TUYA_RESET_REASON_DEEPSLEEP:
+        return "deep-sleep";
+    case TUYA_RESET_REASON_EXTERNAL:
+        return "external-reset";
+    case TUYA_RESET_REASON_CRASH:
+        return "software-crash";
+    case TUYA_RESET_REASON_FLASH:
+        return "flash-failure";
+    case TUYA_RESET_REASON_FATAL:
+        return "fatal-error";
+    case TUYA_RESET_REASON_BROWNOUT:
+        return "brownout";
+    case TUYA_RESET_REASON_BOOTLOADER:
+        return "bootloader";
+    case TUYA_RESET_REASON_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
 /* Explicit development diagnostic. Keep the reply on the physically trusted
  * UART0 path even in DUAL builds; never mirror License metadata to BLE. */
 static void send_license_info_uart(void)
@@ -550,6 +614,23 @@ static void on_asr_error(const char *code)
 static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
 {
     char frame[FRAME_BUFFER_SIZE];
+    const char *log_message;
+    switch (state) {
+    case AK_WIFI_CONNECTING:
+        log_message = "WiFi connecting...";
+        break;
+    case AK_WIFI_CONNECTED:
+        log_message = "WiFi connected";
+        break;
+    case AK_WIFI_FAILED:
+        log_message = "Warning: WiFi failed";
+        break;
+    case AK_WIFI_DISCONNECTED:
+    default:
+        log_message = "Warning: WiFi disconnected";
+        break;
+    }
+    send_log_uart("wifi", log_message);
 #if AK_ENABLE_DISPLAY
     s_wifi_connected = (state == AK_WIFI_CONNECTED);
     s_wifi_lcd_state = state;
@@ -673,6 +754,8 @@ static uint16_t ak_status_color(const char *state)
 #define LCD_STATUS_TEXT_BYTES   40U
 #define LCD_SESSION_SELECTED_BG AK_RGB565(0x8EU, 0x48U, 0xFFU)
 #define LCD_AGENT_RESPONSE_BG   AK_RGB565(0x6FU, 0x36U, 0xCCU)
+#define LCD_HEADER_DISCONNECTED_BG AK_RGB565(0xFFU, 0xE6U, 0x99U)
+#define LCD_HEADER_CONNECTED_BG    AK_RGB565(0xB8U, 0xF2U, 0xC2U)
 
 typedef struct {
     char    agent[32];
@@ -727,7 +810,7 @@ static void ak_status_bar_draw(void)
      * device is awaiting Wi-Fi provisioning the user must know to open the Tuya
      * app / companion, so that hint outranks everything else. */
     if (ak_cloud_provisioning()) {
-        text  = "Pairing mode: provision Wi-Fi in app";
+        text  = "Pairing mode: use Tuya app";
         color = AK_COL_ORANGE;
     } else if (s_voice_fallback_active) {
         text  = "Tuya ASR unavailable -> PC ASR";
@@ -896,46 +979,6 @@ static void ak_chat_history_draw(const ak_session_ui_t *session)
         uint16_t bg = lines[i].from_agent ? LCD_AGENT_RESPONSE_BG : AK_COL_BLACK;
         ak_gfx_text_thin(LCD_CHAT_X, y, lines[i].text, AK_COL_WHITE, bg, 1);
     }
-}
-
-/* Compose the connection-status header text + color for the title bar.
- * Header reads "Companion: <state>". USB reflects whether the PC companion has
- * greeted (Connected green / Disconnected orange). BLE reflects the live link
- * state: ADVERTISING (orange) -> CONNECTED (blue) -> LIVE (green).
- * `out` must hold at least 28 bytes. Returns the title-bar color. */
-static uint16_t ak_link_header(char *out, uint32_t out_len)
-{
-#if AK_TRANSPORT_DUAL
-    /* Show both links. Green if EITHER is up (USB greeted or BLE live). */
-    const char *usb = s_pc_connected ? "USB" : "usb";
-    ak_ble_link_state_t bs = ak_ble_gatt_link_state();
-    const char *ble = (bs == AK_BLE_LINK_LIVE) ? "BLE"
-                    : (bs == AK_BLE_LINK_CONNECTED) ? "ble*"
-                    : "adv";
-    (void)snprintf(out, out_len, "Companion: %s | %s", usb, ble);
-    bool up = s_pc_connected || (bs == AK_BLE_LINK_LIVE);
-    return up ? AK_COL_GREEN : AK_COL_ORANGE;
-#elif AK_TRANSPORT_UART
-    if (s_pc_connected) {
-        (void)snprintf(out, out_len, "Companion: USB Connected");
-        return AK_COL_GREEN;
-    }
-    (void)snprintf(out, out_len, "Companion: USB Disconnected");
-    return AK_COL_ORANGE;
-#else
-    switch (ak_ble_gatt_link_state()) {
-    case AK_BLE_LINK_LIVE:
-        (void)snprintf(out, out_len, "Companion: BLE LIVE");
-        return AK_COL_GREEN;
-    case AK_BLE_LINK_CONNECTED:
-        (void)snprintf(out, out_len, "Companion: BLE CONN");
-        return AK_COL_DKBLUE;
-    case AK_BLE_LINK_ADVERTISING:
-    default:
-        (void)snprintf(out, out_len, "Companion: BLE ADV");
-        return AK_COL_ORANGE;
-    }
-#endif
 }
 
 #define LCD_SETTINGS_ROW_X 12U
@@ -1194,8 +1237,6 @@ static void ak_render_status(void)
         return;
     }
     const ak_session_ui_t *session = &s_sessions[s_selected_session];
-    char     link_text[32];
-    uint16_t link_color = ak_link_header(link_text, sizeof(link_text));
     char     line[48];
 
     bool usb_connected = false;
@@ -1204,14 +1245,26 @@ static void ak_render_status(void)
     usb_connected = s_pc_connected;
 #endif
 #if AK_TRANSPORT_BLE_GATT || AK_TRANSPORT_DUAL
+#if AK_TRANSPORT_DUAL
+    ble_connected = s_ak_ble_active &&
+                    (ak_ble_gatt_link_state() != AK_BLE_LINK_ADVERTISING);
+#else
     ble_connected = (ak_ble_gatt_link_state() != AK_BLE_LINK_ADVERTISING);
 #endif
+#endif
 
-    ak_statuslcd_title_links("Ki-board for Kiro Crew", link_color, s_wifi_connected,
-                             usb_connected, ble_connected);
+    bool companion_connected = usb_connected || ble_connected;
+    uint16_t header_color = companion_connected ? LCD_HEADER_CONNECTED_BG
+                                                : LCD_HEADER_DISCONNECTED_BG;
+
+    /* Header contract: fixed title + firmware version + WiFi/USB/BLE icons.
+     * WiFi only updates its icon. Background is pale yellow while neither PC
+     * transport is connected and light green after USB or BLE connects. */
+    ak_statuslcd_title_links("Ki-board for Kiro Crew", header_color,
+                             s_wifi_connected, usb_connected, ble_connected);
     /* 22 title glyphs end at x=182; the thin version fits before WiFi at x=256. */
     ak_gfx_text_thin(186U, 7U, "v" APP_FW_VERSION,
-                     AK_COL_BLACK, link_color, 1);
+                     AK_COL_BLACK, header_color, 1);
     ak_draw_session_sidebar();
 
     (void)snprintf(line, sizeof(line), "Session %s: %s",
@@ -1320,6 +1373,20 @@ static void ak_voice_ui_tick(uint32_t now_ms)
 
 #endif /* AK_ENABLE_DISPLAY */
 
+
+/* Keep user-visible transport feedback consistent: every state edge is shown
+ * in the LCD status bar and emitted as a UART0 JSONL log frame. Header text is
+ * only the persistent link summary, not the event notification. */
+static void ak_transport_feedback(const char *text, uint16_t color)
+{
+    send_log_uart("transport", text);
+#if AK_ENABLE_DISPLAY
+    ak_status_bar_set(text, color);
+    ak_render_status();
+#else
+    (void)color;
+#endif
+}
 /* Reconcile the preferred ASR engine with current Tuya cloud readiness.
  * Transitions are edge-triggered: source frames, LCD redraws, and local audio
  * prompts happen once per state change rather than once per polling interval. */
@@ -1363,15 +1430,13 @@ static void ak_voice_route_update(bool announce)
         bool play_failure_prompt =
             announce && was_initialized && !was_fallback &&
             s_voice_route.fallback;
-        bool play_recovery_prompt =
-            announce && was_initialized && was_fallback &&
-            s_voice_route.effective == AK_VOICE_CLOUD;
 
 #if AK_ENABLE_DISPLAY
         /* Finish the status frame before starting asynchronous MP3 playback.
-         * LCD redraws requested while audio is active are deferred below. */
+         * Recovery audio is already emitted by Tuya's AI mode when it connects;
+         * do not enqueue the same NETWORK_CONNECTED alert a second time. */
         ak_refresh_link_header();
-        if (play_failure_prompt || play_recovery_prompt) {
+        if (play_failure_prompt) {
             s_lcd_audio_guard_until_ms =
                 tal_system_get_millisecond() + 250U;
             /* Redraw once more after playback to recover from any panel-state
@@ -1381,8 +1446,6 @@ static void ak_voice_route_update(bool announce)
 #endif
         if (play_failure_prompt) {
             ak_asr_play_availability_prompt(false);
-        } else if (play_recovery_prompt) {
-            ak_asr_play_availability_prompt(true);
         }
         if (was_initialized && previous != s_voice_route.effective) {
             send_voice_source();
@@ -1402,15 +1465,32 @@ static void on_rx_line(const char *line)
         return;
     }
     if (strcmp(type, "hello") == 0) {
-        send_hello_ack();
         /* Only a greeting received over UART proves the USB companion link is
          * up. In DUAL mode a BLE hello must not light the USB icon. */
-        if (ak_transport_rx_is_usb() && !s_pc_connected) {
-            s_pc_connected = true;
-#if AK_ENABLE_DISPLAY
-            ak_refresh_link_header();
+        if (ak_transport_rx_is_usb()) {
+#if AK_TRANSPORT_DUAL
+            /* Companion chooses exactly one PC transport. A USB hello locks
+             * this boot to USB; stop only AK-owned advertising. During Tuya
+             * provisioning s_ak_ble_active is false, so phone-pairing BLE is
+             * intentionally untouched. USB hot-unplug does not auto-switch. */
+            if (!s_usb_selected) {
+                s_usb_selected = true;
+                if (s_ak_ble_active) {
+                    ak_ble_gatt_suspend_for_usb();
+                    s_ak_ble_active = false;
+                }
+                PR_NOTICE("dual: Companion selected USB; AK BLE disabled for this boot");
+            }
 #endif
+            if (!s_pc_connected) {
+                s_pc_connected = true;
+                ak_transport_feedback("Companion connected via USB", AK_COL_GREEN);
+                send_system_info_uart();
+            }
         }
+        /* Respond only after the selected transport is locked, so a USB hello
+         * is never mirrored to BLE during the transition. */
+        send_hello_ack();
     } else if (strcmp(type, "ping") == 0) {
         send_pong();
     } else if (strcmp(type, "bye") == 0) {
@@ -1419,9 +1499,8 @@ static void on_rx_line(const char *line)
          * link is going down -> flip the header to "USB Disconnected". */
         if (ak_transport_rx_is_usb() && s_pc_connected) {
             s_pc_connected = false;
-#if AK_ENABLE_DISPLAY
-            ak_refresh_link_header();
-#endif
+            ak_transport_feedback("USB disconnected; reconnect USB", AK_COL_ORANGE);
+            send_system_info_uart();
         }
     } else if (strcmp(type, "config") == 0) {
         uint32_t seq = 0;
@@ -1642,6 +1721,17 @@ static void user_main(void)
     if (rt != OPRT_OK) {
         restart_after_fatal_init("transport TX mutex", rt);
     }
+    {
+        char *detail = NULL;
+        TUYA_RESET_REASON_E reason = tal_system_get_reset_reason(&detail);
+        char message[80];
+        (void)snprintf(message, sizeof(message), "Boot reset: %s (%d)%s%s",
+                       boot_reset_reason_str(reason), (int)reason,
+                       detail != NULL ? " - " : "",
+                       detail != NULL ? detail : "");
+        send_log_uart("boot", message);
+        PR_NOTICE("%s", message);
+    }
     ak_dclick_init(&s_ptt_dclick);
     ak_voice_route_init(&s_voice_route);
 #if AK_ENABLE_DISPLAY
@@ -1682,10 +1772,12 @@ static void user_main(void)
     ak_render_status();
 #endif
 #if AK_TRANSPORT_DUAL
-    /* The T5 exposes one global BLE callback set. While unactivated, leave it
-     * with Tuya BLE/SoftAP provisioning; UART0 remains available to Companion.
-     * Once activation succeeds the app loop takes over the already-created GATT
-     * service without a second tal_ble_bt_init(). */
+    /* The T5 exposes one global BLE callback set. While the Tuya device is
+     * unactivated (the SDK's provisioning state), leave BLE with Tuya for the
+     * phone app; UART0 remains available to Companion. Once provisioning has
+     * completed, start AK BLE so Companion can choose BLE. If Companion chooses
+     * USB, its hello frame stops AK advertising and locks this boot to USB.
+     * Wi-Fi/MQTT availability is deliberately not part of this decision. */
     OPERATE_RET ble_rt = OPRT_OK;
 #if AK_ASR_BOARD_CLOUD
     if (cloud_rt == OPRT_OK && ak_cloud_network_ready() &&
@@ -1704,10 +1796,8 @@ static void user_main(void)
 #endif
     if (ble_rt != OPRT_OK) {
         PR_ERR("dual: delayed AK BLE setup failed: %d (UART remains available)", ble_rt);
-#if AK_ENABLE_DISPLAY
-        ak_status_bar_set("Warning: BLE init failed", AK_COL_ORANGE);
-        ak_render_status();
-#endif
+        ak_transport_feedback("Warning: BLE init failed", AK_COL_ORANGE);
+        send_system_info_uart();
     }
 #endif
     if (cloud_rt != OPRT_OK) {
@@ -1806,31 +1896,36 @@ static void user_main(void)
             ak_status_bar_set_wifi(wifi_state);
             ak_refresh_link_header();
         }
-        /* Redraw the status bar when pairing mode toggles so the "Pairing mode"
-         * hint appears the moment BIND_START/RESET fires and clears on
-         * activation, without waiting for another status event. */
+#endif
+
+        /* Pairing is an SDK lifecycle state, not merely an LCD concern. Report
+         * each edge to UART0 even in a display-disabled build; the common
+         * feedback helper updates the status bar when display is present. */
         {
             static bool s_provisioning_shown = false;
             bool        provisioning = ak_cloud_provisioning();
             if (provisioning != s_provisioning_shown) {
                 s_provisioning_shown = provisioning;
-                ak_render_status();
+                ak_transport_feedback(
+                    provisioning ? "Pairing mode: use Tuya app"
+                                 : "Provisioning complete",
+                    provisioning ? AK_COL_ORANGE : AK_COL_GREEN);
+                send_system_info_uart();
             }
         }
-#endif
 
 #if AK_TRANSPORT_DUAL && AK_ASR_BOARD_CLOUD
-        if (!s_ak_ble_active && ak_cloud_network_ready() &&
-            ak_cloud_activated() &&
+        if (!s_ak_ble_active && !s_usb_selected &&
+            ak_cloud_network_ready() && ak_cloud_activated() &&
             (s_ak_ble_retry_at_ms == 0U ||
              (int32_t)(now - s_ak_ble_retry_at_ms) >= 0)) {
             OPERATE_RET takeover_rt = ak_ble_gatt_takeover();
             if (takeover_rt == OPRT_OK) {
                 s_ak_ble_active = true;
-                PR_NOTICE("dual: Tuya activation complete; AK BLE transport active");
+                PR_NOTICE("dual: provisioning complete; AK BLE available for Companion");
             } else {
                 s_ak_ble_retry_at_ms = now + 1000U;
-                PR_WARN("dual: AK BLE takeover after activation failed: %d; retrying in 1s",
+                PR_WARN("dual: AK BLE takeover after provisioning failed: %d; retrying in 1s",
                         takeover_rt);
             }
         }
@@ -1848,17 +1943,31 @@ static void user_main(void)
             if (ak_ble_gatt_take_greet()) {
                 send_hello_ack();
             }
-            /* Report BLE advertising/connected/live transitions on UART0 and
-             * refresh the LCD header when present. */
+            /* Report every BLE advertising/connected/live edge through both
+             * LCD status bar and UART0 log, then emit the structured snapshot. */
             {
                 static ak_ble_link_state_t s_last_link = (ak_ble_link_state_t)-1;
                 ak_ble_link_state_t        link = ak_ble_gatt_link_state();
                 if (link != s_last_link) {
+                    ak_ble_link_state_t previous = s_last_link;
                     s_last_link = link;
+                    switch (link) {
+                    case AK_BLE_LINK_LIVE:
+                        ak_transport_feedback("Companion connected via BLE", AK_COL_GREEN);
+                        break;
+                    case AK_BLE_LINK_CONNECTED:
+                        ak_transport_feedback("BLE connected; subscribing...", AK_COL_DKBLUE);
+                        break;
+                    case AK_BLE_LINK_ADVERTISING:
+                    default:
+                        ak_transport_feedback(
+                            previous == (ak_ble_link_state_t)-1
+                                ? "BLE advertising for Companion"
+                                : "BLE disconnected; advertising",
+                            AK_COL_ORANGE);
+                        break;
+                    }
                     send_system_info_uart();
-#if AK_ENABLE_DISPLAY
-                    ak_refresh_link_header();
-#endif
                 }
             }
         }
@@ -1884,9 +1993,8 @@ static void user_main(void)
             (uint32_t)(now - s_usb_last_rx_ms) >= USB_LINK_TIMEOUT_MS) {
             s_pc_connected = false;
             PR_NOTICE("USB companion timed out; marking link disconnected");
-#if AK_ENABLE_DISPLAY
-            ak_refresh_link_header();
-#endif
+            ak_transport_feedback("USB timed out; reconnect USB", AK_COL_ORANGE);
+            send_system_info_uart();
         }
 #endif
 
