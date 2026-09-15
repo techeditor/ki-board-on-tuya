@@ -859,14 +859,14 @@ function App() {
               </>
             ) : (
               <>
-                <label>AK-KB device</label>
+                <label>Agentic Keyboard device</label>
                 <select value={selectedBle} onChange={(event) => setSelectedBle(event.target.value)}>
                   {bleDevices.length === 0 ? (
                     <option value="">No devices — press Scan</option>
                   ) : (
                     bleDevices.map((dev) => (
                       <option key={dev.id} value={dev.id}>
-                        {dev.name || "AK-KB"} · {dev.id}
+                        {dev.name || "Agentic Keyboard"} · {dev.id}
                       </option>
                     ))
                   )}
@@ -885,9 +885,9 @@ function App() {
                   <code>0xFD50</code> (notify <code>0x0002</code> board→PC, write
                   <code> 0x0001</code> PC→board); older builds use{" "}
                   <code>0x1910</code>/<code>0x2B10</code>/<code>0x2B11</code> and the
-                  companion accepts either. Scan (~4s) finds boards advertising{" "}
-                  <code>AK-KB</code>; the companion greets only after notify
-                  subscription is live.
+                  companion accepts either. Scan (~4s) finds current boards advertising{" "}
+                  <code>Agentic Keyboard-XXXXXX</code> and legacy boards advertising{" "}
+                  <code>AK-KB</code>; the companion greets only after notify subscription is live.
                 </p>
               </>
             )}
