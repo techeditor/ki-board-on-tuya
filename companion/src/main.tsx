@@ -171,6 +171,8 @@ function App() {
   const [licStatus, setLicStatus] = useState("");
   const [licBusy, setLicBusy] = useState(false);
   const [licInfo, setLicInfo] = useState<LicenseInfo | null>(null);
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairingStatus, setPairingStatus] = useState("");
   const [deviceSettings, setDeviceSettings] = useState<DeviceSettings>({
     volume: defaultStatus.device_volume,
     brightness: defaultStatus.device_brightness,
@@ -415,6 +417,37 @@ function App() {
       setUiError(error instanceof Error ? error.message : String(error));
     } finally {
       setLicBusy(false);
+    }
+  }
+
+  // One-click "enter pairing": clears the board's Wi-Fi + cloud binding and
+  // reboots it into provisioning. The License (UUID/AuthKey) is preserved.
+  // Destructive + reboots the board, so require an explicit confirmation and
+  // gate on USB (matches wifi/license).
+  async function enterPairing() {
+    if (!usbProvisioningAvailable) {
+      setUiError("Connect the board over USB before entering pairing mode.");
+      return;
+    }
+    const ok = window.confirm(
+      "Enter pairing mode?\n\nThis clears the keyboard's saved Wi-Fi and cloud " +
+        "binding and reboots it into provisioning. The device License " +
+        "(UUID/AuthKey) is kept. You will need to re-provision Wi-Fi afterwards.",
+    );
+    if (!ok) {
+      return;
+    }
+    setPairingBusy(true);
+    try {
+      setUiError("");
+      setPairingStatus("sending…");
+      await invoke("enter_pairing");
+      setPairingStatus("sent — keyboard will reboot into pairing mode");
+    } catch (error) {
+      setPairingStatus("");
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPairingBusy(false);
     }
   }
 
@@ -970,6 +1003,26 @@ function App() {
             <p className={`hint ${usbProvisioningAvailable ? "good-text" : "warn-text"}`}>
               USB connection required. WiFi credentials cannot be sent over BLE. The board joins
               its 2.4GHz AP using the cloud-ASR firmware profile.
+            </p>
+
+            <label style={{ marginTop: 14 }}>Re-enter pairing mode</label>
+            <div className="actions" style={{ marginTop: 6 }}>
+              <button
+                className="secondary"
+                disabled={!usbProvisioningAvailable || pairingBusy}
+                onClick={() => enterPairing()}
+              >
+                Enter pairing mode
+              </button>
+            </div>
+            <div className="lcd" style={{ marginTop: 6 }}>
+              <span>PAIRING</span>
+              <strong>{pairingStatus || "-- (idle)"}</strong>
+            </div>
+            <p className={`hint ${usbProvisioningAvailable ? "good-text" : "warn-text"}`}>
+              USB connection required. Clears the board's saved WiFi and cloud binding and reboots
+              it into provisioning so you can re-provision WiFi. The device license (UUID/AuthKey)
+              is preserved. Same effect as three fast power cycles.
             </p>
 
             <label style={{ marginTop: 14 }}>Device license (UUID / AuthKey)</label>

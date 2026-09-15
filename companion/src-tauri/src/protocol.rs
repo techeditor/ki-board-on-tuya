@@ -140,6 +140,16 @@ pub fn license_read_payload() -> Value {
     })
 }
 
+/// PC -> board: clear Wi-Fi/cloud binding and reboot into pairing mode
+/// ("enter pairing" one-click). The board's License (UUID/AuthKey) is
+/// preserved. Destructive, so the board only accepts it over USB/UART.
+pub fn reset_netcfg_payload() -> Value {
+    serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "type": "reset_netcfg"
+    })
+}
+
 /// PC -> board: acknowledge a board event by its sequence number.
 pub fn ack_payload(seq: u64) -> Value {
     serde_json::json!({

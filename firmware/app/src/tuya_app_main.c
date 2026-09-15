@@ -720,8 +720,22 @@ static void ak_status_bar_set_wifi(ak_wifi_state_t state)
 
 static void ak_status_bar_draw(void)
 {
-    const char *text  = s_voice_fallback_active ? "Tuya ASR unavailable -> PC ASR" : s_status_bar_text;
-    uint16_t    color = s_voice_fallback_active ? AK_COL_ORANGE : s_status_bar_color;
+    const char *text;
+    uint16_t    color;
+
+    /* Priority: pairing mode > voice fallback > last status message. When the
+     * device is awaiting Wi-Fi provisioning the user must know to open the Tuya
+     * app / companion, so that hint outranks everything else. */
+    if (ak_cloud_provisioning()) {
+        text  = "Pairing mode: provision Wi-Fi in app";
+        color = AK_COL_ORANGE;
+    } else if (s_voice_fallback_active) {
+        text  = "Tuya ASR unavailable -> PC ASR";
+        color = AK_COL_ORANGE;
+    } else {
+        text  = s_status_bar_text;
+        color = s_status_bar_color;
+    }
 
     ak_gfx_fill_rect(0U, LCD_STATUS_BAR_Y, AK_STATUSLCD_W,
                      LCD_STATUS_BAR_H, AK_COL_BLACK);
@@ -1548,6 +1562,26 @@ static void on_rx_line(const char *line)
         ak_json_uint(line, "seq", &seq);
         send_license_info_uart();
         send_ack(seq);
+    } else if (strcmp(type, "reset_netcfg") == 0) {
+        /* Companion "enter pairing" — clear Wi-Fi/cloud binding and reboot into
+         * provisioning. Destructive, so it may only enter through the physically
+         * trusted USB/UART transport (same gate as wifi/license). The License
+         * (UUID/AuthKey) is preserved; only Wi-Fi + cloud binding are cleared. */
+        if (!ak_transport_rx_is_usb()) {
+            PR_WARN("reset_netcfg rejected: USB transport required");
+            return;
+        }
+        uint32_t seq = 0;
+        ak_json_uint(line, "seq", &seq);
+        /* ACK first so the companion sees the request was accepted before the
+         * device reboots and the link drops. */
+        send_ack(seq);
+        OPERATE_RET rr = ak_cloud_enter_pairing();
+        if (rr != OPRT_OK) {
+            PR_WARN("reset_netcfg: enter pairing failed or unsupported: %d", rr);
+        } else {
+            PR_NOTICE("reset_netcfg: entering pairing mode (reboot follows)");
+        }
     } else if (strcmp(type, "display") == 0) {
         uint32_t chat_slot = 0U;
         char     agent[32] = "";
@@ -1771,6 +1805,17 @@ static void user_main(void)
             ak_wifi_state_t wifi_state = s_wifi_lcd_state;
             ak_status_bar_set_wifi(wifi_state);
             ak_refresh_link_header();
+        }
+        /* Redraw the status bar when pairing mode toggles so the "Pairing mode"
+         * hint appears the moment BIND_START/RESET fires and clears on
+         * activation, without waiting for another status event. */
+        {
+            static bool s_provisioning_shown = false;
+            bool        provisioning = ak_cloud_provisioning();
+            if (provisioning != s_provisioning_shown) {
+                s_provisioning_shown = provisioning;
+                ak_render_status();
+            }
         }
 #endif
 

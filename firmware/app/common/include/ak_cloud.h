@@ -41,6 +41,19 @@ bool ak_cloud_network_ready(void);
 /** True after valid Tuya activation data is loaded or a provisioning flow activates the device. */
 bool ak_cloud_activated(void);
 
+/** True while the device is awaiting Wi-Fi provisioning (TUYA_EVENT_BIND_START
+ *  seen, not yet activated). The app uses this to show a "pairing mode" hint on
+ *  the LCD status bar. The stub returns false. */
+bool ak_cloud_provisioning(void);
+
+/** Clear Wi-Fi/cloud binding and reboot into pairing mode (companion-triggered
+ *  "enter pairing" — the software equivalent of three fast power cycles). The
+ *  License (UUID/AuthKey) is preserved. Returns OPRT_OK when the reset was
+ *  requested (a reboot follows asynchronously via TUYA_EVENT_RESET_COMPLETE).
+ *  The stub returns OPRT_NOT_SUPPORTED because a non-cloud profile has no
+ *  provisioning to reset. */
+OPERATE_RET ak_cloud_enter_pairing(void);
+
 /** True only when the real backend is compiled in (AK_ASR_BOARD_CLOUD=1).
  *  The stub returns false so callers can log "cloud off". */
 bool ak_cloud_compiled(void);

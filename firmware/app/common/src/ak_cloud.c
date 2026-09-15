@@ -54,6 +54,7 @@ static THREAD_HANDLE      s_iot_thread      = NULL;
 static bool               s_iot_ready       = false;
 static bool               s_netmgr_ready    = false;
 static volatile bool      s_cloud_activated = false;
+static volatile bool      s_provisioning    = false;
 
 /* netmgr link state -> tuya_iot network_check hook. */
 static bool __network_check(void)
@@ -75,6 +76,7 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
     switch (event->id) {
     case TUYA_EVENT_BIND_START:
         s_cloud_activated = false;
+        s_provisioning    = true;
         PR_NOTICE("cloud: bind start (device awaiting Wi-Fi provisioning)");
 #if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
         /* Networking prompt tone (联网提示音) — same as FP-3's BIND_START. */
@@ -83,6 +85,7 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
         break;
     case TUYA_EVENT_ACTIVATE_SUCCESSED:
         s_cloud_activated = true;
+        s_provisioning    = false;
         PR_NOTICE("cloud: activation succeeded; AK BLE takeover is now allowed");
         break;
     case TUYA_EVENT_MQTT_CONNECTED:
@@ -99,8 +102,10 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
         break;
     case TUYA_EVENT_RESET:
         /* App-initiated unbind / factory reset requested (matches FP-3). Device
-         * application data is cleared by the SDK; nothing extra to persist here. */
+         * application data is cleared by the SDK; nothing extra to persist here.
+         * Show the pairing hint immediately — the reboot into SoftAP follows. */
         s_cloud_activated = false;
+        s_provisioning    = true;
         PR_NOTICE("cloud: device reset requested (type=%d)", (int)event->value.asInteger);
         break;
     case TUYA_EVENT_RESET_COMPLETE:
@@ -298,6 +303,26 @@ bool ak_cloud_activated(void)
     return s_cloud_activated;
 }
 
+bool ak_cloud_provisioning(void)
+{
+    return s_provisioning;
+}
+
+OPERATE_RET ak_cloud_enter_pairing(void)
+{
+    if (!s_iot_ready) {
+        PR_ERR("cloud: enter_pairing called before a successful ak_cloud_init");
+        return OPRT_COM_ERROR;
+    }
+    /* Clear Wi-Fi/cloud binding and reboot into pairing. The License
+     * (UUID/AuthKey) lives in separate authorization storage and is preserved.
+     * The SDK fires TUYA_EVENT_RESET then TUYA_EVENT_RESET_COMPLETE, and our
+     * handler reboots on complete — the same path as three fast power cycles. */
+    s_provisioning = true;
+    PR_NOTICE("cloud: companion requested enter-pairing; clearing Wi-Fi/cloud binding (License preserved)");
+    return tuya_iot_reset(&s_ai_client);
+}
+
 bool ak_cloud_compiled(void)
 {
     return true;
@@ -323,6 +348,17 @@ bool ak_cloud_network_ready(void)
 bool ak_cloud_activated(void)
 {
     return false;
+}
+
+bool ak_cloud_provisioning(void)
+{
+    return false;
+}
+
+OPERATE_RET ak_cloud_enter_pairing(void)
+{
+    /* No cloud/provisioning in this profile — nothing to reset. */
+    return OPRT_NOT_SUPPORTED;
 }
 
 bool ak_cloud_compiled(void)

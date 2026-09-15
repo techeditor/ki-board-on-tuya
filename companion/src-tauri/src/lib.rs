@@ -656,6 +656,16 @@ mod app {
         write_board_usb_only(state.inner(), &protocol::license_read_payload())
     }
 
+    /// One-click "enter pairing": clear the board's Wi-Fi/cloud binding and
+    /// reboot it into provisioning. The board's License (UUID/AuthKey) is
+    /// preserved — only Wi-Fi credentials and cloud binding are cleared. This is
+    /// destructive (the board reboots and the link drops), so it travels only
+    /// over the physically trusted USB/UART transport; the UI must confirm first.
+    #[tauri::command]
+    fn enter_pairing(state: State<Shared>) -> Result<(), String> {
+        write_board_usb_only(state.inner(), &protocol::reset_netcfg_payload())
+    }
+
     /// FP-5: choose which ASR handles a board voice event. `cloud` = board mic +
     /// Tuya cloud ASR (FP-3); `system` = activate the PC's own dictation here.
     /// Mirrors the choice to the board via the config frame so the LCD can show it.
@@ -1390,6 +1400,7 @@ mod app {
                 send_wifi,
                 send_license,
                 read_license,
+                enter_pairing,
                 set_voice_source,
                 kc_bind_window,
                 kc_send_text,

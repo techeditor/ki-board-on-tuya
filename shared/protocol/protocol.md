@@ -215,6 +215,19 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 - UUID 完整返回；AuthKey 永远只返回最后四个字符。Companion 不持久化返回值。
 - 该命令由 `CONFIG_AK_LICENSE_DEBUG_READ=y` 显式启用，发布 profile 默认关闭。
 
+### reset_netcfg（一键进入配网，仅 USB）
+
+```json
+{"v":1,"type":"reset_netcfg"}
+```
+
+- Companion 的「Enter pairing mode」按钮发送该命令，等效于设备端连续三次快速上电重启。
+- 仅允许通过物理 USB/UART 发送；AK 固件对 BLE 来源拒绝（与 wifi/license 相同门控）。
+- AK 先回 `ack`（在重启断链前让 Companion 确认已受理），再调 `tuya_iot_reset()`：
+  清除 Wi-Fi 凭据 + 云绑定/激活，**保留 License（UUID/AuthKey）**，随后重启进入 Tuya SoftAP/BLE 配网。
+- 仅在 cloud profile（`AK_ASR_BOARD_CLOUD=1`）生效；非 cloud profile 为 stub，返回 `OPRT_NOT_SUPPORTED` 且不动作。
+- 进入配网后，LCD 底部状态栏显示 `Pairing mode: provision Wi-Fi in app`（橙色）。
+
 ### ack
 
 ```json
