@@ -1132,6 +1132,8 @@ mod app {
             ControlAction::Chord(c) => format!("chord {c:?}"),
             ControlAction::SendText(t) => format!("send-text {t:?}"),
             ControlAction::Compose(t) => format!("compose {t:?}"),
+            ControlAction::StartDeleteWords => "start-delete-words".to_string(),
+            ControlAction::StopDeleteWords => "stop-delete-words".to_string(),
             ControlAction::None => "none".to_string(),
         }
     }

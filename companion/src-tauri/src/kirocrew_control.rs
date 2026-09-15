@@ -101,6 +101,10 @@ pub enum ControlAction {
     /// Focus the chat composer (Alt+Enter), then type the text — no Enter, so
     /// the user reviews and submits with K5. This is the K4 voice path.
     Compose(String),
+    /// Start repeating Ctrl+Backspace while joystick-left remains held.
+    StartDeleteWords,
+    /// Stop a previously started continuous word deletion.
+    StopDeleteWords,
     /// Nothing to do for this event (e.g. a key *up*, a ping, an ack).
     None,
 }
@@ -154,7 +158,8 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 /// | `key k4` (down/long)           | `None` — K4 is push-to-talk; text arrives later as `macro` |
 /// | `key k5` (down/long)           | `Chord(Enter)` — submit / continue  |
 /// | `nav left` `Up` (< 800 ms)  | `Chord(Backspace)` — delete one character |
-/// | `nav left` `Long`           | `Chord(DeleteWord)` — Ctrl+Backspace     |
+/// | `nav left` `Long`           | `StartDeleteWords` — repeat Ctrl+Backspace |
+/// | `nav left` `Up` (>= 800 ms) | `StopDeleteWords` — stop repeat            |
 /// | `nav up` `Up` (< 800 ms)    | `Chord(Up)` — move to previous line      |
 /// | `nav up` `Long`             | `Chord(ClearInput)` — Ctrl+A, Backspace  |
 /// | `nav right` `Down`          | `Chord(NextChat)` — Alt+Right            |
@@ -225,7 +230,8 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
             (NavDir::Left, KeyAction::Up) if payload.held_ms < BOARD_LONG_PRESS_MS => {
                 ControlAction::Chord(Chord::Backspace)
             }
-            (NavDir::Left, KeyAction::Long) => ControlAction::Chord(Chord::DeleteWord),
+            (NavDir::Left, KeyAction::Long) => ControlAction::StartDeleteWords,
+            (NavDir::Left, KeyAction::Up) => ControlAction::StopDeleteWords,
             (NavDir::Up, KeyAction::Up) if payload.held_ms < BOARD_LONG_PRESS_MS => {
                 ControlAction::Chord(Chord::Up)
             }
@@ -269,6 +275,12 @@ pub const DEFAULT_TITLE_CANDIDATES: &[&str] = &["Kiro Crew", "Agentic"];
 mod windows_impl {
     use super::{Chord, DEFAULT_TITLE_CANDIDATES};
     use std::mem::size_of;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
 
     // --- Minimal Win32 bindings (raw FFI, mirrors inject.rs — no `windows` crate). ---
     type HWND = isize;
@@ -347,6 +359,9 @@ mod windows_impl {
     const SW_SHOW: i32 = 5;
     // ASFW_ANY — allow any process to set the foreground window.
     const ASFW_ANY: u32 = 0xFFFF_FFFF;
+    const DELETE_REPEAT_INITIAL_DELAY: Duration = Duration::from_millis(280);
+    const DELETE_REPEAT_INTERVAL: Duration = Duration::from_millis(120);
+    const DELETE_REPEAT_MAX_DURATION: Duration = Duration::from_secs(10);
 
     // --- SendInput helpers (same shape as inject.rs). ---
 
@@ -538,10 +553,16 @@ mod windows_impl {
         }
     }
 
+    struct DeleteRepeat {
+        stop: Arc<AtomicBool>,
+        worker: JoinHandle<()>,
+    }
+
     /// Windows controller: focuses a Kiro Crew window then injects.
     pub struct WinController {
         hwnd: Option<HWND>,
         title_match: String,
+        delete_repeat: Option<DeleteRepeat>,
     }
 
     impl WinController {
@@ -549,6 +570,7 @@ mod windows_impl {
             Self {
                 hwnd: None,
                 title_match: title_match.unwrap_or_default(),
+                delete_repeat: None,
             }
         }
 
@@ -658,6 +680,56 @@ mod windows_impl {
             self.focus()?;
             inject_chord(keys)
         }
+
+        pub fn start_delete_words(&mut self) -> Result<(), String> {
+            self.stop_delete_words()?;
+            self.focus()?;
+            let hwnd = self.hwnd.ok_or("control: target window unavailable")?;
+
+            // Delete one word immediately when LONG arrives, then repeat after
+            // a short typematic delay while the same target remains foreground.
+            ctrl_tap(VK_BACK)?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = Arc::clone(&stop);
+            let worker = thread::Builder::new()
+                .name("ak-delete-words".to_string())
+                .spawn(move || {
+                    let started = Instant::now();
+                    thread::sleep(DELETE_REPEAT_INITIAL_DELAY);
+                    while !worker_stop.load(Ordering::Acquire)
+                        && started.elapsed() < DELETE_REPEAT_MAX_DURATION
+                    {
+                        // Never continue injecting if focus moved to another app.
+                        if unsafe { GetForegroundWindow() } != hwnd {
+                            break;
+                        }
+                        if ctrl_tap(VK_BACK).is_err() {
+                            break;
+                        }
+                        thread::sleep(DELETE_REPEAT_INTERVAL);
+                    }
+                })
+                .map_err(|error| format!("control: start delete repeat: {error}"))?;
+            self.delete_repeat = Some(DeleteRepeat { stop, worker });
+            Ok(())
+        }
+
+        pub fn stop_delete_words(&mut self) -> Result<(), String> {
+            if let Some(repeat) = self.delete_repeat.take() {
+                repeat.stop.store(true, Ordering::Release);
+                repeat
+                    .worker
+                    .join()
+                    .map_err(|_| "control: delete repeat thread panicked".to_string())?;
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for WinController {
+        fn drop(&mut self) {
+            let _ = self.stop_delete_words();
+        }
     }
 
     // Silence dead-code warnings for the Win32 bindings kept for the window
@@ -715,6 +787,14 @@ mod stub_impl {
         pub fn chord(&mut self, _keys: Chord) -> Result<(), String> {
             Err("control: windows only".to_string())
         }
+
+        pub fn start_delete_words(&mut self) -> Result<(), String> {
+            Err("control: windows only".to_string())
+        }
+
+        pub fn stop_delete_words(&mut self) -> Result<(), String> {
+            Ok(())
+        }
     }
 }
 
@@ -770,6 +850,16 @@ impl KiroCrewController {
         self.backend.chord(keys)
     }
 
+    /// Delete one word immediately, then keep deleting while Left remains held.
+    pub fn start_delete_words(&mut self) -> Result<(), String> {
+        self.backend.start_delete_words()
+    }
+
+    /// Stop continuous word deletion. Safe when no repeat is active.
+    pub fn stop_delete_words(&mut self) -> Result<(), String> {
+        self.backend.stop_delete_words()
+    }
+
     /// Execute a routed [`ControlAction`] against the window. `None` is a no-op.
     pub fn apply(&mut self, action: &ControlAction) -> Result<(), String> {
         match action {
@@ -777,6 +867,8 @@ impl KiroCrewController {
             ControlAction::Chord(c) => self.chord(*c),
             ControlAction::SendText(t) => self.send_text(t),
             ControlAction::Compose(t) => self.compose(t),
+            ControlAction::StartDeleteWords => self.start_delete_words(),
+            ControlAction::StopDeleteWords => self.stop_delete_words(),
             ControlAction::None => Ok(()),
         }
     }
@@ -998,18 +1090,18 @@ mod tests {
     }
 
     #[test]
-    fn nav_left_long_deletes_one_word_without_release_repeat() {
+    fn nav_left_long_starts_repeat_and_release_stops_it() {
         let ctx = ControlCtx::default();
         assert_eq!(
             route_input(
                 &nav_held(NavDir::Left, KeyAction::Long, BOARD_LONG_PRESS_MS),
                 &ctx
             ),
-            ControlAction::Chord(Chord::DeleteWord)
+            ControlAction::StartDeleteWords
         );
         assert_eq!(
             route_input(&nav_held(NavDir::Left, KeyAction::Up, 1200), &ctx),
-            ControlAction::None
+            ControlAction::StopDeleteWords
         );
     }
 
@@ -1121,8 +1213,10 @@ mod tests {
         assert!(c.send_text("x").is_err());
         assert!(c.command_bar("cmd").is_err());
         assert!(c.chord(Chord::Enter).is_err());
-        // apply() delegates: None is Ok, others Err on the stub.
+        // apply() delegates: no-op/stop are safe; injection is Windows-only.
         assert!(c.apply(&ControlAction::None).is_ok());
+        assert!(c.apply(&ControlAction::StopDeleteWords).is_ok());
+        assert!(c.apply(&ControlAction::StartDeleteWords).is_err());
         assert!(c.apply(&ControlAction::Chord(Chord::Up)).is_err());
     }
 }
