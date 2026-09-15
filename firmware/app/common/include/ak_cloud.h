@@ -25,6 +25,18 @@
 
 #include "tuya_cloud_types.h"
 
+/** Activation lifecycle callback. `state` is a stable protocol string;
+ *  `qr_url` is non-empty only when SmartLife should scan the official binding
+ *  URL. The callback can run on the IoT/MQTT thread and must return quickly. */
+typedef void (*ak_cloud_activation_cb)(const char *state, const char *qr_url);
+
+/** Register the product application's activation lifecycle callback. */
+void ak_cloud_set_activation_callback(ak_cloud_activation_cb callback);
+
+/** Latest activation state and QR URL for a Companion reconnect snapshot. */
+const char *ak_cloud_activation_state(void);
+const char *ak_cloud_binding_qr_url(void);
+
 /** Bring up the Tuya IoT client + netmgr (no-op in the stub). MUST be called
  *  BEFORE ak_asr_init() so ai_chat_init has a valid IoT/AI context. Returns
  *  OPRT_OK in the stub. */

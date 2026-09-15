@@ -11,6 +11,8 @@
 
 #include "ak_features.h"
 #include "ak_reset_netcfg.h"
+
+#include <stdio.h>
 #include "tal_api.h"
 
 #if AK_ASR_BOARD_CLOUD
@@ -55,6 +57,35 @@ static bool               s_iot_ready       = false;
 static bool               s_netmgr_ready    = false;
 static volatile bool      s_cloud_activated = false;
 static volatile bool      s_provisioning    = false;
+static ak_cloud_activation_cb s_activation_callback = NULL;
+static char               s_binding_qr_url[160];
+static const char        *s_activation_state = "unknown";
+
+void ak_cloud_set_activation_callback(ak_cloud_activation_cb callback)
+{
+    s_activation_callback = callback;
+}
+
+static void notify_activation(const char *state, const char *qr_url)
+{
+    s_activation_state = state == NULL ? "unknown" : state;
+    if (qr_url == NULL || qr_url[0] == '\0') {
+        s_binding_qr_url[0] = '\0';
+    }
+    if (s_activation_callback != NULL) {
+        s_activation_callback(s_activation_state, qr_url == NULL ? "" : qr_url);
+    }
+}
+
+const char *ak_cloud_activation_state(void)
+{
+    return s_activation_state;
+}
+
+const char *ak_cloud_binding_qr_url(void)
+{
+    return s_binding_qr_url;
+}
 
 /* netmgr link state -> tuya_iot network_check hook. */
 static bool __network_check(void)
@@ -77,24 +108,43 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
     case TUYA_EVENT_BIND_START:
         s_cloud_activated = false;
         s_provisioning    = true;
+        notify_activation("pairing", "");
         PR_NOTICE("cloud: bind start (device awaiting Wi-Fi provisioning)");
 #if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
         /* Networking prompt tone (联网提示音) — same as FP-3's BIND_START. */
         ai_audio_player_alert(AI_AUDIO_ALERT_NETWORK_CFG);
 #endif
         break;
+    case TUYA_EVENT_DIRECT_MQTT_CONNECTED:
+        /* Official TuyaOpen MQTT-bind flow: Companion renders this URL as a QR
+         * code, then SmartLife scanning delivers region/token/regist_key over
+         * direct MQTT. Never include AuthKey in the URL or UART0 frame. */
+        (void)snprintf(s_binding_qr_url, sizeof(s_binding_qr_url),
+                       "https://smartapp.tuya.com/s/p?p=%s&uuid=%s&v=2.0",
+                       TUYA_PRODUCT_ID,
+                       s_license.uuid == NULL ? "" : s_license.uuid);
+        notify_activation("scan_qr", s_binding_qr_url);
+        PR_NOTICE("cloud: direct MQTT ready; waiting for SmartLife QR scan");
+        break;
+    case TUYA_EVENT_BIND_TOKEN_ON:
+        notify_activation("token_received", "");
+        PR_NOTICE("cloud: binding token received; activating device");
+        break;
     case TUYA_EVENT_ACTIVATE_SUCCESSED:
         s_cloud_activated = true;
         s_provisioning    = false;
+        notify_activation("activated", "");
         PR_NOTICE("cloud: activation succeeded; AK BLE takeover is now allowed");
         break;
     case TUYA_EVENT_MQTT_CONNECTED:
+        notify_activation("cloud_ready", "");
         /* No prompt tone here — FP-3 does not play one on MQTT_CONNECTED, and the
          * SDK fires this event on every (re)connect during boot, which caused the
          * "network connected" tone to play twice. Only BIND_START plays a tone. */
         PR_NOTICE("cloud: MQTT connected (device online, cloud ASR ready)");
         break;
     case TUYA_EVENT_MQTT_DISCONNECT:
+        notify_activation("cloud_disconnected", "");
         PR_NOTICE("cloud: MQTT disconnected (device offline)");
         break;
     case TUYA_EVENT_TIMESTAMP_SYNC:
@@ -106,6 +156,7 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
          * Show the pairing hint immediately — the reboot into SoftAP follows. */
         s_cloud_activated = false;
         s_provisioning    = true;
+        notify_activation("resetting", "");
         PR_NOTICE("cloud: device reset requested (type=%d)", (int)event->value.asInteger);
         break;
     case TUYA_EVENT_RESET_COMPLETE:
@@ -188,6 +239,7 @@ OPERATE_RET ak_cloud_init(void)
         return rt;
     }
     s_cloud_activated = tuya_iot_activated(&s_ai_client);
+    notify_activation(s_cloud_activated ? "activated" : "pairing", "");
 
     /* Network manager: Wi-Fi plus Tuya BLE/SoftAP provisioning. AK's own GATT
      * transport must not take over the shared BLE callbacks until activation
@@ -329,6 +381,21 @@ bool ak_cloud_compiled(void)
 }
 
 #else /* !AK_ASR_BOARD_CLOUD — stub */
+
+void ak_cloud_set_activation_callback(ak_cloud_activation_cb callback)
+{
+    (void)callback;
+}
+
+const char *ak_cloud_activation_state(void)
+{
+    return "disabled";
+}
+
+const char *ak_cloud_binding_qr_url(void)
+{
+    return "";
+}
 
 OPERATE_RET ak_cloud_init(void)
 {

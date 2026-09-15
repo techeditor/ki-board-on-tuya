@@ -29,6 +29,10 @@ int ak_proto_voice_source(char *buf, size_t size, uint32_t seq, const char *sour
    "connecting" / "connected" / "failed" / "disconnected"; `ssid` is the target
    AP (may be empty). Sent when a wifi config frame is applied and on change. */
 int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state, const char *ssid);
+/* Board -> Companion: Tuya activation lifecycle. `qr_url` is populated only
+   for `scan_qr`; it contains PID+UUID but never AuthKey. UART0-only. */
+int ak_proto_activation_status(char *buf, size_t size, uint32_t seq,
+                               const char *state, const char *qr_url);
 /* Board -> PC: report device-license (UUID/AuthKey) provisioning result.
    `state` is "written" / "failed" / "present" (already had one). No secret is
    ever echoed back. */

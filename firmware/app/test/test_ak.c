@@ -198,6 +198,14 @@ static void test_protocol(void)
               "\"ssid\":\"MyAP\"}}\n",
               "wifi_status frame");
 
+    ak_proto_activation_status(buf, sizeof(buf), 20, "scan_qr",
+                               "https://smartapp.tuya.com/s/p?p=pid&uuid=uuid123&v=2.0");
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":20,\"type\":\"activation_status\",\"payload\":{"
+              "\"state\":\"scan_qr\",\"qr_url\":"
+              "\"https://smartapp.tuya.com/s/p?p=pid&uuid=uuid123&v=2.0\"}}\n",
+              "activation status frame");
+
     ak_proto_license_status(buf, sizeof(buf), 14, "written");
     CHECK_STR(buf,
               "{\"v\":1,\"seq\":14,\"type\":\"license_status\",\"payload\":{\"state\":\"written\"}}\n",

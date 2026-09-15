@@ -192,6 +192,27 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 
 - 仅允许通过当前 USB/UART 连接发送；Companion 和 AK 固件都必须拒绝 BLE 来源。
 - 设备只支持 2.4GHz Wi-Fi。密码仅发往 AK，不由 Companion 持久化。
+- 对未激活设备，WiFi `connected` 后还必须完成下面的 SmartLife QR 激活；只有收到
+  `cloud_ready` 后 activation data 才能在重启时恢复。
+
+### activation_status（AK → Companion，仅 UART0）
+
+```json
+{"v":1,"seq":21,"type":"activation_status","payload":{"state":"scan_qr","qr_url":"https://smartapp.tuya.com/s/p?p=<PID>&uuid=<UUID>&v=2.0"}}
+```
+
+`state` 生命周期：
+
+- `pairing`：未激活，等待网络/绑定。
+- `scan_qr`：Direct MQTT 已连接；Companion 动态生成二维码并自动展开激活卡片。
+- `token_received`：SmartLife 已下发 region/token/regist_key，设备正在云端激活。
+- `activated`：DeviceID/schema/activation data 已保存。
+- `cloud_ready`：正常 Tuya MQTT 已上线；Companion 自动折叠为成功摘要。
+- `cloud_disconnected`：activation 仍保留，仅云连接暂不可用。
+- `resetting`：正在清除网络与 activation data。
+
+`qr_url` 仅在 `scan_qr` 非空，包含 PID 和 UUID，不包含 AuthKey。Companion 只接受
+`https://smartapp.tuya.com/s/p?` 前缀，并仅在二维码展开时动态加载 QR 生成模块。
 
 ### license（UUID / AuthKey，仅 USB）
 
@@ -226,7 +247,7 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 - AK 先回 `ack`（在重启断链前让 Companion 确认已受理），再调 `tuya_iot_reset()`：
   清除 Wi-Fi 凭据 + 云绑定/激活，**保留 License（UUID/AuthKey）**，随后重启进入 Tuya SoftAP/BLE 配网。
 - 仅在 cloud profile（`AK_ASR_BOARD_CLOUD=1`）生效；非 cloud profile 为 stub，返回 `OPRT_NOT_SUPPORTED` 且不动作。
-- 进入配网后，LCD 底部状态栏显示 `Pairing mode: provision Wi-Fi in app`（橙色）。
+- 进入配网后，LCD 底部状态栏显示 `Pairing mode: use Tuya app`（橙色）。
 
 ### ack
 

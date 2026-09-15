@@ -201,6 +201,21 @@ int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state
     return writer_finish(&writer);
 }
 
+int ak_proto_activation_status(char *buf, size_t size, uint32_t seq,
+                               const char *state, const char *qr_url)
+{
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"activation_status\",\"payload\":{\"state\":");
+    writer_json_string(&writer, state);
+    writer_raw(&writer, ",\"qr_url\":");
+    writer_json_string(&writer, qr_url);
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
 int ak_proto_license_status(char *buf, size_t size, uint32_t seq, const char *state)
 {
     ak_json_writer_t writer;

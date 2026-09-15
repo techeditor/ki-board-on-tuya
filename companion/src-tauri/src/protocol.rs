@@ -269,6 +269,15 @@ pub struct WifiStatusPayload {
     pub ssid: String,
 }
 
+/// `activation_status` payload: Tuya pairing/activation lifecycle. The QR URL
+/// contains PID+UUID only and is populated solely while waiting for SmartLife.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivationStatusPayload {
+    pub state: String,
+    #[serde(default)]
+    pub qr_url: String,
+}
+
 /// `license_status` payload: device-license provisioning result.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LicenseStatusPayload {
@@ -381,6 +390,8 @@ pub enum Inbound {
     VoiceSource { seq: Option<u64>, payload: VoiceSourcePayload },
     /// The board's Wi-Fi provisioning/connection status.
     WifiStatus { seq: Option<u64>, payload: WifiStatusPayload },
+    /// Tuya pairing, QR scan, activation and cloud-ready lifecycle.
+    ActivationStatus { seq: Option<u64>, payload: ActivationStatusPayload },
     /// The board's device-license provisioning result.
     LicenseStatus { seq: Option<u64>, payload: LicenseStatusPayload },
     /// Explicit UART0-only development diagnostic; never carries full AuthKey.
@@ -440,6 +451,9 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "wifi_status" => serde_json::from_value::<WifiStatusPayload>(payload)
             .ok()
             .map(|p| Inbound::WifiStatus { seq, payload: p }),
+        "activation_status" => serde_json::from_value::<ActivationStatusPayload>(payload)
+            .ok()
+            .map(|p| Inbound::ActivationStatus { seq, payload: p }),
         "license_status" => serde_json::from_value::<LicenseStatusPayload>(payload)
             .ok()
             .map(|p| Inbound::LicenseStatus { seq, payload: p }),
@@ -687,6 +701,24 @@ mod tests {
             Inbound::WifiStatus {
                 seq: Some(13),
                 payload: WifiStatusPayload { state: "connected".into(), ssid: "MyAP".into() },
+            }
+        );
+    }
+
+    #[test]
+    fn decode_activation_status_with_qr_url() {
+        let frame = decode_line(
+            r#"{"v":1,"seq":20,"type":"activation_status","payload":{"state":"scan_qr","qr_url":"https://smartapp.tuya.com/s/p?p=pid&uuid=uuid123&v=2.0"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            Inbound::ActivationStatus {
+                seq: Some(20),
+                payload: ActivationStatusPayload {
+                    state: "scan_qr".into(),
+                    qr_url: "https://smartapp.tuya.com/s/p?p=pid&uuid=uuid123&v=2.0".into(),
+                },
             }
         );
     }

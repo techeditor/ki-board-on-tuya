@@ -31,6 +31,44 @@ type LicenseInfo = {
   authkey_tail: string;
 };
 
+type ActivationStatus = {
+  state: string;
+  qr_url: string;
+};
+
+const ACTIVATION_STEPS = ["Router", "Scan", "Confirm", "Ready"] as const;
+
+function activationStepIndex(state: string) {
+  switch (state) {
+    case "connecting_router": return 0;
+    case "router_failed": return 0;
+    case "wifi_connected": return 1;
+    case "scan_qr": return 1;
+    case "token_received": return 2;
+    case "activated": return 2;
+    case "cloud_ready": return 3;
+    case "cloud_disconnected": return 2;
+    default: return -1;
+  }
+}
+
+function activationLabel(state: string) {
+  switch (state) {
+    case "connecting_router": return "Connecting router";
+    case "router_failed": return "WiFi connection failed";
+    case "wifi_connected": return "WiFi connected · preparing QR";
+    case "pairing": return "Configure WiFi to start";
+    case "scan_qr": return "Scan with SmartLife";
+    case "token_received": return "SmartLife confirmed";
+    case "activated": return "Registration successful";
+    case "cloud_ready": return "Setup complete · reboot ready";
+    case "cloud_disconnected": return "Setup saved · Cloud offline";
+    case "resetting": return "Resetting";
+    case "disabled": return "Cloud setup unavailable";
+    default: return "Configure WiFi to start";
+  }
+}
+
 type SerialPortInfo = {
   name: string;
   kind: string;
@@ -43,7 +81,7 @@ type BleDeviceInfo = {
 
 // Flat board-event object emitted by `inbound_to_json` in the backend.
 type BoardEvent = {
-  kind: "key" | "nav" | "voice" | "macro" | "license_info" | "device_settings" | "system_info" | "hello_ack" | "ping" | "pong" | "unknown";
+  kind: "key" | "nav" | "voice" | "macro" | "activation_status" | "license_info" | "device_settings" | "system_info" | "hello_ack" | "ping" | "pong" | "unknown";
   seq?: number | null;
   id?: string;
   dir?: string;
@@ -64,6 +102,7 @@ type BoardEvent = {
   source?: string;
   uuid?: string;
   authkey_tail?: string;
+  qr_url?: string;
   type?: string;
 };
 
@@ -166,6 +205,13 @@ function App() {
   const [showWifiPass, setShowWifiPass] = useState(false);
   const [wifiStatus, setWifiStatus] = useState("");
   const [wifiBusy, setWifiBusy] = useState(false);
+  const [activationStatus, setActivationStatus] = useState<ActivationStatus>({
+    state: "unknown",
+    qr_url: "",
+  });
+  const [activationExpanded, setActivationExpanded] = useState(false);
+  const [activationQrData, setActivationQrData] = useState("");
+  const [activationQrError, setActivationQrError] = useState("");
   // Device license (UUID/AuthKey) provisioning.
   const [licUuid, setLicUuid] = useState("");
   const [licAuthkey, setLicAuthkey] = useState("");
@@ -365,6 +411,9 @@ function App() {
       return;
     }
     setWifiBusy(true);
+    setActivationStatus({ state: "connecting_router", qr_url: "" });
+    setActivationExpanded(false);
+    setActivationQrData("");
     try {
       setUiError("");
       setWifiStatus("sending…");
@@ -636,6 +685,38 @@ function App() {
 
   async function hookRemove() {
     setHookStatus(await invoke<HookStatus>("kc_hook_remove", { exe: null }));
+
+  useEffect(() => {
+    let cancelled = false;
+    const url = activationStatus.qr_url;
+    if (activationStatus.state !== "scan_qr" || !url) {
+      setActivationQrData("");
+      setActivationQrError("");
+      return () => { cancelled = true; };
+    }
+    if (!url.startsWith("https://smartapp.tuya.com/s/p?")) {
+      setActivationQrData("");
+      setActivationQrError("The keyboard returned an unexpected activation URL.");
+      return () => { cancelled = true; };
+    }
+
+    setActivationQrError("");
+    import("qrcode")
+      .then(({ toDataURL }) =>
+        toDataURL(url, { errorCorrectionLevel: "M", margin: 1, width: 188 }),
+      )
+      .then((dataUrl) => {
+        if (!cancelled) setActivationQrData(dataUrl);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setActivationQrData("");
+          setActivationQrError(error instanceof Error ? error.message : String(error));
+        }
+      });
+    return () => { cancelled = true; };
+  }, [activationStatus.state, activationStatus.qr_url]);
+
   }
 
   useEffect(() => {
@@ -706,6 +787,27 @@ function App() {
     const unlistenWifi = listen<{ state: string; ssid: string }>("wifi-status", (event) => {
       const { state, ssid } = event.payload;
       setWifiStatus(ssid ? `${state} · ${ssid}` : state);
+      setActivationStatus((current) => {
+        const preActivation = ["unknown", "pairing", "connecting_router", "wifi_connected", "router_failed"]
+          .includes(current.state);
+        if (!preActivation) return current;
+        if (state === "connected") return { state: "wifi_connected", qr_url: "" };
+        if (state === "failed" || state === "disconnected") {
+          return { state: "router_failed", qr_url: "" };
+        }
+        if (state === "connecting") return { state: "connecting_router", qr_url: "" };
+        return current;
+      });
+    });
+
+    const unlistenActivation = listen<ActivationStatus>("activation-status", (event) => {
+      const next = event.payload;
+      setActivationStatus(next);
+      if (next.state === "scan_qr" || next.state === "token_received" || next.state === "activated") {
+        setActivationExpanded(true);
+      } else if (next.state === "cloud_ready" || next.state === "resetting") {
+        setActivationExpanded(false);
+      }
     });
 
     // The board reports device-license provisioning result.
@@ -762,6 +864,7 @@ function App() {
       unlistenStatus.then((fn) => fn());
       unlistenVoiceSource.then((fn) => fn());
       unlistenWifi.then((fn) => fn());
+      unlistenActivation.then((fn) => fn());
       unlistenLicense.then((fn) => fn());
       unlistenLicenseInfo.then((fn) => fn());
       unlistenDeviceSettings.then((fn) => fn());
@@ -1014,8 +1117,82 @@ function App() {
             </div>
             <p className={`hint ${usbProvisioningAvailable ? "good-text" : "warn-text"}`}>
               USB connection required. WiFi credentials cannot be sent over BLE. The board joins
-              its 2.4GHz AP using the cloud-ASR firmware profile.
+              its 2.4GHz AP using the cloud-ASR firmware profile. If first-time setup is needed,
+              the SmartLife QR card below opens automatically.
             </p>
+
+            <section className={`activation-card ${activationExpanded ? "expanded" : ""}`}>
+              <button
+                type="button"
+                className="activation-toggle"
+                aria-expanded={activationExpanded}
+                onClick={() => setActivationExpanded((value) => !value)}
+              >
+                <span>
+                  <strong>SmartLife setup</strong>
+                  <small>First setup or after network reset</small>
+                </span>
+                <span className={`activation-badge state-${activationStatus.state}`}>
+                  {activationLabel(activationStatus.state)}
+                </span>
+                <span className="activation-chevron" aria-hidden="true" />
+              </button>
+
+              {activationExpanded && (
+                <div className="activation-body">
+                  <div className="activation-steps" aria-label="Activation progress">
+                    {ACTIVATION_STEPS.map((step, index) => {
+                      const current = activationStepIndex(activationStatus.state);
+                      const stepClass = index < current ? "done" : index === current ? "current" : "";
+                      return (
+                        <div className={`activation-step ${stepClass}`} key={step}>
+                          <span>{index + 1}</span>
+                          <small>{step}</small>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {activationStatus.state === "scan_qr" && (
+                    <div className="activation-qr-row">
+                      <div className="activation-qr">
+                        {activationQrData ? (
+                          <img src={activationQrData} alt="SmartLife device activation QR code" />
+                        ) : (
+                          <span>{activationQrError || "Generating QR code…"}</span>
+                        )}
+                      </div>
+                      <div>
+                        <strong>Scan with SmartLife</strong>
+                        <p>
+                          Open SmartLife, tap the scan icon, and scan this code. Keep the keyboard
+                          powered and connected to WiFi until Setup complete appears.
+                        </p>
+                        {activationQrError && <p className="warn-text">{activationQrError}</p>}
+                      </div>
+                    </div>
+                  )}
+
+                  {activationStatus.state !== "scan_qr" && (
+                    <p className="activation-message">
+                      {activationStatus.state === "wifi_connected"
+                        ? "WiFi connected successfully. Preparing the SmartLife setup code."
+                        : activationStatus.state === "router_failed"
+                          ? "Could not connect to WiFi. Check the 2.4GHz network name and password, then try again."
+                          : activationStatus.state === "token_received"
+                            ? "SmartLife confirmed the keyboard. Completing device setup now."
+                            : activationStatus.state === "activated"
+                              ? "Registration successful. Finishing the online connection."
+                              : activationStatus.state === "cloud_ready"
+                                ? "Setup complete. The keyboard will reconnect after reboot without scanning or pairing again."
+                                : activationStatus.state === "cloud_disconnected"
+                                  ? "Setup is saved, but the online service is temporarily unavailable. PC ASR remains available."
+                                  : "Configure WiFi to begin. This card opens automatically if SmartLife scanning is required."}
+                    </p>
+                  )}
+                </div>
+              )}
+            </section>
 
             <label style={{ marginTop: 14 }}>Re-enter pairing mode</label>
             <div className="actions" style={{ marginTop: 6 }}>

@@ -60,6 +60,12 @@ pub fn describe_inbound(frame: &Inbound) -> String {
         Inbound::WifiStatus { seq, payload } => {
             format!("wifi_status {} {}{}", payload.state, payload.ssid, seq_suffix(*seq))
         }
+        Inbound::ActivationStatus { seq, payload } => format!(
+            "activation_status {} qr={}{}",
+            payload.state,
+            if payload.qr_url.is_empty() { "no" } else { "yes" },
+            seq_suffix(*seq)
+        ),
         Inbound::LicenseStatus { seq, payload } => {
             format!("license_status {}{}", payload.state, seq_suffix(*seq))
         }
@@ -145,6 +151,10 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
         }),
         Inbound::WifiStatus { seq, payload } => json!({
             "kind": "wifi_status", "seq": seq, "state": payload.state, "ssid": payload.ssid
+        }),
+        Inbound::ActivationStatus { seq, payload } => json!({
+            "kind": "activation_status", "seq": seq,
+            "state": payload.state, "qr_url": payload.qr_url
         }),
         Inbound::LicenseStatus { seq, payload } => json!({
             "kind": "license_status", "seq": seq, "state": payload.state
@@ -1225,6 +1235,7 @@ mod app {
         | Inbound::Voice { seq: Some(seq), .. }
         | Inbound::Macro { seq: Some(seq), .. }
         | Inbound::Asr { seq: Some(seq), .. }
+        | Inbound::ActivationStatus { seq: Some(seq), .. }
         | Inbound::LicenseInfo { seq: Some(seq), .. }
         | Inbound::SystemInfo { seq: Some(seq), .. }
         | Inbound::DeviceSettings { seq: Some(seq), .. } = &frame
@@ -1251,6 +1262,20 @@ mod app {
                 "state": payload.state, "ssid": payload.ssid
             }));
             log_line(app, format!("[WIFI] {} {}", payload.state, payload.ssid));
+        }
+
+        // Tuya activation lifecycle -> collapsible Device-panel activation card.
+        // qr_url carries only PID+UUID and is empty outside the scan step.
+        if let Inbound::ActivationStatus { payload, .. } = &frame {
+            let _ = app.emit("activation-status", payload.clone());
+            log_line(
+                app,
+                format!(
+                    "[ACTIVATION] {} qr={}",
+                    payload.state,
+                    if payload.qr_url.is_empty() { "no" } else { "yes" }
+                ),
+            );
         }
 
         // Device-license provisioning result -> UI (no secret is carried).

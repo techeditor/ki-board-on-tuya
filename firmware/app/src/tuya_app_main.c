@@ -386,6 +386,42 @@ static const char *boot_reset_reason_str(TUYA_RESET_REASON_E reason)
         return "unknown";
     }
 }
+
+static volatile bool s_activation_ui_pending;
+static char          s_activation_ui_state[32];
+
+static void send_activation_status_uart(const char *state, const char *qr_url)
+{
+#if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
+    char frame[SYSTEM_INFO_FRAME_BUFFER_SIZE];
+    if (!transport_lock()) {
+        return;
+    }
+    uint32_t sequence = ++s_sequence;
+    int length = ak_proto_activation_status(frame, sizeof(frame), sequence,
+                                            state, qr_url);
+    if (length > 0 && length < (int)sizeof(frame)) {
+        int written = ak_uart_write(frame, (uint32_t)length);
+        if (written != length) {
+            PR_WARN("UART0 activation status short write: %d/%d", written, length);
+        }
+    } else {
+        PR_WARN("UART0 activation status frame too large: %d", length);
+    }
+    transport_unlock();
+#else
+    (void)state;
+    (void)qr_url;
+#endif
+}
+
+static void on_cloud_activation(const char *state, const char *qr_url)
+{
+    (void)snprintf(s_activation_ui_state, sizeof(s_activation_ui_state), "%s",
+                   state == NULL ? "unknown" : state);
+    s_activation_ui_pending = true;
+    send_activation_status_uart(s_activation_ui_state, qr_url);
+}
 /* Explicit development diagnostic. Keep the reply on the physically trusted
  * UART0 path even in DUAL builds; never mirror License metadata to BLE. */
 static void send_license_info_uart(void)
@@ -532,6 +568,8 @@ static void send_hello_ack(void)
     send_device_settings();
 #endif
     send_system_info_uart();
+    send_activation_status_uart(ak_cloud_activation_state(),
+                                ak_cloud_binding_qr_url());
 }
 
 /* Emit a voice.start / voice.stop edge (PC companion runs its own ASR). */
@@ -1732,6 +1770,7 @@ static void user_main(void)
         send_log_uart("boot", message);
         PR_NOTICE("%s", message);
     }
+    ak_cloud_set_activation_callback(on_cloud_activation);
     ak_dclick_init(&s_ptt_dclick);
     ak_voice_route_init(&s_voice_route);
 #if AK_ENABLE_DISPLAY
@@ -1895,6 +1934,25 @@ static void user_main(void)
             ak_wifi_state_t wifi_state = s_wifi_lcd_state;
             ak_status_bar_set_wifi(wifi_state);
             ak_refresh_link_header();
+        }
+        if (s_activation_ui_pending) {
+            char state[sizeof(s_activation_ui_state)];
+            (void)snprintf(state, sizeof(state), "%s", s_activation_ui_state);
+            s_activation_ui_pending = false;
+            if (strcmp(state, "scan_qr") == 0) {
+                ak_status_bar_set("Scan QR in Companion", AK_COL_CYAN);
+            } else if (strcmp(state, "token_received") == 0) {
+                ak_status_bar_set("Activating Tuya device...", AK_COL_CYAN);
+            } else if (strcmp(state, "activated") == 0) {
+                ak_status_bar_set("Tuya device activated", AK_COL_GREEN);
+            } else if (strcmp(state, "cloud_ready") == 0) {
+                ak_status_bar_set("Tuya Cloud ready", AK_COL_GREEN);
+            } else if (strcmp(state, "cloud_disconnected") == 0) {
+                ak_status_bar_set("Tuya Cloud disconnected", AK_COL_ORANGE);
+            } else if (strcmp(state, "resetting") == 0) {
+                ak_status_bar_set("Resetting network...", AK_COL_ORANGE);
+            }
+            ak_render_status();
         }
 #endif
 
