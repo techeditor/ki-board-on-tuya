@@ -163,6 +163,7 @@ function App() {
   // WiFi provisioning (DEVICE panel): send SSID/pass to the board over the link.
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPass, setWifiPass] = useState("");
+  const [showWifiPass, setShowWifiPass] = useState(false);
   const [wifiStatus, setWifiStatus] = useState("");
   const [wifiBusy, setWifiBusy] = useState(false);
   // Device license (UUID/AuthKey) provisioning.
@@ -973,19 +974,30 @@ function App() {
               onChange={(event) => setWifiSsid(event.target.value)}
               placeholder="WiFi SSID (2.4GHz)"
             />
-            <input
-              type="password"
-              value={wifiPass}
-              disabled={!usbProvisioningAvailable || wifiBusy}
-              onChange={(event) => setWifiPass(event.target.value)}
-              placeholder="WiFi password"
-              style={{ marginTop: 6 }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && usbProvisioningAvailable && !wifiBusy) {
-                  runAction(sendWifi);
-                }
-              }}
-            />
+            <div className="input-with-toggle" style={{ display: "flex", gap: 6, marginTop: 6 }}>
+              <input
+                type={showWifiPass ? "text" : "password"}
+                value={wifiPass}
+                disabled={!usbProvisioningAvailable || wifiBusy}
+                onChange={(event) => setWifiPass(event.target.value)}
+                placeholder="WiFi password"
+                style={{ flex: 1 }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && usbProvisioningAvailable && !wifiBusy) {
+                    runAction(sendWifi);
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setShowWifiPass((v) => !v)}
+                aria-label={showWifiPass ? "Hide password" : "Show password"}
+                title={showWifiPass ? "Hide password" : "Show password"}
+              >
+                {showWifiPass ? "Hide" : "Show"}
+              </button>
+            </div>
             <div className="actions" style={{ marginTop: 6 }}>
               <button
                 disabled={!usbProvisioningAvailable || wifiBusy}
