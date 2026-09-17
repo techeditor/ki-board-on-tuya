@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const LOG_DIR: &str = "agentic-keyboard-companion/logs";
+const LOG_DIR: &str = "logs";
 const LOG_FILE: &str = "companion.log";
 const OLD_LOG_FILE: &str = "companion.previous.log";
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
@@ -22,9 +22,12 @@ struct Logger {
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 static PANIC_HOOK: Once = Once::new();
 
+/// Diagnostic logs live at `~/.ak-companion/logs/companion.log` (see
+/// `app_dirs`), alongside the bind store and hook handoff.
 fn log_path() -> PathBuf {
-    let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
-    base.join(LOG_DIR).join(LOG_FILE)
+    crate::app_dirs::companion_dir()
+        .join(LOG_DIR)
+        .join(LOG_FILE)
 }
 
 fn open_logger() -> Logger {

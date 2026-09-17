@@ -21,10 +21,13 @@ serde_json = "1"
 serialport = { version = "4", default-features = false }
 # FP-4: session-control HTTP client. Pinned to the version already resolved in
 # Cargo.lock (pulled transitively by tauri) so adding it as a direct dep does
-# not churn the lockfile. `default-features = false` + `rustls` selects the
-# rustls TLS backend (no OpenSSL system dep), so the crate builds on the Linux
-# CI host. NB: reqwest 0.13 renamed this feature `rustls-tls` -> `rustls`.
-reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+# not churn the lockfile. The Crew gateway is loopback HTTP only, so no TLS
+# backend is enabled (avoids OpenSSL/aws-lc native build dependencies).
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json"] }
+# Kiro Crew realtime status stream (`ws://127.0.0.1:<port>/api/ws`). The
+# gateway is loopback-only, so only the WebSocket handshake feature is needed;
+# no native-TLS/OpenSSL backend is pulled in. Exact pin for reproducible builds.
+tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 # Phase 2 BLE GATT backend. btleplug is cross-platform (BlueZ/DBus on Linux,
 # WinRT on Windows) and async, so it pulls a minimal tokio (current-thread
 # runtime + channels + timers, no full app async). Pinned exactly so adding it

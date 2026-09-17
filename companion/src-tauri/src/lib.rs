@@ -15,11 +15,13 @@
 //! * The Tauri application itself (`app` module + [`run`]) is `#[cfg(windows)]`
 //!   because Tauri needs WebKitGTK, which is absent on the Linux CI host.
 
+pub mod app_dirs;
 pub mod asr;
 pub mod diagnostics;
 pub mod inject;
 pub mod kirocrew_control;
 pub mod bind_store;
+pub mod crew_api;
 pub mod hook_install;
 pub mod pc_asr;
 pub mod protocol;
@@ -202,8 +204,12 @@ pub fn run() {
 #[cfg(target_os = "windows")]
 mod app {
     use crate::diagnostics;
+    use crate::crew_api::{
+        slot_display_status, CrewApiClient, CrewConnection, CrewEvent, CrewRealtime, CrewSlot,
+        SendReceipt,
+    };
     use crate::pc_asr::{self, VoiceAction, VoiceSource};
-    use crate::protocol::{self, Inbound};
+    use crate::protocol::{self, Inbound, KeyAction, NavDir};
     use crate::hook_install;
     use crate::kirocrew_control::{Chord, ControlAction, ControlRouter, KiroCrewController};
     use crate::bind_store::BindStore;
@@ -264,10 +270,25 @@ mod app {
         /// user can choose which one to pin.
         kc_pinned_session: Option<String>,
         /// FP-4b M4 (§3.2): per-key chat-number store for K1-K3, loaded from
-        /// `config_dir/ak-companion/binds.json` at startup. Each key binds to a
+        /// `~/.ak-companion/binds.json` at startup. Each key binds to a
         /// chat NUMBER (1..=9); pressing it fires `Alt+N` (jump to chat N). The
         /// numbers here are mirrored into `kc_router.ctx.jump_chats`.
         kc_binds: BindStore,
+        /// Local Kiro Crew REST client. Authentication bootstraps from the
+        /// gateway's rotating `.local_secret` before every operation.
+        crew_api: Option<CrewApiClient>,
+        /// Background `/api/ws` connection. Kept separate from the Hook sink:
+        /// API status is primary, Hook remains an independent fallback.
+        crew_realtime: Option<CrewRealtime>,
+        crew_api_connected: bool,
+        crew_api_base_url: String,
+        crew_api_last_error: String,
+        crew_api_slots: Vec<CrewSlot>,
+        /// Stable Crew slot selected by K1/K2/K3 while API is connected.
+        crew_api_active_slot: Option<String>,
+        /// Review-before-send drafts keyed by stable Crew slot. ASR populates a
+        /// draft; K5 submits it through REST, preserving the existing UX.
+        crew_api_drafts: HashMap<String, String>,
     }
 
     struct AppState {
@@ -288,6 +309,10 @@ mod app {
         device_brightness: u8,
         device_settings_synced: bool,
         control_enabled: bool,
+        crew_api_connected: bool,
+        crew_api_base_url: String,
+        crew_api_last_error: String,
+        crew_api_slots: usize,
     }
 
     fn log_line(app: &AppHandle, message: impl Into<String>) {
@@ -456,7 +481,108 @@ mod app {
             device_brightness: inner.device_brightness,
             device_settings_synced: inner.device_settings_synced,
             control_enabled: inner.control_enabled,
+            crew_api_connected: inner.crew_api_connected,
+            crew_api_base_url: inner.crew_api_base_url.clone(),
+            crew_api_last_error: inner.crew_api_last_error.clone(),
+            crew_api_slots: inner.crew_api_slots.len(),
         })
+    }
+
+    /// Explicitly (re)start the Crew WebSocket worker. Startup invokes this
+    /// automatically; the command is exposed for UI diagnostics/recovery.
+    #[tauri::command]
+    fn crew_api_start(app: AppHandle, state: State<Shared>) -> Result<(), String> {
+        start_crew_realtime(&app, state.inner())
+    }
+
+    #[tauri::command]
+    fn crew_api_stop(app: AppHandle, state: State<Shared>) -> Result<(), String> {
+        let (worker, base_url) = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.crew_api_connected = false;
+            (inner.crew_realtime.take(), inner.crew_api_base_url.clone())
+        };
+        if let Some(mut worker) = worker {
+            worker.stop();
+        }
+        let connection = CrewConnection {
+            connected: false,
+            base_url,
+            error: "stopped by user".to_string(),
+            retry_secs: 0,
+        };
+        let _ = app.emit("crew-api-connection", &connection);
+        log_line(&app, "[CREW-API] stopped · Hook fallback remains active");
+        Ok(())
+    }
+
+    #[tauri::command]
+    fn crew_api_list_slots(app: AppHandle, state: State<Shared>) -> Result<Vec<CrewSlot>, String> {
+        let client = state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .crew_api
+            .clone()
+            .ok_or("Kiro Crew API client is unavailable")?;
+        let slots = client.list_slots()?;
+        if let Ok(mut inner) = state.inner.lock() {
+            inner.crew_api_slots = slots.clone();
+            inner.crew_api_last_error.clear();
+        }
+        let _ = app.emit("crew-api-slots", &slots);
+        Ok(slots)
+    }
+
+    #[tauri::command]
+    fn crew_api_send_message(
+        app: AppHandle,
+        state: State<Shared>,
+        slot: String,
+        message: String,
+    ) -> Result<SendReceipt, String> {
+        let client = state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .crew_api
+            .clone()
+            .ok_or("Kiro Crew API client is unavailable")?;
+        let receipt = client.send_message(&slot, &message)?;
+        if let Ok(mut inner) = state.inner.lock() {
+            inner.crew_api_drafts.remove(&slot);
+            inner.crew_api_active_slot = Some(slot.clone());
+        }
+        emit_crew_draft(&app, &slot, "");
+        log_line(
+            &app,
+            format!("[CREW-API] message accepted for slot {slot} (content withheld from logs)"),
+        );
+        Ok(receipt)
+    }
+
+    #[tauri::command]
+    fn crew_api_slot_action(
+        app: AppHandle,
+        state: State<Shared>,
+        slot: String,
+        action: String,
+    ) -> Result<(), String> {
+        let client = state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .crew_api
+            .clone()
+            .ok_or("Kiro Crew API client is unavailable")?;
+        match action.as_str() {
+            "continue" => client.continue_slot(&slot)?,
+            "interrupt" => client.interrupt_slot(&slot)?,
+            "stop" => client.stop_slot(&slot)?,
+            _ => return Err(format!("unsupported Kiro Crew slot action {action:?}")),
+        }
+        log_line(&app, format!("[CREW-API] {action} accepted for slot {slot}"));
+        Ok(())
     }
 
     #[tauri::command]
@@ -467,6 +593,7 @@ mod app {
         port_name: Option<String>,
     ) -> Result<(), String> {
         let transport_kind = transport.as_deref().unwrap_or("usb");
+
         diagnostics::record(
             "INFO",
             "connect",
@@ -847,6 +974,98 @@ mod app {
 
     // ─────────────── FP-4b: STATUS sink ("the eyes") — T7 wiring ───────────────
 
+
+    /// Apply one event from the Crew REST/WebSocket client. API status enters
+    /// the same `apply_status` path as Hook events, so existing Watched Chat,
+    /// Chat A/B/C bindings, UI events, and LCD forwarding continue to work.
+    /// Hook remains live and can still update status whenever API is offline.
+    fn apply_crew_event(app: &AppHandle, state: &Shared, event: CrewEvent) {
+        match event {
+            CrewEvent::Connection(connection) => {
+                if let Ok(mut inner) = state.inner.lock() {
+                    inner.crew_api_connected = connection.connected;
+                    inner.crew_api_base_url = connection.base_url.clone();
+                    inner.crew_api_last_error = connection.error.clone();
+                }
+                let _ = app.emit("crew-api-connection", &connection);
+                if connection.connected {
+                    log_line(app, format!("[CREW-API] connected {}", connection.base_url));
+                } else {
+                    log_line(
+                        app,
+                        format!(
+                            "[CREW-API] disconnected: {} · retry {}s · Hook fallback remains active",
+                            connection.error, connection.retry_secs
+                        ),
+                    );
+                }
+            }
+            CrewEvent::Slots(slots) => {
+                // Only feed changed projections into apply_status; the gateway
+                // periodically rebroadcasts the full list and replaying every
+                // unchanged idle row would spam logs/LCD writes.
+                let changed = if let Ok(mut inner) = state.inner.lock() {
+                    let previous: HashMap<_, _> = inner
+                        .crew_api_slots
+                        .iter()
+                        .map(|slot| (slot.key.as_str(), slot))
+                        .collect();
+                    let changed = slots
+                        .iter()
+                        .filter(|slot| previous.get(slot.key.as_str()).copied() != Some(slot))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    inner.crew_api_slots = slots.clone();
+                    changed
+                } else {
+                    Vec::new()
+                };
+                let _ = app.emit("crew-api-slots", &slots);
+                for slot in changed {
+                    apply_status(app, state, slot_display_status(&slot));
+                }
+            }
+            CrewEvent::ChatMessage(data) => {
+                let _ = app.emit("crew-api-message", data);
+            }
+            CrewEvent::Dashboard(data) => {
+                let _ = app.emit("crew-api-dashboard", data);
+            }
+            CrewEvent::SlotTitle(data) => {
+                let _ = app.emit("crew-api-slot-title", data);
+            }
+            CrewEvent::Other { event_type, data } => {
+                if event_type == "decode_error" {
+                    log_line(app, format!("[CREW-API] WebSocket decode warning: {data}"));
+                }
+            }
+        }
+    }
+
+    fn start_crew_realtime(app: &AppHandle, state: &Shared) -> Result<(), String> {
+        let client = {
+            let inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            if inner.crew_realtime.is_some() {
+                return Ok(());
+            }
+            inner
+                .crew_api
+                .clone()
+                .ok_or_else(|| "Kiro Crew API client is unavailable".to_string())?
+        };
+        let app_cb = app.clone();
+        let state_cb = state.clone();
+        let worker = CrewRealtime::start(client, move |event| {
+            apply_crew_event(&app_cb, &state_cb, event);
+        })?;
+        state
+            .inner
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .crew_realtime = Some(worker);
+        Ok(())
+    }
+
     /// Apply one mapped status update coming from the hook sink (runs on the
     /// sink's listener thread, so it takes the shared state + app handle by
     /// value/clone). Keeps last-status per `session_id`, emits a `display` frame
@@ -1211,6 +1430,193 @@ mod app {
         });
     }
 
+    fn emit_crew_draft(app: &AppHandle, slot: &str, text: &str) {
+        let _ = app.emit(
+            "crew-api-draft",
+            serde_json::json!({ "slot": slot, "text": text }),
+        );
+    }
+
+    /// API-first board control. Returns true when the frame was consumed by the
+    /// stable-slot REST path. False means the caller should use the legacy
+    /// focus/SendInput route as fallback.
+    fn route_board_via_crew_api(app: &AppHandle, state: &Shared, frame: &Inbound) -> bool {
+        let api_ready = state
+            .inner
+            .lock()
+            .map(|inner| inner.control_enabled && inner.crew_api_connected)
+            .unwrap_or(false);
+        if !api_ready {
+            return false;
+        }
+
+        match frame {
+            Inbound::Key { payload, .. }
+                if matches!(payload.id.as_str(), "k1" | "k2" | "k3") =>
+            {
+                let index = match payload.id.as_str() {
+                    "k1" => 0,
+                    "k2" => 1,
+                    _ => 2,
+                };
+                let selected = state.inner.lock().ok().and_then(|mut inner| {
+                    let key = inner.kc_binds.sessions.get(index)?.trim().to_string();
+                    let is_api_slot = !key.is_empty()
+                        && inner.crew_api_slots.iter().any(|slot| slot.key == key);
+                    if !is_api_slot {
+                        return None;
+                    }
+                    if payload.action == KeyAction::Down {
+                        inner.crew_api_active_slot = Some(key.clone());
+                    }
+                    Some(key)
+                });
+                if let Some(slot) = selected {
+                    if payload.action == KeyAction::Down {
+                        let _ = app.emit("crew-api-active-slot", slot.clone());
+                        log_line(app, format!("[CREW-API] selected stable slot {slot}"));
+                    }
+                    // Consume Long/Up too, preventing the same physical press
+                    // from falling through to a second Alt+N action.
+                    return true;
+                }
+                false
+            }
+            Inbound::Asr { payload, .. } => {
+                append_crew_draft(app, state, payload.text.trim())
+            }
+            Inbound::Macro { payload, .. } => {
+                append_crew_draft(app, state, payload.name.trim())
+            }
+            Inbound::Key { payload, .. }
+                if payload.id == "k5" && payload.action == KeyAction::Down =>
+            {
+                submit_or_continue_crew_slot(app, state)
+            }
+            Inbound::Nav { payload, .. } => match (payload.dir, payload.action) {
+                (NavDir::Left, KeyAction::Up) if payload.held_ms < 800 => {
+                    edit_crew_draft(app, state, DraftEdit::Backspace)
+                }
+                (NavDir::Left, KeyAction::Long) => {
+                    edit_crew_draft(app, state, DraftEdit::DeleteWord)
+                }
+                (NavDir::Up, KeyAction::Long) => {
+                    edit_crew_draft(app, state, DraftEdit::Clear)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn append_crew_draft(app: &AppHandle, state: &Shared, text: &str) -> bool {
+        if text.is_empty() {
+            return true;
+        }
+        let updated = state.inner.lock().ok().and_then(|mut inner| {
+            let slot = inner.crew_api_active_slot.clone()?;
+            let draft = inner.crew_api_drafts.entry(slot.clone()).or_default();
+            if !draft.is_empty() && !draft.ends_with(char::is_whitespace) {
+                draft.push(' ');
+            }
+            draft.push_str(text);
+            Some((slot, draft.clone()))
+        });
+        if let Some((slot, draft)) = updated {
+            emit_crew_draft(app, &slot, &draft);
+            log_line(
+                app,
+                format!("[CREW-API] draft updated for {slot} (content withheld from logs)"),
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    enum DraftEdit {
+        Backspace,
+        DeleteWord,
+        Clear,
+    }
+
+    fn edit_crew_draft(app: &AppHandle, state: &Shared, edit: DraftEdit) -> bool {
+        let updated = state.inner.lock().ok().and_then(|mut inner| {
+            let slot = inner.crew_api_active_slot.clone()?;
+            let draft = inner.crew_api_drafts.entry(slot.clone()).or_default();
+            match edit {
+                DraftEdit::Backspace => {
+                    draft.pop();
+                }
+                DraftEdit::DeleteWord => {
+                    let trimmed = draft.trim_end().to_string();
+                    let keep = trimmed
+                        .char_indices()
+                        .rev()
+                        .find(|(_, ch)| ch.is_whitespace())
+                        .map(|(index, _)| index)
+                        .unwrap_or(0);
+                    draft.truncate(keep);
+                }
+                DraftEdit::Clear => draft.clear(),
+            }
+            Some((slot, draft.clone()))
+        });
+        if let Some((slot, draft)) = updated {
+            emit_crew_draft(app, &slot, &draft);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn submit_or_continue_crew_slot(app: &AppHandle, state: &Shared) -> bool {
+        let job = state.inner.lock().ok().and_then(|mut inner| {
+            let slot = inner.crew_api_active_slot.clone()?;
+            let client = inner.crew_api.clone()?;
+            let draft = inner.crew_api_drafts.remove(&slot).unwrap_or_default();
+            Some((slot, draft, client))
+        });
+        let Some((slot, draft, client)) = job else {
+            return false;
+        };
+
+        let app_cb = app.clone();
+        let state_cb = state.clone();
+        let _ = thread::Builder::new()
+            .name("ak-crew-api-submit".to_string())
+            .spawn(move || {
+                let result = if draft.trim().is_empty() {
+                    client.continue_slot(&slot)
+                } else {
+                    client.send_message(&slot, &draft).map(|_| ())
+                };
+                match result {
+                    Ok(()) => {
+                        emit_crew_draft(&app_cb, &slot, "");
+                        log_line(
+                            &app_cb,
+                            format!("[CREW-API] K5 accepted for {slot} (content withheld from logs)"),
+                        );
+                    }
+                    Err(error) => {
+                        if !draft.is_empty() {
+                            if let Ok(mut inner) = state_cb.inner.lock() {
+                                inner.crew_api_drafts.insert(slot.clone(), draft.clone());
+                                inner.crew_api_last_error = error.clone();
+                            }
+                            emit_crew_draft(&app_cb, &slot, &draft);
+                        }
+                        log_line(
+                            &app_cb,
+                            format!("[CREW-API] K5 failed for {slot}: {error} · draft preserved"),
+                        );
+                    }
+                }
+            });
+        true
+    }
+
     fn handle_frame(app: &AppHandle, state: &Shared, frame: Inbound) {
         // Housekeeping frames the reader answers itself.
         match &frame {
@@ -1344,13 +1750,11 @@ mod app {
             }
         }
 
-        // FP-4b (route B — "the hands"): map the board event to a control action
-        // via the pure router, then drive the local Kiro Crew window (focus +
-        // SendInput). GATED on `control_enabled` (default ON): while disabled,
-        // board key/nav frames only reflect trigger state in the UI and NEVER
-        // drive Kiro Crew. Errors (e.g. no window matches) are logged, never
-        // fatal to the reader thread.
-        {
+        // Primary route: stable Crew slot REST control. When API is connected
+        // and Chat A/B/C has an API slot binding, consume the frame without
+        // focusing a window. Otherwise preserve the legacy SendInput behavior.
+        let api_consumed = route_board_via_crew_api(app, state, &frame);
+        if !api_consumed {
             let (enabled, action) = state
                 .inner
                 .lock()
@@ -1361,8 +1765,8 @@ mod app {
                 let desc = describe_control_action(&action);
                 let result = exec_control_action(app, state, &action);
                 match result {
-                    Ok(()) => log_line(app, format!("[KC-CTL] {desc}")),
-                    Err(e) => log_line(app, format!("[KC-CTL] {desc} failed: {e}")),
+                    Ok(()) => log_line(app, format!("[KC-CTL] fallback {desc}")),
+                    Err(e) => log_line(app, format!("[KC-CTL] fallback {desc} failed: {e}")),
                 }
             }
         }
@@ -1379,6 +1783,17 @@ mod app {
         let jump_chats = kc_binds.chats.clone();
         let kc_pinned_session = (!kc_binds.pinned_session.is_empty())
             .then(|| kc_binds.pinned_session.clone());
+        let crew_api = match CrewApiClient::from_env() {
+            Ok(client) => Some(client),
+            Err(error) => {
+                diagnostics::record("ERROR", "crew-api", &format!("client init failed: {error}"));
+                None
+            }
+        };
+        let crew_api_base_url = crew_api
+            .as_ref()
+            .map(|client| client.config().base_url())
+            .unwrap_or_default();
         let state: Shared = Arc::new(AppState {
             inner: Mutex::new(Inner {
                 transport: None,
@@ -1402,6 +1817,14 @@ mod app {
                 kc_status: HashMap::new(),
                 kc_pinned_session,
                 kc_binds,
+                crew_api,
+                crew_realtime: None,
+                crew_api_connected: false,
+                crew_api_base_url,
+                crew_api_last_error: String::new(),
+                crew_api_slots: Vec::new(),
+                crew_api_active_slot: None,
+                crew_api_drafts: HashMap::new(),
             }),
         });
         spawn_state_watchdog(state.clone());
@@ -1409,6 +1832,20 @@ mod app {
 
         tauri::Builder::default()
             .manage(state)
+            .setup(|app| {
+                let app_handle = app.handle().clone();
+                let shared = app.state::<Shared>().inner().clone();
+                if let Err(error) = start_crew_realtime(&app_handle, &shared) {
+                    if let Ok(mut inner) = shared.inner.lock() {
+                        inner.crew_api_last_error = error.clone();
+                    }
+                    log_line(
+                        &app_handle,
+                        format!("[CREW-API] startup unavailable: {error} · Hook fallback remains active"),
+                    );
+                }
+                Ok(())
+            })
             .invoke_handler(tauri::generate_handler![
                 list_serial_ports,
                 scan_ble,
@@ -1416,6 +1853,11 @@ mod app {
                 clear_logs,
                 set_control_enabled,
                 get_status,
+                crew_api_start,
+                crew_api_stop,
+                crew_api_list_slots,
+                crew_api_send_message,
+                crew_api_slot_action,
                 connect_device,
                 disconnect_device,
                 send_display,

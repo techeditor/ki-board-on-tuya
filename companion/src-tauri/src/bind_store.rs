@@ -6,9 +6,9 @@
 //! no-reload jump. The number is user-configurable per key.
 //!
 //! This module is **pure + cross-platform**: it (de)serializes and persists the
-//! store to `config_dir/ak-companion/binds.json` (reusing the `dirs` crate the
-//! status-sink handoff already uses). No Tauri / Windows deps, so it `cargo
-//! test`s on the Linux host.
+//! store to `~/.ak-companion/binds.json` (see the `app_dirs` module, shared with
+//! the status-sink handoff and the diagnostic logs). No Tauri / Windows deps, so
+//! it `cargo test`s on the Linux host.
 //!
 //! Design ref: `.kiro/specs/feature-probes-kirocrew-local-control/design.md`
 //! ("Milestone 4 — per-conversation binding").
@@ -188,7 +188,7 @@ impl BindStore {
         store
     }
 
-    /// Persist the store to `config_dir/ak-companion/binds.json`, creating the
+    /// Persist the store to `~/.ak-companion/binds.json`, creating the
     /// parent directory as needed.
     pub fn save(&self) -> Result<(), String> {
         let path = binds_path().ok_or("cannot resolve config dir for bind store")?;
@@ -231,18 +231,12 @@ fn idx(n: u8) -> Option<usize> {
     (i < SLOT_COUNT).then_some(i)
 }
 
-/// Path of the bind file: `<config-dir>/ak-companion/binds.json`. On Windows
-/// that resolves under `%LOCALAPPDATA%`, else `~/.config`; falls back to
-/// `$HOME/.config` when the platform config dir is unavailable — matching the
-/// status-sink handoff resolution.
+/// Path of the bind file: `~/.ak-companion/binds.json` (see `app_dirs`).
+/// The same dot-directory holds the hook handoff and the diagnostic logs, so
+/// the companion keeps all its state under one place in the user's home on
+/// every platform.
 pub fn binds_path() -> Option<PathBuf> {
-    let base = dirs::config_dir().or_else(|| {
-        std::env::var("HOME")
-            .ok()
-            .filter(|h| !h.trim().is_empty())
-            .map(|h| PathBuf::from(h).join(".config"))
-    })?;
-    Some(base.join("ak-companion").join("binds.json"))
+    Some(crate::app_dirs::companion_file("binds.json"))
 }
 
 #[cfg(test)]

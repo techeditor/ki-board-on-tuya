@@ -19,6 +19,30 @@ type Status = {
   device_volume: number;
   device_brightness: number;
   device_settings_synced: boolean;
+  crew_api_connected?: boolean;
+  crew_api_base_url?: string;
+  crew_api_last_error?: string;
+  crew_api_slots?: number;
+};
+
+type CrewSlot = {
+  key: string;
+  title: string;
+  agent: string;
+  running: boolean;
+  stopping: boolean;
+  pending_approval: boolean;
+  waiting_for_input: boolean;
+  needs_input: boolean;
+  subagents_running: boolean;
+  last_message: string;
+};
+
+type CrewConnection = {
+  connected: boolean;
+  base_url: string;
+  error: string;
+  retry_secs: number;
 };
 
 type DeviceSettings = {
@@ -171,6 +195,10 @@ const defaultStatus: Status = {
   device_volume: 70,
   device_brightness: 100,
   device_settings_synced: false,
+  crew_api_connected: false,
+  crew_api_base_url: "http://127.0.0.1:5476",
+  crew_api_last_error: "",
+  crew_api_slots: 0,
 };
 
 // Our 5 mechanical keys (k1..k5) with their phase-1 default intents. This is a
@@ -265,6 +293,14 @@ function App() {
   const [lcResult, setLcResult] = useState("");
   const [lcError, setLcError] = useState("");
   const [lcBusy, setLcBusy] = useState(false);
+
+  // Primary local API control + WebSocket status path. The legacy Hook listener
+  // and SendInput controls below remain available as fallbacks.
+  const [crewSlots, setCrewSlots] = useState<CrewSlot[]>([]);
+  const [crewSelectedSlot, setCrewSelectedSlot] = useState("");
+  const [crewMessage, setCrewMessage] = useState("");
+  const [crewApiBusy, setCrewApiBusy] = useState(false);
+  const [crewApiError, setCrewApiError] = useState("");
 
   // FP-4b M4 (§3.2): A/B/C chat numbers and optional AK display aliases.
   // Aliases save on blur/Enter rather than on every keystroke.
@@ -524,6 +560,49 @@ function App() {
     }
   }
 
+  // ── Primary Kiro Crew local API + WebSocket path ──────────────────────────
+  async function runCrewApi<T>(action: () => Promise<T>): Promise<T | undefined> {
+    setCrewApiBusy(true);
+    try {
+      setCrewApiError("");
+      return await action();
+    } catch (error) {
+      setCrewApiError(error instanceof Error ? error.message : String(error));
+      return undefined;
+    } finally {
+      setCrewApiBusy(false);
+    }
+  }
+
+  async function refreshCrewSlots() {
+    const slots = await invoke<CrewSlot[]>("crew_api_list_slots");
+    setCrewSlots(slots);
+    if (!crewSelectedSlot || !slots.some((slot) => slot.key === crewSelectedSlot)) {
+      setCrewSelectedSlot(slots[0]?.key ?? "");
+    }
+  }
+
+  async function sendCrewApiMessage() {
+    const message = crewMessage.trim();
+    if (!crewSelectedSlot) throw new Error("Select a Kiro Crew chat first.");
+    if (!message) throw new Error("Type a message first.");
+    await invoke("crew_api_send_message", { slot: crewSelectedSlot, message });
+    setCrewMessage("");
+  }
+
+  async function startCrewApi() {
+    await invoke("crew_api_start");
+  }
+
+  async function stopCrewApi() {
+    await invoke("crew_api_stop");
+  }
+
+  async function crewSlotAction(action: "continue" | "interrupt" | "stop") {
+    if (!crewSelectedSlot) throw new Error("Select a Kiro Crew chat first.");
+    await invoke("crew_api_slot_action", { slot: crewSelectedSlot, action });
+  }
+
   // ── FP-4b route B: Local Control (window focus + keystroke injection) ──────
   // Arg names match the #[tauri::command] signatures in src-tauri/src/lib.rs:
   //   kc_bind_window(title)   kc_send_text(text)
@@ -761,11 +840,43 @@ function App() {
       }
     });
 
-    // FP-4b STATUS: live per-session agent status pushed by the hook sink.
+    // Hook and API statuses both enter the same backend `kc-status` event,
+    // preserving Watched Chat and Chat A/B/C LCD routing.
     const unlistenStatus = listen<KcStatus>("kc-status", (event) => {
       const s = event.payload;
       setKcStatuses((prev) => ({ ...prev, [s.session_id]: s }));
     });
+
+    const unlistenCrewConnection = listen<CrewConnection>("crew-api-connection", (event) => {
+      const connection = event.payload;
+      setStatus((current) => ({
+        ...current,
+        crew_api_connected: connection.connected,
+        crew_api_base_url: connection.base_url,
+        crew_api_last_error: connection.error,
+      }));
+    });
+
+    const unlistenCrewSlots = listen<CrewSlot[]>("crew-api-slots", (event) => {
+      const slots = event.payload;
+      setCrewSlots(slots);
+      setStatus((current) => ({ ...current, crew_api_slots: slots.length }));
+      setCrewSelectedSlot((current) =>
+        current && slots.some((slot) => slot.key === current) ? current : (slots[0]?.key ?? ""),
+      );
+    });
+
+    const unlistenCrewActiveSlot = listen<string>("crew-api-active-slot", (event) => {
+      setCrewSelectedSlot(event.payload);
+    });
+
+    const unlistenCrewDraft = listen<{ slot: string; text: string }>(
+      "crew-api-draft",
+      (event) => {
+        setCrewSelectedSlot(event.payload.slot);
+        setCrewMessage(event.payload.text);
+      },
+    );
 
     // The board reports its current voice routing (cloud/system) on change and
     // on hello — reflect a board-side switch in the selector.
@@ -843,6 +954,15 @@ function App() {
       .then((sid) => setPinnedSession(sid || ""))
       .catch(() => undefined);
 
+    // Prime the REST-backed list as a cold-start/reconnect fallback. The
+    // WebSocket worker will keep it live after the initial snapshot.
+    invoke<CrewSlot[]>("crew_api_list_slots")
+      .then((slots) => {
+        setCrewSlots(slots);
+        setCrewSelectedSlot((current) => current || slots[0]?.key || "");
+      })
+      .catch(() => undefined);
+
     // Load the user-level global Crew hook status on first mount.
     invoke<HookStatus>("kc_hook_status", { exe: null })
       .then(setHookStatus)
@@ -853,6 +973,10 @@ function App() {
       unlistenLog.then((fn) => fn());
       unlistenBoard.then((fn) => fn());
       unlistenStatus.then((fn) => fn());
+      unlistenCrewConnection.then((fn) => fn());
+      unlistenCrewSlots.then((fn) => fn());
+      unlistenCrewActiveSlot.then((fn) => fn());
+      unlistenCrewDraft.then((fn) => fn());
       unlistenVoiceSource.then((fn) => fn());
       unlistenWifi.then((fn) => fn());
       unlistenActivation.then((fn) => fn());
@@ -1340,12 +1464,124 @@ function App() {
 
         {activeView === "kirocrew" && (
           <>
+            <Panel title="Kiro Crew API (Primary)">
+              <p className="hint">
+                Controls the local Crew gateway through REST and receives live chat state through
+                WebSocket. Authentication is bootstrapped from
+                <code> ~/.kiro/crew/.local_secret</code>; no secret or message content is logged.
+                The Hook listener and window injection panels below remain available as fallback.
+              </p>
+
+              <div className="lcd-grid" style={{ marginTop: 10 }}>
+                <div className="lcd">
+                  <span>CREW API</span>
+                  <strong className={status.crew_api_connected ? "good-text" : ""}>
+                    {status.crew_api_connected ? "CONNECTED" : "RECONNECTING"}
+                  </strong>
+                </div>
+                <div className="lcd">
+                  <span>ENDPOINT</span>
+                  <strong>{status.crew_api_base_url || "http://127.0.0.1:5476"}</strong>
+                </div>
+                <div className="lcd">
+                  <span>CHATS</span>
+                  <strong>{crewSlots.length || status.crew_api_slots || 0}</strong>
+                </div>
+              </div>
+
+              <div className="actions" style={{ marginTop: 10 }}>
+                <button
+                  disabled={crewApiBusy}
+                  onClick={() => void runCrewApi(refreshCrewSlots)}
+                >
+                  Refresh chats
+                </button>
+                <button
+                  className="secondary"
+                  disabled={crewApiBusy || Boolean(status.crew_api_connected)}
+                  onClick={() => void runCrewApi(startCrewApi)}
+                >
+                  Start WebSocket
+                </button>
+                <button
+                  className="secondary"
+                  disabled={crewApiBusy || !status.crew_api_connected}
+                  onClick={() => void runCrewApi(stopCrewApi)}
+                >
+                  Stop WebSocket
+                </button>
+              </div>
+
+              <label style={{ marginTop: 14 }}>Target chat (stable slot key)</label>
+              <select
+                value={crewSelectedSlot}
+                disabled={crewApiBusy || crewSlots.length === 0}
+                onChange={(event) => setCrewSelectedSlot(event.target.value)}
+              >
+                {crewSlots.length === 0 && <option value="">No chats discovered</option>}
+                {crewSlots.map((slot) => (
+                  <option key={slot.key} value={slot.key}>
+                    {slot.title || slot.key} · {slot.running ? "RUNNING" : "IDLE"} · {slot.key}
+                  </option>
+                ))}
+              </select>
+
+              <label style={{ marginTop: 12 }}>API message</label>
+              <input
+                value={crewMessage}
+                disabled={crewApiBusy || !crewSelectedSlot}
+                placeholder="Send directly to the selected Crew chat…"
+                onChange={(event) => setCrewMessage(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !crewApiBusy) {
+                    void runCrewApi(sendCrewApiMessage);
+                  }
+                }}
+              />
+              <div className="actions" style={{ marginTop: 6, flexWrap: "wrap" }}>
+                <button
+                  disabled={crewApiBusy || !crewSelectedSlot || !crewMessage.trim()}
+                  onClick={() => void runCrewApi(sendCrewApiMessage)}
+                >
+                  Send through API
+                </button>
+                <button
+                  className="secondary"
+                  disabled={crewApiBusy || !crewSelectedSlot}
+                  onClick={() => void runCrewApi(() => crewSlotAction("continue"))}
+                >
+                  Continue
+                </button>
+                <button
+                  className="secondary"
+                  disabled={crewApiBusy || !crewSelectedSlot}
+                  onClick={() => void runCrewApi(() => crewSlotAction("interrupt"))}
+                >
+                  Interrupt
+                </button>
+                <button
+                  className="secondary"
+                  disabled={crewApiBusy || !crewSelectedSlot}
+                  onClick={() => void runCrewApi(() => crewSlotAction("stop"))}
+                >
+                  Stop
+                </button>
+              </div>
+
+              {(crewApiError || status.crew_api_last_error) && (
+                <div className="error-banner" style={{ marginTop: 12 }}>
+                  {crewApiError || status.crew_api_last_error} · Hook fallback remains available.
+                </div>
+              )}
+            </Panel>
+
             <Panel title="Bind Chats with Keys (Control)">
               <p className="hint">
-                Bind Chat A, B, and C to Kiro Crew chat shortcuts and optionally name each slot.
-                Names are saved when you press Enter or click elsewhere, then shown on the AK;
-                leave a name blank to display its default <strong>A, B, or C</strong>. Use up to
-                {ALIAS_MAX_CHARS} English letters, numbers, spaces, or symbols.
+                Bind Chat A, B, and C to a stable Kiro Crew API chat and optionally name each
+                slot. K1–K3 select the API chat without focusing a window; ASR fills its draft
+                and K5 submits it. The Alt+ number remains the fallback when API/WS is offline
+                or no stable chat is bound. Names are saved when you press Enter or click
+                elsewhere; use up to {ALIAS_MAX_CHARS} English letters, numbers, spaces, or symbols.
               </p>
 
               {[1, 2, 3].map((slot) => {
@@ -1395,6 +1631,37 @@ function App() {
                     >
                       Reset to {slot}
                     </button>
+                    <div
+                      style={{
+                        gridColumn: "2 / -1",
+                        display: "grid",
+                        gridTemplateColumns: "90px minmax(0, 1fr)",
+                        alignItems: "center",
+                        gap: 8,
+                      }}
+                    >
+                      <span className="hint">API chat</span>
+                      <select
+                        value={bindSessions[slot - 1] ?? ""}
+                        disabled={bindBusy || crewSlots.length === 0}
+                        aria-label={`Chat ${defaultName} stable Crew API chat`}
+                        onChange={(event) => {
+                          const sessionId = event.target.value;
+                          runBind(() =>
+                            sessionId
+                              ? bindSession(slot, n ?? slot, sessionId)
+                              : clearBoundSession(slot),
+                          );
+                        }}
+                      >
+                        <option value="">Not bound · use Alt+{n ?? slot} fallback</option>
+                        {crewSlots.map((crewSlot) => (
+                          <option key={crewSlot.key} value={crewSlot.key}>
+                            {crewSlot.title || crewSlot.key} · {crewSlot.key}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                 );
               })}
@@ -1463,9 +1730,10 @@ function App() {
               {lcError && <div className="error-banner" style={{ marginTop: 14 }}>{lcError}</div>}
             </Panel>
 
-            <Panel title="Bind Chats with Agent Status (Local Hook Listener)">
+            <Panel title="Agent Status Hook (Fallback)">
               <p className="hint">
-                Receives Kiro Crew <strong>agent hooks</strong> on
+                Fallback path when the primary WebSocket is unavailable. It receives Kiro Crew
+                <strong> agent hooks</strong> on
                 <code> 127.0.0.1:5477/status</code> and mirrors each agent's state to the board
                 LCD as a <code>display</code> frame. The hook is a mode of this very binary
                 (<code>companion --hook</code>), gated by a per-run token.
@@ -1556,8 +1824,7 @@ function App() {
                     <p className="hint">
                       Each Crew ScriptHook invokes this command for dashboard agent turns. The hook
                       reads the sink port and token from
-                      <code> %APPDATA%\ak-companion\hook.json</code> (Windows) /
-                      <code> ~/.config/ak-companion/hook.json</code> (else). Starting the sink writes
+                      <code> ~/.ak-companion/hook.json</code> (all platforms). Starting the sink writes
                       that handoff file; no token is stored in the Crew hook configuration.
                     </p>
                   </div>
@@ -1583,7 +1850,7 @@ function App() {
               </div>
 
               <p className="hint watched-model-hint">
-                Chat A–C send a Kiro Crew shortcut (Alt+1–9) for the selected Chat #.
+                Chat A–C use stable API chats when bound; Alt+1–9 remains the offline fallback.
                 Watch chooses which live chat can update the keyboard screen.
               </p>
 

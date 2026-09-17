@@ -175,18 +175,11 @@ pub struct Handoff {
     pub token: String,
 }
 
-/// Path of the handoff file: `<config-dir>/ak-companion/hook.json`.
-/// On Windows that resolves under `%APPDATA%` (Roaming), else `~/.config`.
-/// Falls back to `~/.config/ak-companion/hook.json` derived from `HOME` when
-/// the platform config dir cannot be resolved.
+/// Path of the handoff file: `~/.ak-companion/hook.json` (see `app_dirs`).
+/// The same dot-directory holds the bind store and the diagnostic logs. The
+/// `--hook` subprocess resolves this same path to discover the running sink.
 pub fn handoff_path() -> Option<PathBuf> {
-    let base = dirs::config_dir().or_else(|| {
-        std::env::var("HOME")
-            .ok()
-            .filter(|h| !h.trim().is_empty())
-            .map(|h| PathBuf::from(h).join(".config"))
-    })?;
-    Some(base.join("ak-companion").join("hook.json"))
+    Some(crate::app_dirs::companion_file("hook.json"))
 }
 
 /// Write the handoff file (creating the parent dir). Used by the GUI on sink
@@ -650,13 +643,15 @@ mod tests {
     fn sink_round_trip_maps_and_fires_callback() {
         use std::sync::mpsc;
 
-        // Point config dir at a scratch dir so the test's handoff file does not
-        // clobber a real one. dirs::config_dir honours XDG_CONFIG_HOME on Linux.
+        // Point the companion home at a scratch dir so the test's handoff file
+        // does not clobber a real one. app_dirs::companion_dir resolves from
+        // HOME (then USERPROFILE), so overriding HOME redirects it to
+        // <scratch>/.ak-companion/hook.json.
         let scratch = std::env::var("KIROCREW_SCRATCH")
             .or_else(|_| std::env::var("TMPDIR"))
             .unwrap_or_else(|_| "/tmp".into());
         let cfg = format!("{scratch}/ak-hook-test-{}", std::process::id());
-        std::env::set_var("XDG_CONFIG_HOME", &cfg);
+        std::env::set_var("HOME", &cfg);
 
         let (tx, rx) = mpsc::channel::<DisplayState>();
         let mut sink = StatusSink::start(0, move |d| {
