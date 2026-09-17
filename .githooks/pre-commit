@@ -2,4 +2,7 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
-exec python3 "$repo_root/firmware/app/tools/version.py" auto-bump-staged
+# Firmware version (bumps only on staged firmware/app implementation changes).
+python3 "$repo_root/firmware/app/tools/version.py" auto-bump-staged
+# Companion version (bumps only on staged companion implementation changes).
+python3 "$repo_root/companion/tools/version.py" auto-bump-staged
