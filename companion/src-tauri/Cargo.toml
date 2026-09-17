@@ -45,6 +45,9 @@ dirs = "6"
 # Random status-sink token without pulling `rand`. getrandom 0.2 is already in
 # the tree (reqwest/rustls dep), so pinning the direct dep churns nothing.
 getrandom = "0.2"
+# Human-readable local timestamps for persistent diagnostics. Exact version is
+# already present in Cargo.lock; `clock` enables Local timezone conversion.
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri = { version = "2", features = [] }

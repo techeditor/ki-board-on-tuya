@@ -3,11 +3,12 @@
 //! Records only lifecycle and timing metadata. Callers must not pass protocol
 //! payloads, recognized speech, Wi-Fi passwords, or license values.
 
+use chrono::{DateTime, Local};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, Once, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 const LOG_DIR: &str = "agentic-keyboard-companion/logs";
 const LOG_FILE: &str = "companion.log";
@@ -27,6 +28,10 @@ fn log_path() -> PathBuf {
     base.join(LOG_DIR).join(LOG_FILE)
 }
 
+fn format_timestamp(now: SystemTime) -> String {
+    let local: DateTime<Local> = now.into();
+    local.format("%Y-%m-%d %H:%M:%S%.3f %:z").to_string()
+}
 fn open_logger() -> Logger {
     let path = log_path();
     if let Some(parent) = path.parent() {
@@ -99,14 +104,11 @@ pub fn init() -> PathBuf {
 
 /// Append and flush one diagnostic record, and mirror it to stderr in dev runs.
 pub fn record(level: &str, component: &str, message: &str) {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let timestamp = format_timestamp(SystemTime::now());
     let current = std::thread::current();
     let thread = current.name().unwrap_or("unnamed");
     let line = format!(
-        "{now_ms} [{level}] [{component}] [{thread}] {}\n",
+        "{timestamp} [{level}] [{component}] [{thread}] {}\n",
         sanitize(message)
     );
     eprint!("{line}");
@@ -127,6 +129,16 @@ mod tests {
         assert_eq!(
             sanitize("uuid=abc authkey=secret pass=hunter2\nnext"),
             "uuid=<redacted> authkey=<redacted> pass=<redacted> next"
+        );
+    }
+
+    #[test]
+    fn timestamp_is_human_readable_with_milliseconds_and_offset() {
+        let timestamp = format_timestamp(SystemTime::UNIX_EPOCH);
+        assert!(timestamp.starts_with("1969-") || timestamp.starts_with("1970-"));
+        assert!(timestamp.contains(".000 "));
+        assert!(
+            timestamp.ends_with("+00:00") || timestamp.contains(" +") || timestamp.contains(" -")
         );
     }
 }
