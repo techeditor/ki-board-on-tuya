@@ -14,13 +14,19 @@ improve the Kiro CLI / IDE development experience. Its differentiators are
 
 ## Hardware
 
-| Part | Model |
+> Versioning scheme: see [docs/versioning.md](docs/versioning.md). Current iteration **v0.3** (major refactor, in design).
+
+| Part | Model (v0.3) |
 |------|-------|
 | MCU | T5AI-Core (T5-E1 module, Cortex-M33F @ 480 MHz, Wi-Fi6 + BLE 5.4) |
-| Display | CL28CK230-18A LCD (ST7789, 320×240, SPI) |
-| Keys | 5× mechanical brown switch (CPG151101D06) |
-| Navigation | WS-1002 5-way switch |
+| Display | T280C7-C12-26 LCD (ST7789P3, 2.8" IPS, 320×240, SPI, 12P 0.5mm bottom-contact FPC) |
+| Keys | 6× mechanical keys K1–K6, hot-swap sockets (Kailh MX-compatible) |
+| Navigation | EC11 rotary encoder (A/B + push) |
+| Indicators | 7× WS2812 RGB (one under each of K1–K6, LED7 under/near EC11) |
 | Audio | onboard mic / speaker |
+| Baseboard | **passive**: keys + display + LEDs only; USB/power/charging all handled by the dev board |
+
+> v0.2 (previous, PCB silkscreen v1.2.0) used 5× brown switches + WS-1002 5-way joystick + CL28CK230-18A (18P) + on-baseboard USB/CH340C.
 
 ## Architecture
 

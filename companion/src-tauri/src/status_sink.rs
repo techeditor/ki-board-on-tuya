@@ -66,8 +66,8 @@ pub struct HookEvent {
     pub assistant_response: Option<String>,
 }
 
-/// A mapped status ready to render on the board LCD. `state` is a free string
-/// matching the `display` frame's state enum (`running` | `tool` | `idle` | …).
+/// A mapped status ready to render on the board LCD. `state` must match the
+/// Protocol v1 `display` frame enum: `idle` | `running` | `error`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayState {
     pub agent_name: String,
@@ -102,10 +102,13 @@ fn truncate_response(s: &str) -> String {
 /// | hook event        | state     | text                                  |
 /// |-------------------|-----------|---------------------------------------|
 /// | `agentSpawn`      | `running` | `agent started`                       |
-/// | `postToolUse`     | `tool`    | `using <tool_name>`                   |
+/// | `postToolUse`     | `running` | `using <tool_name>`                   |
 /// | `stop`            | `idle`    | `<assistant_response truncated>`      |
-/// | `userPromptSubmit`| `received`| `prompt received`                     |
+/// | `userPromptSubmit`| `running` | `prompt received`                     |
 /// | (anything else)   | `running` | `<event>`                             |
+///
+/// The `display` protocol only permits `idle`, `running`, and `error`. Hook
+/// detail remains in `text` and `detail_text`; it must not become a new state.
 ///
 /// `agent_name` is not carried by the hook payload (a hook fires for one agent
 /// but the name is not in the JSON), so it defaults to `"kirocrew"`; the app
@@ -120,7 +123,7 @@ pub fn map_hook_event(ev: &HookEvent) -> DisplayState {
         "posttooluse" => {
             let tool = ev.tool_name.as_deref().unwrap_or("tool");
             let text = format!("using {tool}");
-            ("tool", text.clone(), text)
+            ("running", text.clone(), text)
         }
         "stop" => {
             let resp = ev.assistant_response.as_deref().unwrap_or("");
@@ -133,7 +136,7 @@ pub fn map_hook_event(ev: &HookEvent) -> DisplayState {
         }
         "userpromptsubmit" => {
             let text = "prompt received".to_string();
-            ("received", text.clone(), text)
+            ("running", text.clone(), text)
         }
         // Unknown / finer states retain the original spelling for diagnostics.
         _ => ("running", ev.event.clone(), ev.event.clone()),
@@ -481,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn post_tool_use_maps_to_tool_with_name() {
+    fn post_tool_use_maps_to_running_with_name() {
         let ev = HookEvent {
             event: "PostToolUse".into(),
             session_id: "s2".into(),
@@ -489,7 +492,7 @@ mod tests {
             ..Default::default()
         };
         let d = map_hook_event(&ev);
-        assert_eq!(d.state, "tool");
+        assert_eq!(d.state, "running");
         assert_eq!(d.text, "using web_search");
     }
 
@@ -549,14 +552,49 @@ mod tests {
     }
 
     #[test]
-    fn user_prompt_submit_maps_to_received() {
+    fn user_prompt_submit_maps_to_running() {
         let ev = HookEvent {
             event: "UserPromptSubmit".into(),
             ..Default::default()
         };
         let d = map_hook_event(&ev);
-        assert_eq!(d.state, "received");
+        assert_eq!(d.state, "running");
         assert_eq!(d.text, "prompt received");
+    }
+
+    #[test]
+    fn hook_mappings_only_emit_protocol_display_states() {
+        let events = [
+            HookEvent {
+                event: "AgentSpawn".into(),
+                ..Default::default()
+            },
+            HookEvent {
+                event: "PostToolUse".into(),
+                tool_name: Some("web_search".into()),
+                ..Default::default()
+            },
+            HookEvent {
+                event: "Stop".into(),
+                ..Default::default()
+            },
+            HookEvent {
+                event: "UserPromptSubmit".into(),
+                ..Default::default()
+            },
+            HookEvent {
+                event: "PreToolUse".into(),
+                ..Default::default()
+            },
+        ];
+
+        for event in events {
+            let state = map_hook_event(&event).state;
+            assert!(
+                matches!(state.as_str(), "idle" | "running" | "error"),
+                "unsupported Protocol v1 display state: {state}"
+            );
+        }
     }
 
     #[test]
