@@ -384,7 +384,7 @@ static void input_draw(void)
     (void)snprintf(encline, sizeof(encline), "ROT %s %ld", s_enc_last_dir, (long)s_enc_position);
     uint16_t ey = (uint16_t)(base_y + (row_h + gap));
     ak_gfx_fill_rect(166, ey, 144, row_h, AK_RGB565(40, 40, 48));
-    ak_gfx_text(172, (uint16_t)(ey + 5), encline, AK_COL_YELLOW, AK_RGB565(40, 40, 48), 2);
+    ak_gfx_text(172, (uint16_t)(ey + 6), encline, AK_COL_YELLOW, AK_RGB565(40, 40, 48), 1);
 
     lcd_flush();
 }
