@@ -31,7 +31,7 @@ traceability; the acceptance steps were renumbered in `TEST_PLAN.md` (old steps
 | 0 | Power-off visual inspection | — | TODO | |
 | 1 | `uart_loopback` | — | TODO | unchanged from v1.2 |
 | 2 | `key1_uart` | — | TODO | unchanged |
-| 3 | `input_scan` (6 keys + EC11) | — | TODO | verify key K6 and encoder CW/CCW direction + enc_sw |
+| 3 | `input_scan` (6 keys + EC11) | 2026-10-09 | **PASS** | all 6 keys (k1-k6) clean down/up no bounce; EC11 quadrature decodes cw/ccw 1 step per detent no missed/spurious steps, direction matches hand (A=P20/B=P21 correct, no swap); enc_sw short/long press clean; ready reports keys:6 encoder:1 inputs:8 |
 | 4 | `lcd_st7789` (12P ST7789P3) | 2026-10-09 | **PASS** | colors need INVON (ST7789P3 opposite of CL28CK230); landscape 320x240 via MADCTL=0xA0 (SDK does NOT auto-rotate -- rotation handled in hardware); on-screen TOP/BOTTOM/L/R text reads upright; P7 is TE, not driven |
 | 5 | `ws2812` (7 LEDs) | 2026-10-09 | **PASS** | 7-LED chain on SPI1_MOSI=P4; chain walk LED1->LED7 then RGB/white/off correct, no flicker |
 | 6 | `wireless_selftest` | — | TODO | unchanged |
