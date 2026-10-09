@@ -35,6 +35,7 @@ traceability; the acceptance steps were renumbered in `TEST_PLAN.md` (old steps
 | 4 | `lcd_st7789` (12P ST7789P3) | 2026-10-09 | **PASS** | colors need INVON (ST7789P3 opposite of CL28CK230); landscape 320x240 via MADCTL=0xA0 (SDK does NOT auto-rotate -- rotation handled in hardware); on-screen TOP/BOTTOM/L/R text reads upright; P7 is TE, not driven |
 | 5 | `ws2812` (7 LEDs) | 2026-10-09 | **PASS** | 7-LED chain on SPI1_MOSI=P4; chain walk LED1->LED7 then RGB/white/off correct, no flicker |
 | 6 | `wireless_selftest` | — | TODO | unchanged |
+| C | `full_selftest` (combined) | 2026-10-09 | **PASS** | one image covers all blocks; INPUT 6 keys + EC11 cw/ccw + enc_sw clean; UART loopback echoes ASCII and UTF-8 (CJK); EC11 rotation readout shrunk to fit; LCD color/orientation correct (INVON + MADCTL=0xA0); mode switch via EC11 long-press works |
 
 
 ## Environment
