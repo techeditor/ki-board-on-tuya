@@ -56,10 +56,13 @@
 
 /*
  * Landscape orientation: the panel is native 240(w)x320(h) portrait; the UI is
- * rotated 90 deg clockwise in hardware via the ST7789 MADCTL byte (see
- * s_st7789_init_seq_noinv), so the logical drawing surface is 320(w)x240(h).
- * The SPI flush addresses CASET/RASET straight from the frame buffer's own
- * width/height, so we just draw into a 320x240 buffer.
+ * placed landscape in hardware via the ST7789 MADCTL byte (0xA0, verified
+ * upright on v0.3 hardware -- see s_st7789_init_seq_noinv), so the logical
+ * drawing surface is 320(w)x240(h). The SDK does NOT auto-rotate the frame
+ * buffer (tdl_disp_dev_flush forwards it as-is), so orientation is MADCTL-only
+ * and we draw straight into a 320x240 buffer. The v0.3 ST7789P3 panel also
+ * needs display inversion ON (INVON) for correct colors, unlike the old
+ * CL28CK230.
  */
 #define SCREEN_W    (AK_LCD_NATIVE_HEIGHT) /* 320 */
 #define SCREEN_H    (AK_LCD_NATIVE_WIDTH)  /* 240 */
@@ -736,7 +739,7 @@ static const uint8_t s_st7789_init_seq_noinv[] = {
     0x33,
     1,
     0,
-    ST7789_INVOFF,
+    ST7789_INVON,
     2,
     0,
     ST7789_GCTRL,
@@ -777,7 +780,7 @@ static const uint8_t s_st7789_init_seq_noinv[] = {
     2,
     0,
     ST7789_MADCTL,
-    0x60, /* MV|MX: rotate 90 deg clockwise to landscape (320x240) */
+    0xA0, /* landscape 320x240, verified upright on v0.3 hardware 2026-10-09 */
     15,
     0,
     ST7789_PVGAMCTRL,
@@ -817,7 +820,7 @@ static const uint8_t s_st7789_init_seq_noinv[] = {
     ST7789_SPI2EN,
     1,
     10,
-    ST7789_INVOFF,
+    ST7789_INVON,
     1,
     10,
     ST7789_DISPON,
