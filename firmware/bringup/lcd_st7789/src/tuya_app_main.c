@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "agentic_board_io.h"
+#include "ak_gfx.h"
 #include "bringup_uart.h"
 #include "tal_api.h"
 #include "tdd_disp_st7789.h"
@@ -15,7 +16,16 @@
 
 #define APP_TASK_STACK_SIZE (6U * 1024U)
 #define DISPLAY_NAME        "bringup_lcd"
-#define FRAME_BYTES         (AK_LCD_NATIVE_WIDTH * AK_LCD_NATIVE_HEIGHT * 2U)
+/*
+ * v0.3 panel is mounted LANDSCAPE: the 240x320 native ST7789P3 is driven with a
+ * landscape MADCTL (0x60) so the displayed surface is 320 wide x 240 tall. The
+ * SDK does NOT auto-rotate the frame buffer (tdl_disp_dev_flush just forwards
+ * it), so orientation is handled in hardware via MADCTL and ALL draw coords use
+ * these landscape dimensions, not the portrait native ones.
+ */
+#define DISP_W              320U
+#define DISP_H              240U
+#define FRAME_BYTES         (DISP_W * DISP_H * 2U)
 #define PATTERN_DELAY_MS    2000U
 
 typedef struct {
@@ -33,11 +43,11 @@ static const SOLID_PATTERN_T s_solid_patterns[] = {
 };
 
 /*
- * The stock TuyaOpen ST7789 init sequence ends with INVON (0x21, display
- * inversion on), which some IPS panels require but the CL28CK230-18A does not.
- * With INVON this panel shows every pixel bit-inverted (red<->cyan, white<->
- * black). This is a copy of the stock sequence with the final INVON replaced by
- * INVOFF (0x20) so colors display correctly on this panel. Injected via
+ * v0.3 panel is the 12P T280C7-C12-26 (ST7789P3), which -- unlike the old
+ * CL28CK230-18A -- DOES require display inversion on (INVON, 0x21) to show
+ * colors correctly. With INVOFF this panel shows every pixel bit-inverted
+ * (red<->cyan, white<->black), confirmed on hardware 2026-10-09. This is the
+ * stock TuyaOpen ST7789 sequence with INVON kept. Injected via
  * tdd_disp_spi_st7789_set_init_seq() before register.
  */
 static const uint8_t s_st7789_init_seq_noinv[] = {
@@ -46,7 +56,7 @@ static const uint8_t s_st7789_init_seq_noinv[] = {
     2,    10,  ST7789_COLMOD,    0x55,                         // 16-bit color
     2,    0,   ST7789_VCMOFSET,  0x1a,                         // VCOM
     6,    0,   ST7789_PORCTRL,   0x0c, 0x0c, 0x00, 0x33, 0x33, // Porch
-    1,    0,   ST7789_INVOFF,                                  //
+    1,    0,   ST7789_INVON,                                   // ST7789P3 needs inversion ON
     2,    0,   ST7789_GCTRL,     0x56,                         // Gate control
     2,    0,   ST7789_VCOMS,     0x18,                         // VCOMS
     2,    0,   ST7789_LCMCTRL,   0x2c,                         // LCM control
@@ -56,13 +66,13 @@ static const uint8_t s_st7789_init_seq_noinv[] = {
     2,    0,   ST7789_FRCTR2,    0x0f,                         // FR control 2
     3,    0,   ST7789_PWCTRL1,   0xa6, 0xa1,                   // Power control 1
     2,    0,   ST7789_PWCTRL2,   0x03,                         // Power control 2
-    2,    0,   ST7789_MADCTL,    0x00,                         // MADCTL
+    2,    0,   ST7789_MADCTL,    0xA0,                         // MADCTL: landscape. 0x20 was up-right/L-R mirrored; +MY (0x80) to correct horizontal.
     15,   0,   ST7789_PVGAMCTRL, 0xd0, 0x0d, 0x14, 0x0b, 0x0b, 0x07, 0x3a, 0x44, 0x50, 0x08, 0x13, 0x13, 0x2d,
     0x32, // Positive gamma
     15,   0,   ST7789_NVGAMCTRL, 0xd0, 0x0d, 0x14, 0x0b, 0x0b, 0x07, 0x3a, 0x44, 0x50, 0x08, 0x13, 0x13, 0x2d,
     0x32,                     // Negative gamma
     1,    0,   ST7789_SPI2EN, //
-    1,    10,  ST7789_INVOFF, // No inversion for this panel (stock uses INVON)
+    1,    10,  ST7789_INVON,  // ST7789P3 needs inversion ON (CL28CK230 used INVOFF)
     1,    10,  ST7789_DISPON, // Display on
     0                         // Terminate list
 };
@@ -72,9 +82,15 @@ static OPERATE_RET display_register(void)
     DISP_SPI_DEVICE_CFG_T config;
 
     memset(&config, 0, sizeof(config));
-    config.width     = AK_LCD_NATIVE_WIDTH;
-    config.height    = AK_LCD_NATIVE_HEIGHT;
+    config.width     = DISP_W;
+    config.height    = DISP_H;
     config.pixel_fmt = TUYA_PIXEL_FMT_RGB565;
+    /*
+     * The SDK does not auto-rotate (tdl_disp_dev_flush forwards the buffer as-is);
+     * rotation here is metadata only. Real orientation is set by the landscape
+     * MADCTL (0x60) in the init sequence above, with the frame buffer sized
+     * 320x240 to match. Keep this at ROTATION_0 so nothing double-rotates.
+     */
     config.rotation  = TUYA_DISPLAY_ROTATION_0;
     config.port      = AK_LCD_SPI_PORT;
     config.spi_clk   = AK_LCD_SPI_CLOCK_HZ;
@@ -121,8 +137,9 @@ static OPERATE_RET display_open(void)
     s_frame->x_start = 0;
     s_frame->y_start = 0;
     s_frame->fmt     = TUYA_PIXEL_FMT_RGB565;
-    s_frame->width   = AK_LCD_NATIVE_WIDTH;
-    s_frame->height  = AK_LCD_NATIVE_HEIGHT;
+    s_frame->width   = DISP_W;
+    s_frame->height  = DISP_H;
+    ak_gfx_bind(s_frame, s_info.is_swap);
     return OPRT_OK;
 }
 
@@ -131,20 +148,34 @@ static OPERATE_RET draw_color_bars(void)
     static const uint16_t colors[] = {
         0xF800, 0xFFE0, 0x07E0, 0x07FF, 0x001F, 0xF81F, 0xFFFF, 0x0000,
     };
-    uint16_t bar_width = AK_LCD_NATIVE_WIDTH / CNTSOF(colors);
+    uint16_t bar_width = DISP_W / CNTSOF(colors);
 
     for (uint32_t index = 0; index < CNTSOF(colors); index++) {
         TDL_DISP_RECT_T rect = {
             .x0 = (uint16_t)(index * bar_width),
             .y0 = 0,
-            .x1 = index == CNTSOF(colors) - 1 ? AK_LCD_NATIVE_WIDTH - 1 : (uint16_t)((index + 1) * bar_width - 1),
-            .y1 = AK_LCD_NATIVE_HEIGHT - 1,
+            .x1 = index == CNTSOF(colors) - 1 ? DISP_W - 1 : (uint16_t)((index + 1) * bar_width - 1),
+            .y1 = DISP_H - 1,
         };
         OPERATE_RET rt = tdl_disp_draw_fill(s_frame, &rect, colors[index], s_info.is_swap);
         if (rt != OPRT_OK) {
             return rt;
         }
     }
+
+    /*
+     * Orientation labels in the landscape 320x240 frame space. Mounted correctly,
+     * every label reads upright: TOP at the top edge, BOTTOM at the bottom,
+     * LEFT/RIGHT on the sides, and the centre shows panel + MADCTL. If text is
+     * upside-down or mirrored, flip the MADCTL value (0x60 <-> 0xA0 <-> 0xC0).
+     */
+    ak_gfx_text(144, 4, "TOP", AK_COL_WHITE, AK_COL_BLACK, 2);
+    ak_gfx_text(120, DISP_H - 20, "BOTTOM", AK_COL_WHITE, AK_COL_BLACK, 2);
+    ak_gfx_text(4, 112, "L", AK_COL_WHITE, AK_COL_BLACK, 2);
+    ak_gfx_text(DISP_W - 20, 112, "R", AK_COL_WHITE, AK_COL_BLACK, 2);
+    ak_gfx_text(104, 96, "ST7789P3", AK_COL_WHITE, AK_COL_BLACK, 2);
+    ak_gfx_text(96, 128, "320x240 M=A0", AK_COL_YELLOW, AK_COL_BLACK, 2);
+
     return tdl_disp_dev_flush(s_display, s_frame);
 }
 
@@ -154,6 +185,9 @@ static OPERATE_RET draw_solid(uint16_t color)
     if (rt != OPRT_OK) {
         return rt;
     }
+    /* Orientation markers on solid frames too (gray cell reads on any color). */
+    ak_gfx_text(144, 4, "TOP", AK_COL_WHITE, AK_COL_GRAY, 2);
+    ak_gfx_text(120, DISP_H - 20, "BOTTOM", AK_COL_WHITE, AK_COL_GRAY, 2);
     return tdl_disp_dev_flush(s_display, s_frame);
 }
 
@@ -182,7 +216,7 @@ static void user_main(void)
 
     bringup_uart_printf("{\"v\":1,\"type\":\"bringup\",\"payload\":{\"name\":\"lcd_st7789\","
                         "\"status\":\"ready\",\"width\":%u,\"height\":%u,\"spi_hz\":%u}}\n",
-                        AK_LCD_NATIVE_WIDTH, AK_LCD_NATIVE_HEIGHT, AK_LCD_SPI_CLOCK_HZ);
+                        DISP_W, DISP_H, AK_LCD_SPI_CLOCK_HZ);
 
     while (1) {
         rt = draw_color_bars();

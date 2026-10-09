@@ -18,6 +18,25 @@ traceability matters.
 
 Status legend: PASS / FAIL / PARTIAL / TODO.
 
+## v0.3 acceptance (expansion baseboard, 2026-10-01 rev)
+
+Re-test on the v0.3 board (6 keys + EC11 encoder, 7x WS2812, 12P ST7789P3 with
+P7=TE, expansion USB/battery removed). Firmware built on the EC2 devbox and
+flashed from Windows via `scripts/flash.ps1`. The v1.0 log below is retained for
+traceability; the acceptance steps were renumbered in `TEST_PLAN.md` (old steps
+6/7 battery/VBUS dropped).
+
+| Step | App / check | Date | Result | Notes |
+|------|-------------|------|--------|-------|
+| 0 | Power-off visual inspection | — | TODO | |
+| 1 | `uart_loopback` | — | TODO | unchanged from v1.2 |
+| 2 | `key1_uart` | — | TODO | unchanged |
+| 3 | `input_scan` (6 keys + EC11) | — | TODO | verify key K6 and encoder CW/CCW direction + enc_sw |
+| 4 | `lcd_st7789` (12P ST7789P3) | 2026-10-09 | **PASS** | colors need INVON (ST7789P3 opposite of CL28CK230); landscape 320x240 via MADCTL=0xA0 (SDK does NOT auto-rotate -- rotation handled in hardware); on-screen TOP/BOTTOM/L/R text reads upright; P7 is TE, not driven |
+| 5 | `ws2812` (7 LEDs) | 2026-10-09 | **PASS** | 7-LED chain on SPI1_MOSI=P4; chain walk LED1->LED7 then RGB/white/off correct, no flicker |
+| 6 | `wireless_selftest` | — | TODO | unchanged |
+
+
 ## Environment
 
 | Item | Value |
