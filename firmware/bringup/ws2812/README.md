@@ -1,12 +1,16 @@
-# WS2812 bring-up
+# WS2812 bring-up (v0.3)
 
-Validates the three daisy-chained WS2812 LEDs on the v1.2 baseboard:
+Validates the seven daisy-chained WS2812 LEDs on the v0.3 baseboard:
 
 ```text
-P4 (SPI1_MOSI) -> SN74LV1T34 -> R3 -> LED1 -> LED2 -> LED3
+P4 (SPI1_MOSI) -> SN74LV1T34 -> R3 -> LED1 -> LED2 -> ... -> LED7
 ```
 
-v1.2 drives the LEDs through TuyaOpen's official SPI WS2812 driver
+> v0.3 grew the chain from 3 to **7 LEDs** (one under each of K1-K6, plus one
+> near the EC11 encoder; the EC11 LED, LED7, sits at the end of the chain with
+> its DO left floating). The data path is unchanged from v1.2.
+
+v0.3 drives the LEDs through TuyaOpen's official SPI WS2812 driver
 (`tdd_pixel_ws2812` + `tdl_pixel_*`). The data line is **SPI1_MOSI = P4**, fixed
 by the SDK pinmux (`TKL_SPI1_MOSI_PIN = GPIO_4`). `tkl_spi_init(SPI1)` claims the
 whole SPI1 group P2/P3/P4/P5, but only MOSI carries data; SCK/CSN/MISO are unused
@@ -25,12 +29,13 @@ before rebuilding.
 The sequence is:
 
 1. all off
-2. LED1 red
-3. LED2 green
-4. LED3 blue
-5. all three dim white
+2. walk LED1 -> LED7 one at a time (verifies chain order and every LED's DIN/DO)
+3. LED1 red
+4. LED2 green
+5. LED3 blue
+6. all seven dim white
 
 Both the Tuya debug log and UART0 report each step. Startup output includes the
 project version, build timestamp, driver revision, SPI port, and data pin.
-UART0 runs at 115200 baud. Brightness is deliberately limited (level 16/255)
-because three LEDs at full white can exceed the battery switch current rating.
+UART0 runs at 115200 baud. Brightness is deliberately limited (level 16/255);
+seven LEDs at full white can draw ~255 mA, so keep the bring-up default.

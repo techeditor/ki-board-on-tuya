@@ -3,13 +3,15 @@
  * @brief Combined hardware self-test for the Agentic Keyboard baseboard.
  *
  * One flashable image that exercises every block validated by the standalone
- * bring-up apps: input (5 keys + 5-way nav), LCD (ST7789), WS2812 LEDs, UART0
- * loopback, and Wi-Fi/BLE radio. A single non-blocking main loop scans inputs
- * continuously; each test mode animates from elapsed-time checks so input stays
- * responsive.
+ * bring-up apps: input (6 keys + EC11 encoder), LCD (ST7789), WS2812 LEDs,
+ * UART0 loopback, and Wi-Fi/BLE radio. A single non-blocking main loop scans
+ * inputs continuously; each test mode animates from elapsed-time checks so
+ * input stays responsive.
  *
- * Long-press the 5-way CENTER button (>= 800 ms) to advance to the next test.
- * The current test name and instructions are shown on the LCD at all times.
+ * v0.3 replaced the five-way joystick with an EC11 rotary encoder, so the mode
+ * switch moved from "long-press NAV CENTER" to "long-press the EC11 push
+ * button (enc_sw) >= 800 ms". The current test name and instructions are shown
+ * on the LCD at all times.
  *
  * IO mapping comes from common/include/agentic_board_io.h (mirrors
  * hardware/pinmap/). UART0 (P10/P11, 115200 8N1) carries JSON test events; the
@@ -68,7 +70,7 @@
 
 #define DISPLAY_NAME "selftest_lcd"
 #define WS_DEV_NAME  "selftest_ws2812"
-#define WS_LEVEL     16U /* keep 3x white peak current low */
+#define WS_LEVEL     16U /* keep 7x white peak current low */
 
 /* ------------------------------------------------------------------ modes */
 
@@ -100,8 +102,9 @@ typedef enum {
 typedef struct {
     const char       *id;
     const char       *label;
-    bool              is_nav;
+    bool              is_enc_sw; /* the EC11 push button (mode-switch key) */
     TUYA_GPIO_NUM_E   pin;
+    TUYA_GPIO_LEVEL_E active;
     TUYA_GPIO_LEVEL_E stable;
     TUYA_GPIO_LEVEL_E candidate;
     uint32_t          candidate_since;
@@ -109,19 +112,39 @@ typedef struct {
     bool              pressed; /* debounced active state, for the UI */
 } INPUT_STATE_T;
 
-#define CENTER_INDEX 9U
+/* enc_sw is the last entry; long-pressing it advances the test mode. */
+#define ENC_SW_INDEX 6U
 
 static INPUT_STATE_T s_inputs[] = {
-    {"k1", "K1", false, AK_KEY1_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"k2", "K2", false, AK_KEY2_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"k3", "K3", false, AK_KEY3_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"k4", "K4", false, AK_KEY4_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"k5", "K5", false, AK_KEY5_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"up", "UP", true, AK_NAV_UP_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"down", "DOWN", true, AK_NAV_DOWN_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"left", "LEFT", true, AK_NAV_LEFT_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"right", "RIGHT", true, AK_NAV_RIGHT_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
-    {"center", "CENTER", true, AK_NAV_CENTER_PIN, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
+    {"k1", "K1", false, AK_KEY1_PIN, AK_KEY_ACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
+    {"k2", "K2", false, AK_KEY2_PIN, AK_KEY_ACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
+    {"k3", "K3", false, AK_KEY3_PIN, AK_KEY_ACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
+    {"k4", "K4", false, AK_KEY4_PIN, AK_KEY_ACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
+    {"k5", "K5", false, AK_KEY5_PIN, AK_KEY_ACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
+    {"k6", "K6", false, AK_KEY6_PIN, AK_KEY_ACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0, false},
+    {"enc_sw", "ENC", true, AK_EC11_SW_PIN, AK_EC11_SW_ACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, AK_KEY_INACTIVE_LEVEL, 0, 0,
+     false},
+};
+
+/* ---- EC11 quadrature phases A/B (not in the key table) ---- */
+typedef struct {
+    TUYA_GPIO_LEVEL_E stable;
+    TUYA_GPIO_LEVEL_E candidate;
+    uint32_t          candidate_since;
+} PHASE_STATE_T;
+
+#define ENC_DEBOUNCE_MS          2U
+#define ENC_SUBSTEPS_PER_DETENT  4
+
+static PHASE_STATE_T s_phase_a;
+static PHASE_STATE_T s_phase_b;
+static uint8_t       s_enc_code;
+static int32_t       s_enc_accum;
+static int32_t       s_enc_position; /* net detents, for the UI */
+static const char   *s_enc_last_dir = "-";
+
+static const int8_t s_quad_table[16] = {
+    0, -1, +1, 0, +1, 0, 0, -1, -1, 0, 0, +1, 0, +1, -1, 0,
 };
 
 /* ------------------------------------------------------------------ state */
@@ -175,7 +198,7 @@ static void draw_header(void)
     ak_gfx_text(6, 7, title, AK_COL_WHITE, s_mode_colors[s_mode], 2);
 
     ak_gfx_fill_rect(0, TITLE_H, SCREEN_W, CONTENT_Y - TITLE_H, AK_COL_BLACK);
-    ak_gfx_text(6, TITLE_H + 6, "Hold CENTER = next", AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text(6, TITLE_H + 6, "Hold ENC = next", AK_COL_CYAN, AK_COL_BLACK, 1);
 }
 
 static void clear_content(void)
@@ -203,29 +226,54 @@ static void emit_mode(void)
 
 /* ------------------------------------------------------------ input scan */
 
-static OPERATE_RET inputs_init(void)
+static OPERATE_RET gpio_input_init_one(TUYA_GPIO_NUM_E pin, TUYA_GPIO_LEVEL_E *level)
 {
     TUYA_GPIO_BASE_CFG_T cfg = {
         .mode   = TUYA_GPIO_PULLUP,
         .direct = TUYA_GPIO_INPUT,
-        .level  = AK_KEY_INACTIVE_LEVEL,
+        .level  = TUYA_GPIO_LEVEL_HIGH,
     };
+    OPERATE_RET rt = tkl_gpio_init(pin, &cfg);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+    return tkl_gpio_read(pin, level);
+}
+
+static OPERATE_RET inputs_init(void)
+{
+    TUYA_GPIO_LEVEL_E level;
+    uint32_t          now = tal_system_get_millisecond();
 
     for (uint32_t i = 0; i < CNTSOF(s_inputs); i++) {
-        TUYA_GPIO_LEVEL_E level;
-        OPERATE_RET       rt = tkl_gpio_init(s_inputs[i].pin, &cfg);
-        if (rt != OPRT_OK) {
-            return rt;
-        }
-        rt = tkl_gpio_read(s_inputs[i].pin, &level);
+        OPERATE_RET rt = gpio_input_init_one(s_inputs[i].pin, &level);
         if (rt != OPRT_OK) {
             return rt;
         }
         s_inputs[i].stable          = level;
         s_inputs[i].candidate       = level;
-        s_inputs[i].candidate_since = tal_system_get_millisecond();
-        s_inputs[i].pressed         = (level == AK_KEY_ACTIVE_LEVEL);
+        s_inputs[i].candidate_since = now;
+        s_inputs[i].pressed         = (level == s_inputs[i].active);
     }
+
+    OPERATE_RET rt = gpio_input_init_one(AK_EC11_A_PIN, &level);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+    s_phase_a.stable = s_phase_a.candidate = level;
+    s_phase_a.candidate_since              = now;
+
+    rt = gpio_input_init_one(AK_EC11_B_PIN, &level);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+    s_phase_b.stable = s_phase_b.candidate = level;
+    s_phase_b.candidate_since              = now;
+
+    s_enc_code     = (uint8_t)(((s_phase_a.stable == TUYA_GPIO_LEVEL_HIGH ? 1U : 0U) << 1) |
+                           (s_phase_b.stable == TUYA_GPIO_LEVEL_HIGH ? 1U : 0U));
+    s_enc_accum    = 0;
+    s_enc_position = 0;
     return OPRT_OK;
 }
 
@@ -246,7 +294,7 @@ static INPUT_EVENT_E scan_input(INPUT_STATE_T *in, uint32_t now, uint32_t *held_
     }
 
     in->stable = raw;
-    if (raw == AK_KEY_ACTIVE_LEVEL) {
+    if (raw == in->active) {
         in->pressed_since = now;
         in->pressed       = true;
         *held_ms          = 0;
@@ -258,6 +306,53 @@ static INPUT_EVENT_E scan_input(INPUT_STATE_T *in, uint32_t now, uint32_t *held_
     return EV_UP;
 }
 
+/* Debounce one encoder phase; returns true if its stable level changed. */
+static bool scan_phase(PHASE_STATE_T *phase, TUYA_GPIO_NUM_E pin, uint32_t now)
+{
+    TUYA_GPIO_LEVEL_E raw;
+    if (tkl_gpio_read(pin, &raw) != OPRT_OK) {
+        return false;
+    }
+    if (raw != phase->candidate) {
+        phase->candidate       = raw;
+        phase->candidate_since = now;
+        return false;
+    }
+    if (raw == phase->stable || (uint32_t)(now - phase->candidate_since) < ENC_DEBOUNCE_MS) {
+        return false;
+    }
+    phase->stable = raw;
+    return true;
+}
+
+/* Decode EC11 rotation; returns +1 (cw) / -1 (ccw) per detent, else 0. */
+static int scan_encoder(uint32_t now)
+{
+    bool changed = false;
+    changed |= scan_phase(&s_phase_a, AK_EC11_A_PIN, now);
+    changed |= scan_phase(&s_phase_b, AK_EC11_B_PIN, now);
+    if (!changed) {
+        return 0;
+    }
+    uint8_t new_code = (uint8_t)(((s_phase_a.stable == TUYA_GPIO_LEVEL_HIGH ? 1U : 0U) << 1) |
+                                 (s_phase_b.stable == TUYA_GPIO_LEVEL_HIGH ? 1U : 0U));
+    int8_t  delta    = s_quad_table[(s_enc_code << 2) | new_code];
+    s_enc_code       = new_code;
+    if (delta == 0) {
+        return 0;
+    }
+    s_enc_accum += delta;
+    if (s_enc_accum >= ENC_SUBSTEPS_PER_DETENT) {
+        s_enc_accum -= ENC_SUBSTEPS_PER_DETENT;
+        return +1;
+    }
+    if (s_enc_accum <= -ENC_SUBSTEPS_PER_DETENT) {
+        s_enc_accum += ENC_SUBSTEPS_PER_DETENT;
+        return -1;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------ INPUT mode */
 
 static void input_draw(void)
@@ -265,21 +360,29 @@ static void input_draw(void)
     static const uint16_t row_h  = 24;
     static const uint16_t gap    = 4;
     uint16_t              base_y = CONTENT_Y + 6;
+    char                  encline[28];
 
-    /* Two columns: keys 0..4 left, nav 5..9 right. */
+    /* Left column: the 6 keys. Right column: encoder push + rotation. */
     for (uint32_t i = 0; i < CNTSOF(s_inputs); i++) {
-        bool     nav = s_inputs[i].is_nav;
-        uint16_t col = nav ? 166 : 10;
-        uint16_t idx = nav ? (uint16_t)(i - 5) : (uint16_t)i;
-        uint16_t x   = col;
-        uint16_t y   = (uint16_t)(base_y + idx * (row_h + gap));
-        uint16_t w   = 144;
-        uint16_t bg  = s_inputs[i].pressed ? AK_COL_GREEN : AK_RGB565(40, 40, 48);
-        uint16_t fg  = s_inputs[i].pressed ? AK_COL_BLACK : AK_COL_WHITE;
+        bool     is_sw = s_inputs[i].is_enc_sw;
+        uint16_t col   = is_sw ? 166 : 10;
+        uint16_t idx   = is_sw ? 0 : (uint16_t)i;
+        uint16_t x     = col;
+        uint16_t y     = (uint16_t)(base_y + idx * (row_h + gap));
+        uint16_t w     = 144;
+        uint16_t bg    = s_inputs[i].pressed ? AK_COL_GREEN : AK_RGB565(40, 40, 48);
+        uint16_t fg    = s_inputs[i].pressed ? AK_COL_BLACK : AK_COL_WHITE;
 
         ak_gfx_fill_rect(x, y, w, row_h, bg);
         ak_gfx_text((uint16_t)(x + 6), (uint16_t)(y + 5), s_inputs[i].label, fg, bg, 2);
     }
+
+    /* Encoder rotation readout under the ENC push row. */
+    (void)snprintf(encline, sizeof(encline), "ROT %s %ld", s_enc_last_dir, (long)s_enc_position);
+    uint16_t ey = (uint16_t)(base_y + (row_h + gap));
+    ak_gfx_fill_rect(166, ey, 144, row_h, AK_RGB565(40, 40, 48));
+    ak_gfx_text(172, (uint16_t)(ey + 5), encline, AK_COL_YELLOW, AK_RGB565(40, 40, 48), 2);
+
     lcd_flush();
 }
 
@@ -287,15 +390,18 @@ static void input_report(INPUT_STATE_T *in, INPUT_EVENT_E ev, uint32_t held_ms)
 {
     s_sequence++;
     const char *action = (ev == EV_DOWN) ? "down" : "up";
-    if (in->is_nav) {
-        emit("{\"v\":1,\"seq\":%u,\"type\":\"nav\",\"payload\":{\"dir\":\"%s\",\"action\":\"%s\","
-             "\"held_ms\":%u}}\n",
-             s_sequence, in->id, action, held_ms);
-    } else {
-        emit("{\"v\":1,\"seq\":%u,\"type\":\"key\",\"payload\":{\"id\":\"%s\",\"action\":\"%s\","
-             "\"held_ms\":%u}}\n",
-             s_sequence, in->id, action, held_ms);
-    }
+    emit("{\"v\":1,\"seq\":%u,\"type\":\"key\",\"payload\":{\"id\":\"%s\",\"action\":\"%s\","
+         "\"held_ms\":%u}}\n",
+         s_sequence, in->id, action, held_ms);
+}
+
+static void enc_report(int dir)
+{
+    s_sequence++;
+    s_enc_last_dir = (dir > 0) ? "cw" : "ccw";
+    s_enc_position += dir;
+    emit("{\"v\":1,\"seq\":%u,\"type\":\"enc\",\"payload\":{\"dir\":\"%s\",\"steps\":1,\"pos\":%ld}}\n",
+         s_sequence, s_enc_last_dir, (long)s_enc_position);
 }
 
 /* ------------------------------------------------------------ LCD mode */
@@ -353,12 +459,11 @@ typedef struct {
 } WS_PATTERN_T;
 
 static const WS_PATTERN_T s_ws_patterns[] = {
-    {"all_off", {WRGB(0, 0, 0), WRGB(0, 0, 0), WRGB(0, 0, 0)}},
-    {"led1_red", {WRGB(WS_LEVEL, 0, 0), WRGB(0, 0, 0), WRGB(0, 0, 0)}},
-    {"led2_green", {WRGB(0, 0, 0), WRGB(0, WS_LEVEL, 0), WRGB(0, 0, 0)}},
-    {"led3_blue", {WRGB(0, 0, 0), WRGB(0, 0, 0), WRGB(0, 0, WS_LEVEL)}},
-    {"all_white",
-     {WRGB(WS_LEVEL, WS_LEVEL, WS_LEVEL), WRGB(WS_LEVEL, WS_LEVEL, WS_LEVEL), WRGB(WS_LEVEL, WS_LEVEL, WS_LEVEL)}},
+    {"all_off", {[0 ... AK_WS2812_COUNT - 1] = WRGB(0, 0, 0)}},
+    {"all_red", {[0 ... AK_WS2812_COUNT - 1] = WRGB(WS_LEVEL, 0, 0)}},
+    {"all_green", {[0 ... AK_WS2812_COUNT - 1] = WRGB(0, WS_LEVEL, 0)}},
+    {"all_blue", {[0 ... AK_WS2812_COUNT - 1] = WRGB(0, 0, WS_LEVEL)}},
+    {"all_white", {[0 ... AK_WS2812_COUNT - 1] = WRGB(WS_LEVEL, WS_LEVEL, WS_LEVEL)}},
 };
 
 static OPERATE_RET ws_send(const PIXEL_COLOR_T colors[AK_WS2812_COUNT])
@@ -380,7 +485,7 @@ static void ws_show(uint32_t step)
     }
 
     clear_content();
-    ak_gfx_text(8, CONTENT_Y + 10, "WS2812 x3 @ SPI1 P4", AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text(8, CONTENT_Y + 10, "WS2812 x7 @ SPI1 P4", AK_COL_WHITE, AK_COL_BLACK, 1);
     ak_gfx_text(8, CONTENT_Y + 40, "Pattern:", AK_COL_GRAY, AK_COL_BLACK, 2);
     ak_gfx_text(8, CONTENT_Y + 70, p->name, AK_COL_YELLOW, AK_COL_BLACK, 2);
     if (!s_ws_ok || rt != OPRT_OK) {
@@ -736,8 +841,9 @@ static OPERATE_RET display_init(void)
     config.bl.type              = TUYA_DISP_BL_TP_GPIO;
     config.bl.gpio.pin          = AK_LCD_BACKLIGHT_PIN;
     config.bl.gpio.active_level = AK_LCD_CONTROL_ACTIVE;
-    config.power.pin            = AK_LCD_POWER_PIN;
-    config.power.active_level   = AK_LCD_CONTROL_ACTIVE;
+    /* v0.3: no LCD_PWR line (P7 is now TE). Sentinel = "no power GPIO". */
+    config.power.pin            = TUYA_GPIO_NUM_MAX;
+    config.power.active_level   = TUYA_GPIO_LEVEL_LOW;
 
     tdd_disp_spi_st7789_set_init_seq(s_st7789_init_seq_noinv);
 
@@ -847,7 +953,7 @@ static void user_main(void)
     while (1) {
         uint32_t now = tal_system_get_millisecond();
 
-        /* Scan every input; report events only while in the INPUT test. */
+        /* Scan every key; report events only while in the INPUT test. */
         for (uint32_t i = 0; i < CNTSOF(s_inputs); i++) {
             uint32_t      held = 0;
             INPUT_EVENT_E ev   = scan_input(&s_inputs[i], now, &held);
@@ -859,8 +965,17 @@ static void user_main(void)
             }
         }
 
-        /* CENTER long-press switches test mode in any mode. */
-        if (s_inputs[CENTER_INDEX].stable == AK_KEY_ACTIVE_LEVEL) {
+        /* Scan the EC11 rotation; report + redraw only in the INPUT test. */
+        {
+            int dir = scan_encoder(now);
+            if (dir != 0 && s_mode == TEST_INPUT) {
+                enc_report(dir);
+                s_input_dirty = true;
+            }
+        }
+
+        /* ENC push long-press switches test mode in any mode. */
+        if (s_inputs[ENC_SW_INDEX].stable == s_inputs[ENC_SW_INDEX].active) {
             if (!s_center_active) {
                 s_center_active   = true;
                 s_center_since    = now;

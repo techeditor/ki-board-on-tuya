@@ -85,8 +85,16 @@ static OPERATE_RET display_register(void)
     config.bl.type              = TUYA_DISP_BL_TP_GPIO;
     config.bl.gpio.pin          = AK_LCD_BACKLIGHT_PIN;
     config.bl.gpio.active_level = AK_LCD_CONTROL_ACTIVE;
-    config.power.pin            = AK_LCD_POWER_PIN;
-    config.power.active_level   = AK_LCD_CONTROL_ACTIVE;
+    /*
+     * v0.3: the 12P T280C7-C12-26 (ST7789P3) panel wires VDD (FPC pin 9) straight
+     * to 3V3 -- there is no LCD_PWR enable line any more. The old P7 power pin is
+     * repurposed as the TE input (see agentic_board_io.h). The driver treats
+     * power.pin >= TUYA_GPIO_NUM_MAX as "no power GPIO" (tdl_display_manage.c),
+     * so set the sentinel explicitly -- memset left it at 0 (= GPIO0), which the
+     * driver would otherwise init and drive.
+     */
+    config.power.pin          = TUYA_GPIO_NUM_MAX;
+    config.power.active_level = TUYA_GPIO_LEVEL_LOW;
 
     /* Use the no-inversion init sequence for the CL28CK230-18A panel. */
     tdd_disp_spi_st7789_set_init_seq(s_st7789_init_seq_noinv);

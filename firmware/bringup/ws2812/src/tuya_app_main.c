@@ -1,12 +1,13 @@
 /**
  * @file tuya_app_main.c
- * @brief Validate three WS2812 LEDs on the v1.2 SPI1_MOSI (P4) data net.
+ * @brief Validate seven WS2812 LEDs on the v0.3 SPI1_MOSI (P4) data net.
  *
- * v1.2 uses the official TuyaOpen SPI WS2812 driver (tdd_pixel_ws2812 +
- * tdl_pixel_*). The waveform is produced by the SPI1 peripheral (each WS2812
- * bit encoded as 8 SPI bits @6.5 MHz, 0=0xC0/1=0xF0), so it is immune to the
- * CPU/interrupt jitter that made the v1.0 P13 GPIO bit-bang driver unreliable.
- * SPI1 initialises the whole P2/P3/P4/P5 group; only MOSI=P4 carries data.
+ * v0.3 has 7 LEDs (one per key K1-K6 + LED7 near the EC11 encoder) in a single
+ * daisy chain. The waveform is produced by the official TuyaOpen SPI WS2812
+ * driver (tdd_pixel_ws2812 + tdl_pixel_*): each WS2812 bit is encoded as 8 SPI
+ * bits @6.5 MHz (0=0xC0/1=0xF0), so it is immune to the CPU/interrupt jitter
+ * that made the v1.0 P13 GPIO bit-bang driver unreliable. SPI1 initialises the
+ * whole P2/P3/P4/P5 group; only MOSI=P4 carries data.
  */
 
 #include <string.h>
@@ -22,11 +23,11 @@
 #include "tdl_pixel_color_manage.h"
 
 #define APP_TASK_STACK_SIZE (4U * 1024U)
-#define PATTERN_DELAY_MS    1000U
-#define WS2812_DRIVER_REV   "spi1-official-v6"
+#define PATTERN_DELAY_MS    700U
+#define WS2812_DRIVER_REV   "spi1-official-v7-7led"
 #define WS2812_DEVICE_NAME  "bringup_ws2812"
 #define WS2812_RESOLUTION   255U
-#define WS2812_LEVEL        16U /* keep brightness low: 3x white peak current */
+#define WS2812_LEVEL        16U /* keep brightness low: 7x white peak ~255mA */
 
 typedef struct {
     const char   *name;
@@ -41,14 +42,13 @@ typedef struct {
 static THREAD_HANDLE  s_app_thread = NULL;
 static PIXEL_HANDLE_T s_pixels     = NULL;
 
-static const WS_PATTERN_T s_patterns[] = {
-    {"all_off", {RGB(0, 0, 0), RGB(0, 0, 0), RGB(0, 0, 0)}},
-    {"led1_red", {RGB(WS2812_LEVEL, 0, 0), RGB(0, 0, 0), RGB(0, 0, 0)}},
-    {"led2_green", {RGB(0, 0, 0), RGB(0, WS2812_LEVEL, 0), RGB(0, 0, 0)}},
-    {"led3_blue", {RGB(0, 0, 0), RGB(0, 0, 0), RGB(0, 0, WS2812_LEVEL)}},
-    {"all_white",
-     {RGB(WS2812_LEVEL, WS2812_LEVEL, WS2812_LEVEL), RGB(WS2812_LEVEL, WS2812_LEVEL, WS2812_LEVEL),
-      RGB(WS2812_LEVEL, WS2812_LEVEL, WS2812_LEVEL)}},
+/* Fixed patterns run after the per-LED chain walk: RGB sweep then all white. */
+static const WS_PATTERN_T s_fixed_patterns[] = {
+    {"all_red", {[0 ... AK_WS2812_COUNT - 1] = RGB(WS2812_LEVEL, 0, 0)}},
+    {"all_green", {[0 ... AK_WS2812_COUNT - 1] = RGB(0, WS2812_LEVEL, 0)}},
+    {"all_blue", {[0 ... AK_WS2812_COUNT - 1] = RGB(0, 0, WS2812_LEVEL)}},
+    {"all_white", {[0 ... AK_WS2812_COUNT - 1] = RGB(WS2812_LEVEL, WS2812_LEVEL, WS2812_LEVEL)}},
+    {"all_off", {[0 ... AK_WS2812_COUNT - 1] = RGB(0, 0, 0)}},
 };
 
 static OPERATE_RET ws2812_register(void)
@@ -84,6 +84,17 @@ static OPERATE_RET ws2812_send(const PIXEL_COLOR_T colors[AK_WS2812_COUNT])
     return tdl_pixel_dev_refresh(s_pixels);
 }
 
+/* Light exactly one LED white, all others off, to verify daisy-chain order. */
+static OPERATE_RET ws2812_light_single(uint32_t which)
+{
+    PIXEL_COLOR_T colors[AK_WS2812_COUNT];
+    memset(colors, 0, sizeof(colors));
+    colors[which].red   = WS2812_LEVEL;
+    colors[which].green = WS2812_LEVEL;
+    colors[which].blue  = WS2812_LEVEL;
+    return ws2812_send(colors);
+}
+
 static void user_main(void)
 {
     OPERATE_RET rt;
@@ -116,19 +127,36 @@ static void user_main(void)
                         AK_WS2812_COUNT);
 
     while (1) {
-        for (uint32_t index = 0; index < CNTSOF(s_patterns); index++) {
-            rt = ws2812_send(s_patterns[index].colors);
+        /* Phase 1: walk the chain LED1..LED7, one at a time, to confirm order. */
+        for (uint32_t which = 0; which < AK_WS2812_COUNT; which++) {
+            rt = ws2812_light_single(which);
+            if (rt != OPRT_OK) {
+                bringup_uart_printf("{\"v\":1,\"type\":\"bringup\",\"payload\":{\"name\":\"ws2812\","
+                                    "\"status\":\"error\",\"stage\":\"walk\",\"led\":%u,\"code\":%d}}\n",
+                                    (unsigned)(which + 1U), rt);
+                return;
+            }
+            PR_NOTICE("WS2812 walk LED[%u/%u]", (unsigned)(which + 1U), (unsigned)AK_WS2812_COUNT);
+            bringup_uart_printf("{\"v\":1,\"type\":\"bringup\",\"payload\":{\"name\":\"ws2812\","
+                                "\"version\":\"%s\",\"walk_led\":%u,\"of\":%u}}\n",
+                                PROJECT_VERSION, (unsigned)(which + 1U), (unsigned)AK_WS2812_COUNT);
+            tal_system_sleep(PATTERN_DELAY_MS);
+        }
+
+        /* Phase 2: fixed full-chain patterns (RGB sweep, all white, off). */
+        for (uint32_t index = 0; index < CNTSOF(s_fixed_patterns); index++) {
+            rt = ws2812_send(s_fixed_patterns[index].colors);
             if (rt != OPRT_OK) {
                 bringup_uart_printf("{\"v\":1,\"type\":\"bringup\",\"payload\":{\"name\":\"ws2812\","
                                     "\"status\":\"error\",\"stage\":\"send\",\"code\":%d}}\n",
                                     rt);
                 return;
             }
-            PR_NOTICE("WS2812 pattern[%u/%u]=%s", (unsigned)(index + 1U), (unsigned)CNTSOF(s_patterns),
-                      s_patterns[index].name);
+            PR_NOTICE("WS2812 pattern[%u/%u]=%s", (unsigned)(index + 1U), (unsigned)CNTSOF(s_fixed_patterns),
+                      s_fixed_patterns[index].name);
             bringup_uart_printf("{\"v\":1,\"type\":\"bringup\",\"payload\":{\"name\":\"ws2812\","
                                 "\"version\":\"%s\",\"pattern\":\"%s\"}}\n",
-                                PROJECT_VERSION, s_patterns[index].name);
+                                PROJECT_VERSION, s_fixed_patterns[index].name);
             tal_system_sleep(PATTERN_DELAY_MS);
         }
     }
