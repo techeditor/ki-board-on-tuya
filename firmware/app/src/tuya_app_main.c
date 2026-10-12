@@ -1757,6 +1757,9 @@ static void on_rx_line(const char *line)
         ak_chat_history_add(session, text, true);
         if (session_index == s_selected_session) {
             ak_render_status();
+        } else {
+            /* The sidebar shows all slots, so repaint non-selected status changes too. */
+            s_lcd_redraw_pending = true;
         }
 #endif
     }
