@@ -29,6 +29,7 @@
 #define AK_COL_GRAY    0x8410U
 #define AK_COL_DKBLUE  0x0010U
 #define AK_COL_ORANGE  0xFD20U
+#define AK_COL_PURPLE  AK_RGB565(0x8EU, 0x48U, 0xFFU)
 
 /**
  * @brief Bind the frame buffer that subsequent draw calls target.

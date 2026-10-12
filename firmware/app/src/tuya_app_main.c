@@ -759,19 +759,28 @@ static void send_ack(uint32_t seq)
 }
 
 #if AK_ENABLE_DISPLAY
-/* Map a Kiro Crew agent state string to a title-bar color. */
+/* Map a Kiro Crew agent/slot state string to a status color.
+ *   purple: unbound / default (empty, "-", "unbound")
+ *   green : idle
+ *   red   : running (busy)
+ *   orange: waiting (needs user action)
+ *   blue  : info (feedback available, no action needed)
+ * Unknown states fall back to unbound (purple). */
 static uint16_t ak_status_color(const char *state)
 {
-    if (strcmp(state, "running") == 0) {
-        return AK_COL_GREEN;
-    } else if (strcmp(state, "tool") == 0) {
-        return AK_COL_ORANGE;
+    if (state == NULL || state[0] == '\0' || strcmp(state, "-") == 0 ||
+        strcmp(state, "unbound") == 0) {
+        return AK_COL_PURPLE;
     } else if (strcmp(state, "idle") == 0) {
-        return AK_COL_GRAY;
-    } else if (strcmp(state, "received") == 0) {
-        return AK_COL_CYAN;
+        return AK_COL_GREEN;
+    } else if (strcmp(state, "running") == 0) {
+        return AK_COL_RED;
+    } else if (strcmp(state, "waiting") == 0) {
+        return AK_COL_ORANGE;
+    } else if (strcmp(state, "info") == 0) {
+        return AK_COL_BLUE;
     }
-    return AK_COL_DKBLUE;
+    return AK_COL_PURPLE;
 }
 
 #define LCD_SIDEBAR_W             64U
@@ -804,9 +813,9 @@ typedef struct {
 } ak_session_ui_t;
 
 static ak_session_ui_t s_sessions[LCD_SESSION_ROWS] = {
-    {.agent = "-", .state = "idle"},
-    {.agent = "-", .state = "idle"},
-    {.agent = "-", .state = "idle"},
+    {.agent = "-", .state = ""},
+    {.agent = "-", .state = ""},
+    {.agent = "-", .state = ""},
 };
 static char     s_session_labels[LCD_SESSION_ROWS][LCD_SESSION_ALIAS_BYTES] = {"A", "B", "C"};
 static uint8_t  s_selected_session;
@@ -1238,7 +1247,9 @@ static void ak_draw_session_sidebar(void)
         uint16_t h = (i + 1U == LCD_SESSION_ROWS)
                          ? (uint16_t)(LCD_STATUS_BAR_Y - y)
                          : LCD_SESSION_ROW_H;
-        uint16_t bg = selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
+        /* Background now carries the slot's agent-status color; selection is
+         * shown by a bright outline + white foreground instead of the bg. */
+        uint16_t bg = ak_status_color(s_sessions[i].state);
         uint16_t fg = selected ? AK_COL_WHITE : AK_COL_GRAY;
         uint16_t label_width = (uint16_t)(strlen(s_session_labels[i]) * 8U);
         uint16_t label_x = label_width < LCD_SIDEBAR_W
@@ -1246,6 +1257,13 @@ static void ak_draw_session_sidebar(void)
                                : 0U;
 
         ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W - 1U, h, bg);
+        if (selected) {
+            /* 2px white outline marks the selected slot over any status color. */
+            ak_gfx_fill_rect(0, y, LCD_SIDEBAR_W - 1U, 2U, AK_COL_WHITE);
+            ak_gfx_fill_rect(0, (uint16_t)(y + h - 2U), LCD_SIDEBAR_W - 1U, 2U, AK_COL_WHITE);
+            ak_gfx_fill_rect(0, y, 2U, h, AK_COL_WHITE);
+            ak_gfx_fill_rect((uint16_t)(LCD_SIDEBAR_W - 3U), y, 2U, h, AK_COL_WHITE);
+        }
         ak_gfx_icon(16U, (uint16_t)(y + 8U), AK_SESSION_ICON_KIRO_GHOST,
                     AK_SESSION_ICON_W, AK_SESSION_ICON_H, fg, bg);
         ak_gfx_text_thin(label_x, (uint16_t)(y + 50U),

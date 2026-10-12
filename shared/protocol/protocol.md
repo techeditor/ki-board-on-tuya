@@ -154,8 +154,12 @@ Companion 发：
 - `chat_slot`：必填，`1` / `2` / `3` 分别对应 Chat A / B / C（物理键 K1 / K2 / K3）。
 - AK 必须把 `agent_name`、`state` 和 `text` 写入 `chat_slot` 指定槽位的独立状态与历史；不得写入当前选中的其他槽位。缺失或超出 `1..3` 的帧必须拒绝。
 - Companion 根据持久化的 Crew session 关联解析目标槽位；未绑定 Chat A/B/C 的 session 只保留在 Companion 列表，不发送到 AK。
-- `state`：`idle` / `running` / `error`
-- 对应 Kiro CLI hook 的 `agentSpawn` / `userPromptSubmit` / `stop` / `postToolUse`
+- `state`：`unbound` / `idle` / `running` / `waiting` / `info`（`error` 保留，暂并入忙碌色）
+  - 固件侧槽位图标背景色映射：空 / `-` / `unbound` → 紫；`idle` → 绿；`running` → 红；
+    `waiting` → 橙；`info` → 蓝。未识别状态按未绑定（紫）兜底。
+- 对应 Kiro CLI hook / Crew 状态：`agentSpawn`/`userPromptSubmit`/`postToolUse` → `running`；
+  `stop` 有回复文本 → `info`、无文本 → `idle`；`pending_approval`/`needs_input` → `waiting`；
+  某槽解绑时 Companion 主动发 `state:"unbound"` 使该槽回紫。
 
 ### config
 
