@@ -18,6 +18,7 @@
 
 #include "ak_board_io.h"
 #include "ak_battery.h"
+#include "ak_leds.h"
 #include "ak_display.h"
 #include "ak_features.h"
 #include "ak_font8x8.h"
@@ -219,6 +220,16 @@ static ak_settings_model_t s_settings;
 static bool                s_settings_active;
 static bool                s_settings_confirmed;
 static bool                s_center_long_consumed;
+
+/* On-device hardware test page (entered from Settings -> Test hardware).
+ * Modal like settings: swallows input, drives WS2812, shows live block state,
+ * and is left by a long-press of the EC11 push. */
+static bool     s_test_active;
+static bool     s_test_enc_long_consumed;
+static uint8_t  s_test_key_mask;      /* bit i set while K(i+1) is held; bit 6 = enc */
+static int32_t  s_test_enc_count;     /* net EC11 detents since entering */
+static uint32_t s_test_ws_phase;      /* WS2812 chase animation phase */
+static uint32_t s_test_last_tick_ms;  /* last animation/redraw tick */
 #endif
 
 /* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
@@ -506,6 +517,14 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
 /* Returns true when the encoder rotation was consumed by the modal settings UI
  * (so it must not be forwarded to the companion as an encoder frame). */
 static bool ak_settings_consume_encoder(int32_t detents);
+/* On-device test page (entered from Settings). */
+static void ak_test_enter(void);
+static void ak_test_exit(void);
+static void ak_test_draw(void);
+static void ak_test_tick(uint32_t now_ms);
+static bool ak_test_consume_input(ak_input_kind_t kind, const char *id,
+                                  ak_input_event_t event, uint32_t held_ms);
+static bool ak_test_consume_encoder(int32_t detents);
 #endif
 
 static void ak_emit_input_frame(ak_input_kind_t kind, const char *id,
@@ -545,6 +564,9 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
                            ak_input_event_t event, uint32_t held_ms)
 {
 #if AK_ENABLE_DISPLAY
+    if (ak_test_consume_input(kind, id, event, held_ms)) {
+        return;
+    }
     if (ak_settings_consume_input(kind, id, event, held_ms)) {
         return;
     }
@@ -571,10 +593,13 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
     }
 }
 
-/* EC11 rotation -> settings UI when modal, else an encoder frame to the PC. */
+/* EC11 rotation -> test page / settings UI when modal, else an encoder frame. */
 static void on_encoder_event(int32_t detents)
 {
 #if AK_ENABLE_DISPLAY
+    if (ak_test_consume_encoder(detents)) {
+        return;
+    }
     if (ak_settings_consume_encoder(detents)) {
         return;
     }
@@ -1106,20 +1131,31 @@ static void ak_settings_draw(void)
     ak_gfx_text_thin(16U, 27U, "Device Settings", AK_COL_GRAY,
                      AK_COL_BLACK, 1);
 
-    ak_settings_value_row(42U, AK_SETTINGS_ITEM_VOLUME, "Volume",
+    ak_settings_value_row(40U, AK_SETTINGS_ITEM_VOLUME, "Volume",
                           s_settings.volume);
-    ak_settings_value_row(98U, AK_SETTINGS_ITEM_BRIGHTNESS, "Brightness",
+    ak_settings_value_row(92U, AK_SETTINGS_ITEM_BRIGHTNESS, "Brightness",
                           s_settings.brightness);
+
+    /* Test row (enter the on-device hardware test page). */
+    bool test_selected = s_settings.selected == AK_SETTINGS_ITEM_TEST;
+    uint16_t test_bg = test_selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
+    ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, 146U, LCD_SETTINGS_ROW_W, 26U, test_bg);
+    if (!test_selected) {
+        ak_settings_outline(LCD_SETTINGS_ROW_X, 146U, LCD_SETTINGS_ROW_W, 26U,
+                            AK_COL_GRAY);
+    }
+    ak_gfx_text_thin(120U, 155U, "Test hardware",
+                     test_selected ? AK_COL_WHITE : AK_COL_GRAY, test_bg, 1);
 
     bool exit_selected = s_settings.selected == AK_SETTINGS_ITEM_EXIT;
     uint16_t exit_bg = exit_selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
-    ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, 158U, LCD_SETTINGS_ROW_W, 38U,
+    ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, 176U, LCD_SETTINGS_ROW_W, 26U,
                      exit_bg);
     if (!exit_selected) {
-        ak_settings_outline(LCD_SETTINGS_ROW_X, 158U, LCD_SETTINGS_ROW_W, 38U,
+        ak_settings_outline(LCD_SETTINGS_ROW_X, 176U, LCD_SETTINGS_ROW_W, 26U,
                             AK_COL_GRAY);
     }
-    ak_gfx_text_thin(136U, 173U, "Exit",
+    ak_gfx_text_thin(136U, 185U, "Exit",
                      exit_selected ? AK_COL_WHITE : AK_COL_GRAY, exit_bg, 1);
 
     ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 33U, AK_COL_BLACK);
@@ -1204,12 +1240,16 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
                 s_center_long_consumed = false;
                 return true;
             }
-            /* Short press: EXIT item leaves settings; any other item advances
-             * selection to the next item (single-knob navigation). */
+            /* Short press: EXIT leaves settings; TEST enters the test page;
+             * any other item advances selection (single-knob navigation). */
             if (s_settings.selected == AK_SETTINGS_ITEM_EXIT) {
                 s_settings_active = false;
                 s_settings_confirmed = false;
                 ak_render_status();
+                return true;
+            }
+            if (s_settings.selected == AK_SETTINGS_ITEM_TEST) {
+                ak_test_enter();
                 return true;
             }
             ak_settings_handle(&s_settings, AK_SETTINGS_ACTION_DOWN);
@@ -1247,6 +1287,213 @@ static bool ak_settings_consume_encoder(int32_t detents)
         }
     }
     ak_settings_draw();
+    return true;
+}
+
+/* ───────────────────────── On-device test page ─────────────────────────
+ * Modal hardware test, entered from Settings -> "Test hardware". Shows live
+ * state for six blocks (keys, EC11, WS2812, battery, WiFi, BLE), runs a WS2812
+ * chase, and is left by a LONG-press of the EC11 push. While active it swallows
+ * all input so nothing leaks to the companion or the work screen.
+ */
+#define AK_TEST_TICK_MS 120U
+
+static uint32_t s_test_uart_rx; /* bytes drained from UART0 while testing */
+
+/* Map a key id ("k1".."k6" / "enc") to a bit in s_test_key_mask. */
+static int ak_test_key_bit(const char *id)
+{
+    if (id == NULL) {
+        return -1;
+    }
+    if (strcmp(id, AK_ENC_SW_ID) == 0) {
+        return 6;
+    }
+    if (id[0] == 'k' && id[1] >= '1' && id[1] <= '6' && id[2] == '\0') {
+        return id[1] - '1';
+    }
+    return -1;
+}
+
+static void ak_test_enter(void)
+{
+    s_test_active            = true;
+    s_test_enc_long_consumed = false;
+    s_test_key_mask          = 0U;
+    s_test_enc_count         = 0;
+    s_test_ws_phase          = 0U;
+    s_test_uart_rx           = 0U;
+    s_test_last_tick_ms      = tal_system_get_millisecond();
+    s_settings_active        = false; /* leave the settings modal */
+    ak_test_draw();
+}
+
+static void ak_test_exit(void)
+{
+    s_test_active = false;
+    if (ak_leds_available()) {
+        ak_leds_clear();
+        (void)ak_leds_show();
+    }
+    /* Return to the settings page the user came from. */
+    s_settings_active    = true;
+    s_settings_confirmed = false;
+    ak_settings_draw();
+}
+
+static void ak_test_draw(void)
+{
+    if (!ak_statuslcd_ready()) {
+        return;
+    }
+    uint32_t now_ms = tal_system_get_millisecond();
+    if ((int32_t)(s_lcd_audio_guard_until_ms - now_ms) > 0 || ak_asr_audio_busy()) {
+        s_lcd_redraw_pending = true;
+        return;
+    }
+
+    char line[48];
+
+    ak_gfx_clear(AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, LCD_SESSION_SELECTED_BG);
+    ak_gfx_text(6U, 7U, "Hardware Test", AK_COL_BLACK, LCD_SESSION_SELECTED_BG, 1);
+
+    /* Keys row: K1..K6 + ENC, highlight the ones currently held. */
+    ak_gfx_text_thin(6U, 30U, "Keys", AK_COL_GRAY, AK_COL_BLACK, 1);
+    static const char *const k_lbl[7] = {"1", "2", "3", "4", "5", "6", "E"};
+    for (int i = 0; i < 7; i++) {
+        bool held = (s_test_key_mask & (1U << i)) != 0U;
+        uint16_t x = (uint16_t)(60U + i * 34U);
+        uint16_t bg = held ? AK_COL_GREEN : AK_COL_DKBLUE;
+        uint16_t fg = held ? AK_COL_BLACK : AK_COL_WHITE;
+        ak_gfx_fill_rect(x, 28U, 28U, 18U, bg);
+        ak_gfx_text(x + 10U, 33U, k_lbl[i], fg, bg, 1);
+    }
+
+    /* EC11 rotation count. */
+    (void)snprintf(line, sizeof(line), "EC11 turn: %+ld detents", (long)s_test_enc_count);
+    ak_gfx_text_thin(6U, 54U, line, AK_COL_CYAN, AK_COL_BLACK, 1);
+
+    /* WS2812. */
+    (void)snprintf(line, sizeof(line), "WS2812 x%u: %s", (unsigned)AK_LEDS_COUNT,
+                   ak_leds_available() ? "chasing" : "unavailable");
+    ak_gfx_text_thin(6U, 72U, line, ak_leds_available() ? AK_COL_GREEN : AK_COL_RED,
+                     AK_COL_BLACK, 1);
+
+    /* Battery. */
+    if (ak_battery_available()) {
+        int32_t node_mv = ak_battery_read_mv();
+        (void)snprintf(line, sizeof(line), "Battery: %u%%  (ADC %ld mV)",
+                       (unsigned)ak_battery_percent(), (long)(node_mv < 0 ? 0 : node_mv));
+    } else {
+        (void)snprintf(line, sizeof(line), "Battery: ADC unavailable");
+    }
+    ak_gfx_text_thin(6U, 90U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
+
+    /* UART. */
+    (void)snprintf(line, sizeof(line), "UART0 (%s): rx %lu bytes", AK_TRANSPORT_NAME,
+                   (unsigned long)s_test_uart_rx);
+    ak_gfx_text_thin(6U, 108U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
+
+    /* WiFi. */
+    (void)snprintf(line, sizeof(line), "WiFi: %s %s",
+                   ak_wifi_state_str(ak_wifi_current_state()), ak_wifi_current_ssid());
+    ak_gfx_text_thin(6U, 126U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
+
+    /* BLE. */
+    (void)snprintf(line, sizeof(line), "BLE: %s",
+                   ak_ble_gatt_link_state_str(ak_ble_gatt_link_state()));
+    ak_gfx_text_thin(6U, 144U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
+
+    /* Footer hint. */
+    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 33U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
+    ak_gfx_text_thin(4U, 213U, "Press keys / turn EC11 to test", AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, 227U, "Long-press EC11 to exit", AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_statuslcd_flush();
+    s_lcd_redraw_pending = false;
+}
+
+/* Called from the main loop while the test page is active: advance the WS2812
+ * chase and refresh the screen on a fixed cadence (also drains UART0 to prove
+ * the port is alive). */
+static void ak_test_tick(uint32_t now_ms)
+{
+    if (!s_test_active) {
+        return;
+    }
+
+    if ((uint32_t)(now_ms - s_test_last_tick_ms) < AK_TEST_TICK_MS) {
+        return;
+    }
+    s_test_last_tick_ms = now_ms;
+
+    /* WS2812 chase: one lit LED walks the chain. */
+    if (ak_leds_available()) {
+        ak_leds_clear();
+        uint32_t lit = s_test_ws_phase % AK_LEDS_COUNT;
+        ak_leds_set(lit, 40U, 40U, 40U);
+        (void)ak_leds_show();
+    }
+    s_test_ws_phase++;
+    ak_test_draw();
+}
+
+/* Returns true when the test page consumed the key event (always, while active).
+ * Long-press of the EC11 push exits; every other key just updates the live
+ * held-key highlight. */
+static bool ak_test_consume_input(ak_input_kind_t kind, const char *id,
+                                  ak_input_event_t event, uint32_t held_ms)
+{
+    (void)kind;
+    (void)held_ms;
+    if (!s_test_active) {
+        return false;
+    }
+
+    int bit = ak_test_key_bit(id);
+
+    /* EC11 push long-press leaves the test page. */
+    if (bit == 6) {
+        if (event == AK_INPUT_EVENT_DOWN) {
+            s_test_enc_long_consumed = false;
+            s_test_key_mask |= (1U << 6);
+        } else if (event == AK_INPUT_EVENT_LONG) {
+            s_test_enc_long_consumed = true;
+            s_test_key_mask &= (uint8_t)~(1U << 6);
+            ak_test_exit();
+            return true;
+        } else if (event == AK_INPUT_EVENT_UP) {
+            s_test_key_mask &= (uint8_t)~(1U << 6);
+            if (!s_test_enc_long_consumed) {
+                ak_test_draw();
+            }
+            s_test_enc_long_consumed = false;
+            return true;
+        }
+        ak_test_draw();
+        return true;
+    }
+
+    if (bit >= 0) {
+        if (event == AK_INPUT_EVENT_DOWN) {
+            s_test_key_mask |= (uint8_t)(1U << bit);
+        } else if (event == AK_INPUT_EVENT_UP) {
+            s_test_key_mask &= (uint8_t)~(1U << bit);
+        }
+        ak_test_draw();
+    }
+    return true;
+}
+
+/* EC11 rotation inside the test page: accumulate the net detents for display. */
+static bool ak_test_consume_encoder(int32_t detents)
+{
+    if (!s_test_active) {
+        return false;
+    }
+    s_test_enc_count += detents;
+    ak_test_draw();
     return true;
 }
 
@@ -1307,6 +1554,10 @@ static void ak_render_status(void)
     if ((int32_t)(s_lcd_audio_guard_until_ms - now_ms) > 0 ||
         ak_asr_audio_busy()) {
         s_lcd_redraw_pending = true;
+        return;
+    }
+    if (s_test_active) {
+        ak_test_draw();
         return;
     }
     if (s_settings_active) {
@@ -1839,6 +2090,10 @@ static void user_main(void)
     if (ak_battery_init() != OPRT_OK) {
         PR_WARN("battery ADC init failed; header gauge disabled");
     }
+    /* WS2812 chain (used by the on-device test page). Optional. */
+    if (ak_leds_init() != OPRT_OK) {
+        PR_WARN("WS2812 init failed; test page LED block disabled");
+    }
 #endif
 
 #if AK_ENABLE_DISPLAY
@@ -2080,9 +2335,18 @@ static void user_main(void)
 
         ak_input_poll(now, on_input_event, on_encoder_event);
 
+#if AK_ENABLE_DISPLAY
+        ak_test_tick(now);
+#endif
+
         uint8_t rx[64];
         int     got = ak_transport_read(rx, sizeof(rx));
         if (got > 0) {
+#if AK_ENABLE_DISPLAY
+            if (s_test_active) {
+                s_test_uart_rx += (uint32_t)got;
+            }
+#endif
 #if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
             if (ak_transport_rx_is_usb()) {
                 /* The companion answers the board's 2 s ping with pong, so any

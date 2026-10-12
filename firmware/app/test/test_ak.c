@@ -433,6 +433,12 @@ static void test_settings(void)
           "center confirms a value");
 
     ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_TEST, "down selects test");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
+              AK_SETTINGS_RESULT_ENTER_TEST,
+          "center on test enters the test page");
+
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
     CHECK(settings.selected == AK_SETTINGS_ITEM_EXIT, "down selects exit");
     CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
               AK_SETTINGS_RESULT_EXIT,

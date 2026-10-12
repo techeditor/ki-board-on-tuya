@@ -64,9 +64,13 @@ ak_settings_result_t ak_settings_handle(ak_settings_model_t *model,
         return AK_SETTINGS_RESULT_CHANGED;
     }
     case AK_SETTINGS_ACTION_CONFIRM:
-        return model->selected == AK_SETTINGS_ITEM_EXIT
-                   ? AK_SETTINGS_RESULT_EXIT
-                   : AK_SETTINGS_RESULT_CONFIRMED;
+        if (model->selected == AK_SETTINGS_ITEM_EXIT) {
+            return AK_SETTINGS_RESULT_EXIT;
+        }
+        if (model->selected == AK_SETTINGS_ITEM_TEST) {
+            return AK_SETTINGS_RESULT_ENTER_TEST;
+        }
+        return AK_SETTINGS_RESULT_CONFIRMED;
     default:
         return AK_SETTINGS_RESULT_NONE;
     }
