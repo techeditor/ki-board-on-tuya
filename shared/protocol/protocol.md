@@ -89,15 +89,15 @@ Companion 发：
 - `action`：`down` / `up` / `long` / `click` / `dclick`
   - `down` / `up`：原始电平边沿（所有键，保持不变）。
   - `long`：按住超过长按阈值（所有键，保持不变）。
-  - `click`：一次短按的释放，且在双击窗口内未发生第二次按下。**仅 K1–K3 产生**，
-    在松手约 400ms（双击窗口）后发出。
-  - `dclick`：双击窗口内的第二次短按释放，立即发出。**仅 K1–K3 产生**。
+  - `click`：一次短按释放且在双击窗口内无第二次按下的**确认单击**。**仅 K1–K3 产生**，
+    约在 `up` 之后 ~400ms（双击窗口到期）发出。
+  - `dclick`：双击窗口内第二次短按释放的**确认双击**。**仅 K1–K3 产生**，立即发出。
 - `held_ms`：按下时长（`up`/`long` 时有意义；`click`/`dclick` 取最近一次短按释放时长）
-
-> `click` / `dclick` 为 K1–K3 的语义手势，叠加在 `down`/`up` 之上：一次短按会先发
-> `down`、再发 `up`，随后（若非双击）在约 400ms 后发 `click`；双击则在第二次释放时
-> 发 `dclick`。长按发 `long`，不会再发 `click`/`dclick`。K4/K5/nav 不产生
-> `click`/`dclick`。接收方必须忽略无法识别的 `action`（向后兼容）。
+- 时序：一次 K1–K3 短按会先发 `down`、再发 `up`，随后（若非双击）发 `click`；
+  双击在第二次释放时发 `dclick`（不再发 `click`）；长按发 `long`（不发 `click`/`dclick`）。
+  K4/K5/nav 不产生 `click`/`dclick`。接收方必须忽略无法识别的 `action`（向后兼容）。
+- Companion 把 K1–K3 的「跳转/选中」动作绑定在 `click`（而非 `down`），因此长按不会触发跳转；
+  长按（`long`）用于 Companion 的「长按自动绑定」交互。
 
 ### nav（5 向摇杆）
 
@@ -154,12 +154,19 @@ Companion 发：
 - `chat_slot`：必填，`1` / `2` / `3` 分别对应 Chat A / B / C（物理键 K1 / K2 / K3）。
 - AK 必须把 `agent_name`、`state` 和 `text` 写入 `chat_slot` 指定槽位的独立状态与历史；不得写入当前选中的其他槽位。缺失或超出 `1..3` 的帧必须拒绝。
 - Companion 根据持久化的 Crew session 关联解析目标槽位；未绑定 Chat A/B/C 的 session 只保留在 Companion 列表，不发送到 AK。
-- `state`：`unbound` / `idle` / `running` / `waiting` / `info`（`error` 保留，暂并入忙碌色）
-  - 固件侧槽位图标背景色映射：空 / `-` / `unbound` → 紫；`idle` → 绿；`running` → 红；
-    `waiting` → 橙；`info` → 蓝。未识别状态按未绑定（紫）兜底。
-- 对应 Kiro CLI hook / Crew 状态：`agentSpawn`/`userPromptSubmit`/`postToolUse` → `running`；
-  `stop` 有回复文本 → `info`、无文本 → `idle`；`pending_approval`/`needs_input` → `waiting`；
-  某槽解绑时 Companion 主动发 `state:"unbound"` 使该槽回紫。
+- `state`：驱动 AK 左侧三块槽位图标的背景色：
+  - `unbound`（或空字符串 / `-`）→ 紫色：未绑定/默认。未识别状态也按此兜底。
+  - `idle` → 绿色：空闲。
+  - `running` → 红色：忙碌。
+  - `waiting` → 橙色：提示，等待操作。
+  - `info` → 蓝色：有信息反馈，无需操作。
+  - `error`：协议保留，暂不单独着色（当前并入忙碌/红）。
+- Companion 的状态来源与映射：
+  - hook：`agentSpawn`/`userPromptSubmit`/`postToolUse` → `running`；
+    `stop` 有回复文本 → `info`、无文本 → `idle`。
+  - crew API 投影：`pending_approval`/`needs_input`/`waiting_for_input` → `waiting`；
+    `running`/`stopping`/`subagents_running` → `running`；有 `last_message` 的空闲 → `info`；否则 `idle`。
+  - 解绑某 Chat A/B/C 槽位时，Companion 向该 `chat_slot` 发一帧 `state:"unbound"`，使图标回紫色。
 
 ### config
 

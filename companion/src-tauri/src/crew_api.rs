@@ -309,6 +309,7 @@ impl CrewEvent {
 
 /// Map one API slot projection into the existing Hook/LCD status vocabulary.
 pub fn slot_display_status(slot: &CrewSlot) -> crate::status_sink::DisplayState {
+    // Board color vocabulary: waiting=orange, running=red, info=blue, idle=green.
     let (state, text) = if slot.pending_approval || slot.needs_input || slot.waiting_for_input {
         ("waiting", "needs your input".to_string())
     } else if slot.stopping {
@@ -316,7 +317,8 @@ pub fn slot_display_status(slot: &CrewSlot) -> crate::status_sink::DisplayState 
     } else if slot.running || slot.subagents_running {
         ("running", "agent running".to_string())
     } else if !slot.last_message.trim().is_empty() {
-        ("idle", compact_text(&slot.last_message, 40))
+        // Finished with a reply to read but nothing to act on -> info (blue).
+        ("info", compact_text(&slot.last_message, 40))
     } else {
         ("idle", "ready".to_string())
     };
@@ -540,12 +542,22 @@ mod tests {
         };
         assert_eq!(slot_display_status(&running).state, "running");
 
-        let idle = CrewSlot {
+        // Finished with a reply but nothing to act on -> info (blue), text kept.
+        let info = CrewSlot {
             key: "chat-c".into(),
             last_message: "all done".into(),
             ..Default::default()
         };
-        assert_eq!(slot_display_status(&idle).text, "all done");
+        assert_eq!(slot_display_status(&info).state, "info");
+        assert_eq!(slot_display_status(&info).text, "all done");
+
+        // Truly idle (no last message) -> idle (green).
+        let idle = CrewSlot {
+            key: "chat-d".into(),
+            ..Default::default()
+        };
+        assert_eq!(slot_display_status(&idle).state, "idle");
+        assert_eq!(slot_display_status(&idle).text, "ready");
     }
 
     #[test]

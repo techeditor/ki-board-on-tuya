@@ -956,9 +956,27 @@ mod app {
     /// AK alias.
     #[tauri::command]
     fn kc_bind_session_clear(state: State<Shared>, slot: u8) -> Result<(), String> {
-        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        inner.kc_binds.clear_session(slot)?;
-        inner.kc_binds.save()
+        let alias = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.kc_binds.clear_session(slot)?;
+            inner.kc_binds.save()?;
+            // Alias for the now-unbound slot (empty falls back to A/B/C on AK).
+            inner
+                .kc_binds
+                .aliases
+                .get((slot as usize).saturating_sub(1))
+                .cloned()
+                .unwrap_or_default()
+        };
+        // Tell the board this slot is unbound so its sidebar icon goes purple.
+        // Best-effort: ignored when the board is offline or slot is out of 1..=3.
+        if (1..=3).contains(&slot) {
+            let _ = write_board(
+                state.inner(),
+                &protocol::display_payload(slot, &alias, "unbound", ""),
+            );
+        }
+        Ok(())
     }
 
     /// M4: reset slot `slot` (1-based) to its default chat number (slot index+1:
@@ -1459,6 +1477,13 @@ mod app {
                     "k2" => 1,
                     _ => 2,
                 };
+                // Select the stable slot ONLY on Click (a confirmed single
+                // click). Down/Up/Long/Dclick do not select or jump here, so a
+                // long-press never jumps — it is reserved for the UI long-press
+                // auto-bind (delivered independently via the `board-event`).
+                if payload.action != KeyAction::Click {
+                    return false;
+                }
                 let selected = state.inner.lock().ok().and_then(|mut inner| {
                     let key = inner.kc_binds.sessions.get(index)?.trim().to_string();
                     let is_api_slot = !key.is_empty()
@@ -1466,18 +1491,12 @@ mod app {
                     if !is_api_slot {
                         return None;
                     }
-                    if payload.action == KeyAction::Down {
-                        inner.crew_api_active_slot = Some(key.clone());
-                    }
+                    inner.crew_api_active_slot = Some(key.clone());
                     Some(key)
                 });
                 if let Some(slot) = selected {
-                    if payload.action == KeyAction::Down {
-                        let _ = app.emit("crew-api-active-slot", slot.clone());
-                        log_line(app, format!("[CREW-API] selected stable slot {slot}"));
-                    }
-                    // Consume Long/Up too, preventing the same physical press
-                    // from falling through to a second Alt+N action.
+                    let _ = app.emit("crew-api-active-slot", slot.clone());
+                    log_line(app, format!("[CREW-API] selected stable slot {slot}"));
                     return true;
                 }
                 false

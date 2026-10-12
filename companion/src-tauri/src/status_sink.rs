@@ -67,7 +67,9 @@ pub struct HookEvent {
 }
 
 /// A mapped status ready to render on the board LCD. `state` is a free string
-/// matching the `display` frame's state enum (`running` | `tool` | `idle` | …).
+/// matching the `display` frame's state enum. The board colors its slot icons
+/// by it: `running`=busy(red), `idle`=green, `waiting`=orange, `info`=blue,
+/// `unbound`/empty=purple.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayState {
     pub agent_name: String,
@@ -102,10 +104,14 @@ fn truncate_response(s: &str) -> String {
 /// | hook event        | state     | text                                  |
 /// |-------------------|-----------|---------------------------------------|
 /// | `agentSpawn`      | `running` | `agent started`                       |
-/// | `postToolUse`     | `tool`    | `using <tool_name>`                   |
-/// | `stop`            | `idle`    | `<assistant_response truncated>`      |
-/// | `userPromptSubmit`| `received`| `prompt received`                     |
+/// | `postToolUse`     | `running` | `using <tool_name>`                   |
+/// | `stop` (w/ reply) | `info`    | `<assistant_response truncated>`      |
+/// | `stop` (no reply) | `idle`    | `done`                                |
+/// | `userPromptSubmit`| `running` | `prompt received`                     |
 /// | (anything else)   | `running` | `<event>`                             |
+///
+/// Board colors: `running`=red(busy), `idle`=green, `waiting`=orange,
+/// `info`=blue, `unbound`/empty=purple.
 ///
 /// `agent_name` is not carried by the hook payload (a hook fires for one agent
 /// but the name is not in the JSON), so it defaults to `"kirocrew"`; the app
@@ -118,22 +124,26 @@ pub fn map_hook_event(ev: &HookEvent) -> DisplayState {
             ("running", text.clone(), text)
         }
         "posttooluse" => {
+            // Still working — maps to the "busy" color (red) on the board.
             let tool = ev.tool_name.as_deref().unwrap_or("tool");
             let text = format!("using {tool}");
-            ("tool", text.clone(), text)
+            ("running", text.clone(), text)
         }
         "stop" => {
+            // Turn finished. With a reply to read but nothing to act on, this is
+            // "info" (blue). With no reply, it is plain "idle" (green).
             let resp = ev.assistant_response.as_deref().unwrap_or("");
             if resp.trim().is_empty() {
                 let text = "done".to_string();
                 ("idle", text.clone(), text)
             } else {
-                ("idle", truncate_response(resp), resp.to_string())
+                ("info", truncate_response(resp), resp.to_string())
             }
         }
         "userpromptsubmit" => {
+            // Prompt accepted; the agent is now working -> busy (red).
             let text = "prompt received".to_string();
-            ("received", text.clone(), text)
+            ("running", text.clone(), text)
         }
         // Unknown / finer states retain the original spelling for diagnostics.
         _ => ("running", ev.event.clone(), ev.event.clone()),
@@ -482,7 +492,8 @@ mod tests {
             ..Default::default()
         };
         let d = map_hook_event(&ev);
-        assert_eq!(d.state, "tool");
+        // PostToolUse means the agent is still working -> busy (red).
+        assert_eq!(d.state, "running");
         assert_eq!(d.text, "using web_search");
     }
 
@@ -496,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_maps_to_idle_with_truncated_response() {
+    fn stop_with_response_maps_to_info_with_truncated_text() {
         let long = "a".repeat(100);
         let ev = HookEvent {
             event: "Stop".into(),
@@ -505,11 +516,25 @@ mod tests {
             ..Default::default()
         };
         let d = map_hook_event(&ev);
-        assert_eq!(d.state, "idle");
+        // A finished turn with a reply to read, no action needed -> info (blue).
+        assert_eq!(d.state, "info");
         // 40 chars + ellipsis.
         assert_eq!(d.text.chars().count(), MAX_RESPONSE_CHARS + 1);
         assert!(d.text.ends_with('…'));
         assert_eq!(d.detail_text, "a".repeat(100));
+    }
+
+    #[test]
+    fn stop_without_response_maps_to_idle() {
+        let ev = HookEvent {
+            event: "Stop".into(),
+            session_id: "s3".into(),
+            assistant_response: Some("   ".into()),
+            ..Default::default()
+        };
+        let d = map_hook_event(&ev);
+        assert_eq!(d.state, "idle");
+        assert_eq!(d.text, "done");
     }
 
     #[test]
@@ -542,13 +567,14 @@ mod tests {
     }
 
     #[test]
-    fn user_prompt_submit_maps_to_received() {
+    fn user_prompt_submit_maps_to_running() {
         let ev = HookEvent {
             event: "UserPromptSubmit".into(),
             ..Default::default()
         };
         let d = map_hook_event(&ev);
-        assert_eq!(d.state, "received");
+        // Prompt accepted; agent now working -> busy (red).
+        assert_eq!(d.state, "running");
         assert_eq!(d.text, "prompt received");
     }
 

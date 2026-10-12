@@ -169,6 +169,11 @@ pub enum KeyAction {
     Down,
     Up,
     Long,
+    /// K1–K3 semantic gesture: a confirmed single click (short press whose
+    /// double-click window elapsed). Fired by firmware ~400ms after `up`.
+    Click,
+    /// K1–K3 semantic gesture: a confirmed double click.
+    Dclick,
     #[serde(other)]
     Unknown,
 }

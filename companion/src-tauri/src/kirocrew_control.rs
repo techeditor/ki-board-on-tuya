@@ -153,8 +153,8 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 /// | event                          | action                              |
 /// |--------------------------------|-------------------------------------|
 /// | `macro { name }` (recognized text) | `Compose(name)` — K4 voice → focus composer + type (no send) |
-/// | `key k1..k3` `Down`            | `Chord(JumpChat(n))` — n = configured `jump_chats[idx]` (Alt+N, client-side jump to chat n); `None` if unset / out of 1..=9 |
-/// | `key k1..k3` `Long`/`Up`       | `None` — jump fired on `Down`; the rest of the press is a no-op |
+/// | `key k1..k3` `Click`           | `Chord(JumpChat(n))` — n = configured `jump_chats[idx]` (Alt+N, client-side jump to chat n); `None` if unset / out of 1..=9 |
+/// | `key k1..k3` `Down`/`Long`/`Up`/`Dclick` | `None` — jump fires only on `Click`; `Long` is reserved for long-press auto-bind |
 /// | `key k4` (down/long)           | `None` — K4 is push-to-talk; text arrives later as `macro` |
 /// | `key k5` (down/long)           | `Chord(Enter)` — submit / continue  |
 /// | `nav left` `Up` (< 800 ms)  | `Chord(Backspace)` — delete one character |
@@ -191,10 +191,10 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
             }
         }
 
-        // K1-K3 = jump keys. They fire on `Down` ONLY — one physical press
-        // produces exactly one `Alt+N` jump; the `Long` and `Up` edges of the
-        // same press are no-ops. Matched BEFORE the generic `is_trigger` arm
-        // (which fires on Down/Long) so `Long` does not double-fire.
+        // K1-K3 = jump keys. They fire on `Click` ONLY — a confirmed single
+        // click (short press). `Down`/`Long`/`Up`/`Dclick` are no-ops, so a
+        // long-press never jumps (it drives the companion long-press auto-bind).
+        // Matched BEFORE the generic `is_trigger` arm so Down/Long cannot leak.
         Inbound::Key { payload, .. }
             if matches!(payload.id.as_str(), "k1" | "k2" | "k3") =>
         {
@@ -204,10 +204,13 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
                 _ => 2usize,
             };
             match payload.action {
-                // Down -> jump to the configured chat number for this key.
-                KeyAction::Down => ctx.jump(idx),
-                // Long / Up (and anything else) -> nothing; the jump already
-                // fired on Down.
+                // Click -> jump to the configured chat number for this key.
+                // The jump fires on CLICK (short-press release confirmed as a
+                // single click), NOT on Down, so a long-press (which produces
+                // `long` and no `click`) never jumps — it is reserved for the
+                // long-press auto-bind flow in the companion UI.
+                KeyAction::Click => ctx.jump(idx),
+                // Down / Long / Up / Dclick (and anything else) -> nothing.
                 _ => ControlAction::None,
             }
         }
@@ -992,49 +995,60 @@ mod tests {
     // ── Router: K1–K3 → Alt+<configured number> jump on Down only ──
 
     #[test]
-    fn k1_k2_k3_down_jumps_to_configured_chat_number() {
+    fn k1_k2_k3_click_jumps_to_configured_chat_number() {
         // Non-default numbers to prove the router reads ctx.jump_chats.
         let ctx = ControlCtx { jump_chats: vec![5, 2, 9] };
         assert_eq!(
-            route_input(&key("k1", KeyAction::Down), &ctx),
+            route_input(&key("k1", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(5))
         );
         assert_eq!(
-            route_input(&key("k2", KeyAction::Down), &ctx),
+            route_input(&key("k2", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(2))
         );
         assert_eq!(
-            route_input(&key("k3", KeyAction::Down), &ctx),
+            route_input(&key("k3", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(9))
         );
     }
 
     #[test]
-    fn k1_k2_k3_down_uses_defaults() {
+    fn k1_k2_k3_click_uses_defaults() {
         let ctx = ControlCtx::with_default_jumps();
         assert_eq!(
-            route_input(&key("k1", KeyAction::Down), &ctx),
+            route_input(&key("k1", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(1))
         );
         assert_eq!(
-            route_input(&key("k2", KeyAction::Down), &ctx),
+            route_input(&key("k2", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(2))
         );
         assert_eq!(
-            route_input(&key("k3", KeyAction::Down), &ctx),
+            route_input(&key("k3", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(3))
         );
     }
 
     #[test]
-    fn k1_k3_long_and_up_are_none() {
+    fn k1_k3_down_long_up_dclick_are_none() {
         let ctx = ControlCtx::with_default_jumps();
-        // The jump fires on Down; Long and Up edges of the same press do nothing.
+        // The jump fires ONLY on Click. Down (no longer a trigger), Long, Up,
+        // and Dclick all do nothing — long-press is reserved for auto-bind.
         for id in ["k1", "k2", "k3"] {
+            assert_eq!(
+                route_input(&key(id, KeyAction::Down), &ctx),
+                ControlAction::None,
+                "{id} Down should be None (jump moved to Click)"
+            );
             assert_eq!(
                 route_input(&key(id, KeyAction::Long), &ctx),
                 ControlAction::None,
                 "{id} Long should be None"
+            );
+            assert_eq!(
+                route_input(&key(id, KeyAction::Dclick), &ctx),
+                ControlAction::None,
+                "{id} Dclick should be None (no action bound yet)"
             );
             assert_eq!(
                 route_input(&key_held(id, KeyAction::Up, 120), &ctx),
@@ -1050,22 +1064,22 @@ mod tests {
     }
 
     #[test]
-    fn k1_k3_down_none_when_number_unset_or_out_of_range() {
+    fn k1_k3_click_none_when_number_unset_or_out_of_range() {
         // Missing index (short jump_chats vector) -> None.
         let short = ControlCtx { jump_chats: vec![1] };
-        assert_eq!(route_input(&key("k2", KeyAction::Down), &short), ControlAction::None);
-        assert_eq!(route_input(&key("k3", KeyAction::Down), &short), ControlAction::None);
+        assert_eq!(route_input(&key("k2", KeyAction::Click), &short), ControlAction::None);
+        assert_eq!(route_input(&key("k3", KeyAction::Click), &short), ControlAction::None);
         // Out-of-range number (0 or >9) -> None.
         let bad = ControlCtx { jump_chats: vec![0, 10, 3] };
-        assert_eq!(route_input(&key("k1", KeyAction::Down), &bad), ControlAction::None);
-        assert_eq!(route_input(&key("k2", KeyAction::Down), &bad), ControlAction::None);
+        assert_eq!(route_input(&key("k1", KeyAction::Click), &bad), ControlAction::None);
+        assert_eq!(route_input(&key("k2", KeyAction::Click), &bad), ControlAction::None);
         assert_eq!(
-            route_input(&key("k3", KeyAction::Down), &bad),
+            route_input(&key("k3", KeyAction::Click), &bad),
             ControlAction::Chord(Chord::JumpChat(3))
         );
         // Empty vector (default ControlCtx) -> None.
         let empty = ControlCtx::default();
-        assert_eq!(route_input(&key("k1", KeyAction::Down), &empty), ControlAction::None);
+        assert_eq!(route_input(&key("k1", KeyAction::Click), &empty), ControlAction::None);
     }
 
     #[test]
@@ -1196,11 +1210,12 @@ mod tests {
             router.route(&key("k5", KeyAction::Down)),
             ControlAction::Chord(Chord::Enter)
         );
-        // And a K1 Down jumps to the configured number.
+        // And a K1 Click jumps to the configured number (Down no longer does).
         assert_eq!(
-            router.route(&key("k1", KeyAction::Down)),
+            router.route(&key("k1", KeyAction::Click)),
             ControlAction::Chord(Chord::JumpChat(1))
         );
+        assert_eq!(router.route(&key("k1", KeyAction::Down)), ControlAction::None);
     }
 
     // ── Stub controller behaviour on non-Windows ───────────────
