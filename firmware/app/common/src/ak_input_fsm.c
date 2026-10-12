@@ -68,6 +68,10 @@ const char *ak_input_event_str(ak_input_event_t event)
         return "up";
     case AK_INPUT_EVENT_LONG:
         return "long";
+    case AK_INPUT_EVENT_CLICK:
+        return "click";
+    case AK_INPUT_EVENT_DCLICK:
+        return "dclick";
     default:
         return "";
     }
@@ -117,4 +121,58 @@ bool ak_dclick_feed(ak_dclick_t *dc, ak_input_event_t event, uint32_t now_ms, ui
     default:
         return false;
     }
+}
+
+void ak_gesture_init(ak_gesture_t *g)
+{
+    g->pending        = false;
+    g->pending_since  = 0;
+    g->press_had_long = false;
+}
+
+ak_input_event_t ak_gesture_feed(ak_gesture_t *g, ak_input_event_t event, uint32_t now_ms, uint32_t held_ms)
+{
+    (void)held_ms;
+
+    switch (event) {
+    case AK_INPUT_EVENT_DOWN:
+        /* New press begins; assume short until a LONG proves otherwise. Keep
+         * any pending click: this DOWN may be the second tap of a double. */
+        g->press_had_long = false;
+        return AK_INPUT_EVENT_NONE;
+
+    case AK_INPUT_EVENT_LONG:
+        /* A hold: cancels any pending click and yields no gesture. */
+        g->press_had_long = true;
+        g->pending        = false;
+        return AK_INPUT_EVENT_NONE;
+
+    case AK_INPUT_EVENT_UP:
+        if (g->press_had_long) {
+            /* Long-press release is never a click. */
+            g->press_had_long = false;
+            return AK_INPUT_EVENT_NONE;
+        }
+        if (g->pending && (uint32_t)(now_ms - g->pending_since) <= AK_DCLICK_WINDOW_MS) {
+            /* Second short release inside the window -> double-click now. */
+            g->pending = false;
+            return AK_INPUT_EVENT_DCLICK;
+        }
+        /* First short release (or the window lapsed): wait out the window. */
+        g->pending       = true;
+        g->pending_since = now_ms;
+        return AK_INPUT_EVENT_NONE;
+
+    default:
+        return AK_INPUT_EVENT_NONE;
+    }
+}
+
+ak_input_event_t ak_gesture_tick(ak_gesture_t *g, uint32_t now_ms)
+{
+    if (g->pending && (uint32_t)(now_ms - g->pending_since) > AK_DCLICK_WINDOW_MS) {
+        g->pending = false;
+        return AK_INPUT_EVENT_CLICK;
+    }
+    return AK_INPUT_EVENT_NONE;
 }

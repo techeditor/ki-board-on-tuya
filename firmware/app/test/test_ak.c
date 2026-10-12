@@ -132,6 +132,18 @@ static void test_protocol(void)
               "\"held_ms\":0}}\n",
               "key frame");
 
+    ak_proto_key(buf, sizeof(buf), 30, "k1", "click", 40);
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":30,\"type\":\"key\",\"payload\":{\"id\":\"k1\",\"action\":\"click\","
+              "\"held_ms\":40}}\n",
+              "key click frame");
+
+    ak_proto_key(buf, sizeof(buf), 31, "k2", "dclick", 35);
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":31,\"type\":\"key\",\"payload\":{\"id\":\"k2\",\"action\":\"dclick\","
+              "\"held_ms\":35}}\n",
+              "key dclick frame");
+
     ak_proto_nav(buf, sizeof(buf), 8, "center", "long", 900);
     CHECK_STR(buf,
               "{\"v\":1,\"seq\":8,\"type\":\"nav\",\"payload\":{\"dir\":\"center\",\"action\":"
@@ -399,6 +411,68 @@ static void test_dclick(void)
     CHECK(!dclick_short_press(&dc, &t, 50), "short press after long: only re-arms");
 }
 
+static void test_gesture(void)
+{
+    printf("test_gesture\n");
+    ak_gesture_t g;
+    uint32_t     t;
+
+    /* 1. Single click: a short press (down then up) yields no immediate
+     *    gesture; after the double-click window lapses, tick emits CLICK once. */
+    ak_gesture_init(&g);
+    t = 1000;
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, t, 0) == AK_INPUT_EVENT_NONE, "down: no gesture");
+    t += 40;
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, t, 40) == AK_INPUT_EVENT_NONE, "up: pending, no gesture yet");
+    CHECK(ak_gesture_tick(&g, t) == AK_INPUT_EVENT_NONE, "tick inside window: no click");
+    t += AK_DCLICK_WINDOW_MS + 1U;
+    CHECK(ak_gesture_tick(&g, t) == AK_INPUT_EVENT_CLICK, "tick past window: CLICK once");
+    CHECK(ak_gesture_tick(&g, t) == AK_INPUT_EVENT_NONE, "no repeat CLICK");
+
+    /* 2. Double click: two short presses inside the window; the 2nd up emits
+     *    DCLICK, and no CLICK follows (pending consumed by the double). */
+    ak_gesture_init(&g);
+    t = 2000;
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, t, 0);
+    t += 30;
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, t, 30) == AK_INPUT_EVENT_NONE, "dclick: first up pending");
+    t += 100;
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, t, 0);
+    t += 30;
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, t, 30) == AK_INPUT_EVENT_DCLICK, "second up in window: DCLICK");
+    t += AK_DCLICK_WINDOW_MS + 1U;
+    CHECK(ak_gesture_tick(&g, t) == AK_INPUT_EVENT_NONE, "no CLICK after DCLICK");
+
+    /* 3. Long press produces no gesture at all. */
+    ak_gesture_init(&g);
+    t = 3000;
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, t, 0);
+    t += 900;
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_LONG, t, 900) == AK_INPUT_EVENT_NONE, "long: no gesture");
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, t, 900) == AK_INPUT_EVENT_NONE, "long release: no gesture");
+    t += AK_DCLICK_WINDOW_MS + 1U;
+    CHECK(ak_gesture_tick(&g, t) == AK_INPUT_EVENT_NONE, "no CLICK after a long press");
+
+    /* 4. Two short presses with a gap larger than the window are two CLICKs,
+     *    not a double-click. */
+    ak_gesture_init(&g);
+    t = 4000;
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, t, 0);
+    t += 30;
+    ak_gesture_feed(&g, AK_INPUT_EVENT_UP, t, 30);
+    t += AK_DCLICK_WINDOW_MS + 1U;
+    CHECK(ak_gesture_tick(&g, t) == AK_INPUT_EVENT_CLICK, "first press: CLICK after window");
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, t, 0);
+    t += 30;
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, t, 30) == AK_INPUT_EVENT_NONE, "second press: pending, not dclick");
+    t += AK_DCLICK_WINDOW_MS + 1U;
+    CHECK(ak_gesture_tick(&g, t) == AK_INPUT_EVENT_CLICK, "second press: independent CLICK");
+
+    /* 5. Event-string mapping for the new gestures. */
+    CHECK_STR(ak_input_event_str(AK_INPUT_EVENT_CLICK), "click", "CLICK string");
+    CHECK_STR(ak_input_event_str(AK_INPUT_EVENT_DCLICK), "dclick", "DCLICK string");
+}
+
 static void test_settings(void)
 {
     printf("test_settings\n");
@@ -479,6 +553,7 @@ int main(void)
     test_long_press();
     test_debounce_bounce();
     test_dclick();
+    test_gesture();
     test_settings();
     test_voice_route();
     test_protocol();

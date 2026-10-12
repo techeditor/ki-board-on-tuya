@@ -29,6 +29,8 @@ typedef enum {
     AK_INPUT_EVENT_DOWN,
     AK_INPUT_EVENT_UP,
     AK_INPUT_EVENT_LONG,
+    AK_INPUT_EVENT_CLICK,  /* confirmed single click (short press, not a double, window elapsed) */
+    AK_INPUT_EVENT_DCLICK, /* confirmed double click */
 } ak_input_event_t;
 
 typedef struct {
@@ -85,5 +87,37 @@ void ak_dclick_init(ak_dclick_t *dc);
  * marker is authoritative). now_ms is the current tick time.
  */
 bool ak_dclick_feed(ak_dclick_t *dc, ak_input_event_t event, uint32_t now_ms, uint32_t held_ms);
+
+/* --- Click / double-click gesture recognizer --------------------------------
+ * A second pure helper, layered on the FSM event stream like ak_dclick but
+ * emitting the gesture events themselves (CLICK / DCLICK) instead of a bool.
+ * Used for K1-K3, whose "jump to chat" semantics must fire on the RELEASE of a
+ * short press (CLICK) rather than on DOWN, so a long press (bind) never jumps.
+ *
+ *   - A short-press release goes "pending click" and waits AK_DCLICK_WINDOW_MS:
+ *       a second short-press release inside the window -> DCLICK immediately
+ *       (cancelling the pending click); the window lapsing -> CLICK.
+ *   - A press that fired LONG cancels everything and produces no gesture.
+ * Needs ak_gesture_tick() every poll so the window can expire and emit CLICK
+ * (window expiry has no triggering input event). The FSM's own DOWN/UP/LONG
+ * output is untouched; this is a strictly additive layer. */
+typedef struct {
+    bool     pending;        /* a short-press release is waiting out the window */
+    uint32_t pending_since;  /* timestamp of that release */
+    bool     press_had_long; /* the current press already fired LONG (excluded) */
+} ak_gesture_t;
+
+/** Reset a gesture recognizer to idle. */
+void ak_gesture_init(ak_gesture_t *g);
+
+/**
+ * Feed one FSM event. Returns a gesture determinable at this instant
+ * (normally DCLICK on the second short release), else AK_INPUT_EVENT_NONE.
+ * held_ms is the FSM's release duration (robustness only).
+ */
+ak_input_event_t ak_gesture_feed(ak_gesture_t *g, ak_input_event_t event, uint32_t now_ms, uint32_t held_ms);
+
+/** Call every poll tick. Returns CLICK when a pending click's window expires, else NONE. */
+ak_input_event_t ak_gesture_tick(ak_gesture_t *g, uint32_t now_ms);
 
 #endif /* AK_INPUT_FSM_H */

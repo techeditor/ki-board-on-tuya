@@ -86,8 +86,18 @@ Companion 发：
 ```
 
 - `id`：`k1`..`k5`（5 个茶轴按键）
-- `action`：`down` / `up` / `long`
-- `held_ms`：按下时长（`up`/`long` 时有意义）
+- `action`：`down` / `up` / `long` / `click` / `dclick`
+  - `down` / `up`：原始电平边沿（所有键，保持不变）。
+  - `long`：按住超过长按阈值（所有键，保持不变）。
+  - `click`：一次短按的释放，且在双击窗口内未发生第二次按下。**仅 K1–K3 产生**，
+    在松手约 400ms（双击窗口）后发出。
+  - `dclick`：双击窗口内的第二次短按释放，立即发出。**仅 K1–K3 产生**。
+- `held_ms`：按下时长（`up`/`long` 时有意义；`click`/`dclick` 取最近一次短按释放时长）
+
+> `click` / `dclick` 为 K1–K3 的语义手势，叠加在 `down`/`up` 之上：一次短按会先发
+> `down`、再发 `up`，随后（若非双击）在约 400ms 后发 `click`；双击则在第二次释放时
+> 发 `dclick`。长按发 `long`，不会再发 `click`/`dclick`。K4/K5/nav 不产生
+> `click`/`dclick`。接收方必须忽略无法识别的 `action`（向后兼容）。
 
 ### nav（5 向摇杆）
 
