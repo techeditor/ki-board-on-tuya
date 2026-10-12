@@ -1081,6 +1081,13 @@ static void ak_settings_draw(void)
         s_lcd_redraw_pending = true;
         return;
     }
+    /* Do not draw over a framebuffer the panel's DMA is still reading. */
+    if (ak_statuslcd_flush_busy()) {
+        (void)ak_statuslcd_flush_wait();
+        if (!ak_statuslcd_ready()) {
+            return;
+        }
+    }
 
     ak_gfx_clear(AK_COL_BLACK);
     ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, LCD_SESSION_SELECTED_BG);
@@ -1281,6 +1288,18 @@ static void ak_render_status(void)
 {
     if (!ak_statuslcd_ready()) {
         return;
+    }
+    /* Drawing writes directly into the PSRAM framebuffer. If a prior flush is
+     * still being read by SPI DMA, wait for it here -- BEFORE any draw -- so we
+     * never scribble over a frame the panel is still consuming. This is almost
+     * always instant (DMA ~25ms vs. seconds between redraws); the point of the
+     * async flush is that the app loop reads UART in between, not that renders
+     * overlap DMA. */
+    if (ak_statuslcd_flush_busy()) {
+        (void)ak_statuslcd_flush_wait();
+        if (!ak_statuslcd_ready()) {
+            return;
+        }
     }
     uint32_t now_ms = tal_system_get_millisecond();
     if ((int32_t)(s_lcd_audio_guard_until_ms - now_ms) > 0 ||
@@ -1941,6 +1960,9 @@ static void user_main(void)
         }
 
 #if AK_ENABLE_DISPLAY
+        /* Reclaim a finished background flush without ever sleeping, so the
+         * next redraw rarely has to wait and the loop keeps reading UART. */
+        ak_statuslcd_flush_poll();
         ak_voice_ui_tick(now);
         if (s_lcd_redraw_pending &&
             (int32_t)(s_lcd_audio_guard_until_ms - now) <= 0 &&

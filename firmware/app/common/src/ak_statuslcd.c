@@ -252,15 +252,78 @@ OPERATE_RET ak_statuslcd_set_brightness(uint8_t brightness)
     return OPRT_OK;
 }
 
+bool ak_statuslcd_flush_busy(void)
+{
+    return s_ready && !s_flush_done;
+}
+
+/*
+ * Block until the in-flight DMA (if any) completes, bounded by FLUSH_TIMEOUT_MS.
+ * Returns true when the framebuffer is safe to reuse. Pulled out of
+ * ak_statuslcd_flush() so the wait no longer sits on the caller's path right
+ * after enqueue: the previous busy-wait kept the single-threaded app loop out
+ * of ak_transport_read() for up to 1000ms per redraw, stalling PC->board UART.
+ * Now the wait happens only when a NEW frame is about to overwrite PSRAM still
+ * owned by SPI, and the app loop drains it between frames (see
+ * ak_statuslcd_flush_poll).
+ */
+bool ak_statuslcd_flush_wait(void)
+{
+    if (!s_ready) {
+        return false;
+    }
+    if (s_flush_done) {
+        return true;
+    }
+    uint32_t started_ms = tal_system_get_millisecond();
+    while (!s_flush_done &&
+           (uint32_t)(tal_system_get_millisecond() - started_ms) <
+               FLUSH_TIMEOUT_MS) {
+        tal_system_sleep(1U);
+    }
+    if (!s_flush_done) {
+        /* Reusing a buffer still owned by SPI corrupts the panel. Stop future
+         * drawing instead of returning a writable in-flight framebuffer. */
+        PR_ERR("status LCD flush timed out; disabling redraw");
+        s_ready = false;
+        return false;
+    }
+    if (s_frame != NULL) {
+        s_frame->free_cb = NULL;
+    }
+    return true;
+}
+
+/*
+ * Non-blocking: if a prior DMA has already finished, release the free_cb so the
+ * framebuffer is marked reusable without ever sleeping. The app loop calls this
+ * each iteration (cheap) so a completed flush is reclaimed promptly without the
+ * next render having to wait for it.
+ */
+void ak_statuslcd_flush_poll(void)
+{
+    if (s_ready && s_flush_done && s_frame != NULL && s_frame->free_cb != NULL) {
+        s_frame->free_cb = NULL;
+    }
+}
+
 void ak_statuslcd_flush(void)
 {
     if (!s_ready) {
         return;
     }
 
-    /* The SPI TDD queues the framebuffer pointer and returns immediately. Do
-     * not let the renderer overwrite that PSRAM until the display task has
-     * completed every DMA chunk and invokes free_cb. */
+    /* The SPI TDD queues the framebuffer pointer and returns immediately. A new
+     * frame must not overwrite PSRAM the previous DMA may still be reading, so
+     * wait for the prior flush to complete BEFORE touching the buffer. This is
+     * the only remaining blocking point, and it is almost always instant: the
+     * CPU-side drawing done by ak_render_status() before calling us already
+     * takes longer than the ~25ms full-frame DMA, so by the time we get here
+     * the previous flush has finished and this returns without sleeping. */
+    if (!ak_statuslcd_flush_wait()) {
+        return;
+    }
+
     OPERATE_RET rt = ak_statuslcd_restore_window();
     if (rt != OPRT_OK) {
         PR_ERR("status LCD window restore failed: %d", rt);
@@ -281,21 +344,8 @@ void ak_statuslcd_flush(void)
         PR_ERR("status LCD flush enqueue failed: %d", rt);
         return;
     }
-
-    uint32_t started_ms = tal_system_get_millisecond();
-    while (!s_flush_done &&
-           (uint32_t)(tal_system_get_millisecond() - started_ms) <
-               FLUSH_TIMEOUT_MS) {
-        tal_system_sleep(1U);
-    }
-    if (!s_flush_done) {
-        /* Reusing a buffer still owned by SPI corrupts the panel. Stop future
-         * drawing instead of returning a writable in-flight framebuffer. */
-        PR_ERR("status LCD flush timed out; disabling redraw");
-        s_ready = false;
-        return;
-    }
-    s_frame->free_cb = NULL;
+    /* Return immediately -- the DMA runs in the background. The app loop keeps
+     * reading UART; the next ak_statuslcd_flush() waits at entry if needed. */
 }
 
 void ak_statuslcd_title(const char *title, uint16_t bar_color)

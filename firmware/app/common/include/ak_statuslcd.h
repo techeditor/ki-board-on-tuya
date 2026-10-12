@@ -40,8 +40,30 @@ bool ak_statuslcd_ready(void);
 /** @brief Set safe software brightness while keeping the GPIO backlight on. */
 OPERATE_RET ak_statuslcd_set_brightness(uint8_t brightness);
 
-/** @brief Push the bound frame buffer to the panel. */
+/**
+ * @brief Enqueue the bound frame buffer to the panel and return immediately.
+ *
+ * The SPI DMA runs in the background. A subsequent ak_statuslcd_flush() waits
+ * at entry for the prior DMA to finish before reusing the framebuffer, so the
+ * app loop is never blocked right after a redraw (it keeps reading UART).
+ */
 void ak_statuslcd_flush(void);
+
+/** @brief True while a flush DMA is still in flight (framebuffer owned by SPI). */
+bool ak_statuslcd_flush_busy(void);
+
+/**
+ * @brief Block until the in-flight flush completes (bounded by the internal
+ *        timeout). Returns true when the framebuffer is safe to reuse.
+ */
+bool ak_statuslcd_flush_wait(void);
+
+/**
+ * @brief Non-blocking reclaim of a completed flush. Call once per app-loop
+ *        iteration so a finished DMA is released without the next render
+ *        having to wait for it. Never sleeps.
+ */
+void ak_statuslcd_flush_poll(void);
 
 /**
  * @brief Draw a top title bar (full width, height 22) with 1x text, and clear
