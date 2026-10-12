@@ -169,6 +169,22 @@ pub enum KeyAction {
     Down,
     Up,
     Long,
+    /// Firmware-classified final gesture: a confirmed single click (scheme X —
+    /// held back one double-click window to tell single from double apart).
+    Click,
+    /// Firmware-classified final gesture: a double click.
+    Double,
+    /// Pending-confirm (post-ASR) edit intent: delete one character
+    /// (K4 click). Companion injects Backspace.
+    #[serde(rename = "cancel_char")]
+    CancelChar,
+    /// Pending-confirm edit intent: delete all / cancel (K4 long). Companion
+    /// injects Ctrl+A then Delete and the board leaves pending-confirm.
+    #[serde(rename = "cancel_all")]
+    CancelAll,
+    /// Pending-confirm edit intent: confirm / submit (K6 click). Companion
+    /// injects Enter and the board leaves pending-confirm.
+    Confirm,
     #[serde(other)]
     Unknown,
 }

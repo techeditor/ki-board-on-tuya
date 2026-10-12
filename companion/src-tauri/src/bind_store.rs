@@ -27,6 +27,12 @@ fn default_chats() -> Vec<u8> {
     vec![1, 2, 3]
 }
 
+/// Default K1-K3 double-click instance switches: Ctrl+1/2/3 =
+/// Local / Remote Crew 1 / Remote Crew 2.
+fn default_instances() -> Vec<u8> {
+    vec![1, 2, 3]
+}
+
 /// Empty persisted aliases mean that the AK displays the defaults A, B, and C.
 fn default_aliases() -> Vec<String> {
     vec![String::new(); SLOT_COUNT]
@@ -46,6 +52,10 @@ pub struct BindStore {
     /// Index 0..=2 maps K1..=K3 to the A/B/C slots.
     #[serde(default = "default_chats")]
     pub chats: Vec<u8>,
+    /// Index 0..=2: the Crew instance number K1..=K3 double-click switches to
+    /// (Ctrl+N — Kiro Crew "Remote Crews": 1 = Local, 2 = remote crew 1, …).
+    #[serde(default = "default_instances")]
+    pub instances: Vec<u8>,
     /// Optional display aliases; an empty entry falls back to A, B, or C.
     #[serde(default = "default_aliases")]
     pub aliases: Vec<String>,
@@ -61,6 +71,7 @@ impl Default for BindStore {
     fn default() -> Self {
         Self {
             chats: default_chats(),
+            instances: default_instances(),
             aliases: default_aliases(),
             sessions: default_sessions(),
             pinned_session: String::new(),
@@ -89,6 +100,20 @@ impl BindStore {
         for (i, n) in self.chats.iter_mut().enumerate() {
             if !(1..=9).contains(n) {
                 *n = defaults[i];
+            }
+        }
+
+        let inst_defaults = default_instances();
+        if self.instances.len() < SLOT_COUNT {
+            for i in self.instances.len()..SLOT_COUNT {
+                self.instances.push(inst_defaults[i]);
+            }
+        } else if self.instances.len() > SLOT_COUNT {
+            self.instances.truncate(SLOT_COUNT);
+        }
+        for (i, n) in self.instances.iter_mut().enumerate() {
+            if !(1..=9).contains(n) {
+                *n = inst_defaults[i];
             }
         }
 
@@ -344,7 +369,7 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"chats":[4,2,8],"aliases":["Plan","",""],"sessions":["dashboard:chat-4","",""],"pinned_session":"dashboard:chat-4"}"#
+            r#"{"chats":[4,2,8],"instances":[1,2,3],"aliases":["Plan","",""],"sessions":["dashboard:chat-4","",""],"pinned_session":"dashboard:chat-4"}"#
         );
         let back: BindStore = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);

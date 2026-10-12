@@ -798,6 +798,7 @@ mod app {
         inner.kc_binds.save()?;
         // Keep the live router context in sync with the persisted numbers.
         inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
+        inner.kc_router.ctx.switch_instances = inner.kc_binds.instances.clone();
         Ok(())
     }
 
@@ -819,6 +820,7 @@ mod app {
         inner.kc_binds.set(slot, number);
         inner.kc_binds.save()?;
         inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
+        inner.kc_router.ctx.switch_instances = inner.kc_binds.instances.clone();
         Ok(())
     }
 
@@ -839,6 +841,7 @@ mod app {
         inner.kc_binds.clear(slot);
         inner.kc_binds.save()?;
         inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
+        inner.kc_router.ctx.switch_instances = inner.kc_binds.instances.clone();
         Ok(())
     }
 
@@ -1374,6 +1377,7 @@ mod app {
         // jumps to the configured numbers.
         let kc_binds = BindStore::load();
         let jump_chats = kc_binds.chats.clone();
+        let switch_instances = kc_binds.instances.clone();
         let kc_pinned_session = (!kc_binds.pinned_session.is_empty())
             .then(|| kc_binds.pinned_session.clone());
         let state: Shared = Arc::new(AppState {
@@ -1392,6 +1396,7 @@ mod app {
                 kc_controller: KiroCrewController::new(None),
                 kc_router: ControlRouter::new(crate::kirocrew_control::ControlCtx {
                     jump_chats,
+                    switch_instances,
                 }),
                 control_enabled: true,
                 status_sink: None,

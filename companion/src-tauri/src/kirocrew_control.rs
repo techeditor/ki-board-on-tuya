@@ -42,6 +42,10 @@ pub enum Chord {
     /// Alt+N — jump to chat N (N = 1..=9). Deterministic, unlike a command-bar
     /// text search. (Kiro Crew default shortcut "Jump to chat N".)
     JumpChat(u8),
+    /// Ctrl+N — switch Crew instance N (N = 1..=9). Kiro Crew's "Remote Crews"
+    /// shortcuts: Ctrl+1 = Switch to Local, Ctrl+2 = remote crew 1,
+    /// Ctrl+3 = remote crew 2, … Driven by a K1-K3 double-click.
+    SwitchInstance(u8),
     /// Alt+Left — previous chat.
     PrevChat,
     /// Alt+Right — next chat.
@@ -77,6 +81,14 @@ impl Chord {
                     if let Ok(n) = d.parse::<u8>() {
                         if (1..=9).contains(&n) {
                             return Some(Chord::JumpChat(n));
+                        }
+                    }
+                }
+                // "instance1".."instance9" -> SwitchInstance(1..=9)
+                if let Some(d) = other.strip_prefix("instance") {
+                    if let Ok(n) = d.parse::<u8>() {
+                        if (1..=9).contains(&n) {
+                            return Some(Chord::SwitchInstance(n));
                         }
                     }
                 }
@@ -121,12 +133,18 @@ pub enum ControlAction {
 pub struct ControlCtx {
     /// Chat numbers for K1, K2, K3 (index 0..=2). Configurable by the UI.
     pub jump_chats: Vec<u8>,
+    /// Crew instance numbers for K1, K2, K3 double-click (index 0..=2),
+    /// mapped to Ctrl+N (Kiro Crew "Remote Crews": 1 = Local, 2 = remote crew
+    /// 1, 3 = remote crew 2…). Configurable by the UI. Defaults to [1, 2, 3].
+    pub switch_instances: Vec<u8>,
 }
 
 impl ControlCtx {
-    /// Sensible defaults: K1->chat 1, K2->chat 2, K3->chat 3 (Alt+1/2/3).
+    /// Sensible defaults: K1->chat 1, K2->chat 2, K3->chat 3 (Alt+1/2/3);
+    /// double-click K1->instance 1 (Local), K2->instance 2, K3->instance 3
+    /// (Ctrl+1/2/3).
     pub fn with_default_jumps() -> Self {
-        Self { jump_chats: vec![1, 2, 3] }
+        Self { jump_chats: vec![1, 2, 3], switch_instances: vec![1, 2, 3] }
     }
 
     /// Deterministic `Alt+N` jump for slot `idx` (0-based). Returns
@@ -135,6 +153,18 @@ impl ControlCtx {
     fn jump(&self, idx: usize) -> ControlAction {
         match self.jump_chats.get(idx) {
             Some(&n) if (1..=9).contains(&n) => ControlAction::Chord(Chord::JumpChat(n)),
+            _ => ControlAction::None,
+        }
+    }
+
+    /// Deterministic `Ctrl+N` instance switch for slot `idx` (0-based). Returns
+    /// `Chord(SwitchInstance(n))` when `switch_instances[idx]` is valid
+    /// (1..=9); `None` otherwise.
+    fn switch(&self, idx: usize) -> ControlAction {
+        match self.switch_instances.get(idx) {
+            Some(&n) if (1..=9).contains(&n) => {
+                ControlAction::Chord(Chord::SwitchInstance(n))
+            }
             _ => ControlAction::None,
         }
     }
@@ -153,20 +183,26 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 
 /// Pure mapping: board event + context → control action. No IO.
 ///
-/// Mapping table (design R2.3), using Kiro Crew's real default shortcuts:
+/// Mapping table (v0.3 interaction model, design §0), using Kiro Crew's real
+/// default shortcuts. The firmware classifies k1-k3 gestures (scheme X) and
+/// owns the pending-confirm state, so the router acts on FINAL actions
+/// (`click`/`double`/`cancel_*`/`confirm`), not raw edges, for those keys.
 ///
-/// | event                          | action                              |
-/// |--------------------------------|-------------------------------------|
-/// | `macro { name }` (recognized text) | `Compose(name)` — K4 voice → focus composer + type (no send) |
-/// | `key k1..k3` `Down`            | `Chord(JumpChat(n))` — n = configured `jump_chats[idx]` (Alt+N, client-side jump to chat n); `None` if unset / out of 1..=9 |
-/// | `key k1..k3` `Long`/`Up`       | `None` — jump fired on `Down`; the rest of the press is a no-op |
-/// | `key k4` (down/long)           | `None` — K4 is push-to-talk; text arrives later as `macro` |
-/// | `key k5` (down/long)           | `Chord(Enter)` — submit / continue  |
-/// | `key k6` (down/long)           | `None` — reserved; bind in the UI later (v0.3) |
-/// | `key enc` `Down`               | `Chord(Enter)` — EC11 push confirms (was nav center) |
-/// | `encoder { detents>0 }`        | `ChordRepeat(Down, detents)` — clockwise scrolls down, one step per detent |
-/// | `encoder { detents<0 }`        | `ChordRepeat(Up, |detents|)` — counter-clockwise scrolls up |
-/// | anything else / key `up`       | `None`                                    |
+/// | event                           | action                              |
+/// |---------------------------------|-------------------------------------|
+/// | `asr`/`macro { text }`          | `Compose(text)` — recognized voice text → focus composer + type (no send) |
+/// | `key k1..k3` `click`            | `Chord(JumpChat(n))` — n = `jump_chats[idx]` (Alt+N, jump to chat n); `None` if unset / out of 1..=9 |
+/// | `key k1..k3` `double`           | `Chord(SwitchInstance(n))` — n = `switch_instances[idx]` (Ctrl+N, switch Local/Remote Crew); `None` if unset / out of 1..=9 |
+/// | `key k1..k3` raw down/up/long   | `None` — firmware classifies these into click/double |
+/// | `key k4` `cancel_char`          | `Chord(Backspace)` — pending-confirm: delete one char |
+/// | `key k4` `cancel_all`           | `Chord(ClearInput)` — pending-confirm: Ctrl+A, Delete (board exits pending) |
+/// | `key k6` `confirm`              | `Chord(Enter)` — pending-confirm: submit (board exits pending) |
+/// | `key k5` (down/long)            | `None` — K5 is voice PTT; text arrives later as `asr`/`macro` |
+/// | `key k4`/`k6` raw down/long     | `None` — only actionable while the firmware is in pending-confirm |
+/// | `key enc` `Down`                | `Chord(Enter)` — EC11 push confirms (was nav center) |
+/// | `encoder { detents>0 }`         | `ChordRepeat(Down, detents)` — clockwise scrolls down, one step per detent |
+/// | `encoder { detents<0 }`         | `ChordRepeat(Up, |detents|)` — counter-clockwise scrolls up |
+/// | anything else / key `up`        | `None`                                    |
 pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
     match ev {
         // Recognized speech text -> type into the chat composer (NO send). Both
@@ -192,10 +228,12 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
             }
         }
 
-        // K1-K3 = jump keys. They fire on `Down` ONLY — one physical press
-        // produces exactly one `Alt+N` jump; the `Long` and `Up` edges of the
-        // same press are no-ops. Matched BEFORE the generic `is_trigger` arm
-        // (which fires on Down/Long) so `Long` does not double-fire.
+        // K1-K3 = chat/instance keys. The FIRMWARE classifies the gesture and
+        // sends the final `click` / `double` action (scheme X); the Companion
+        // no longer guesses from raw down/up. `click` -> Alt+N jump to the
+        // configured chat; `double` -> Ctrl+N switch to the configured Crew
+        // instance (Local / Remote Crew). Raw down/up/long are no-ops here (the
+        // firmware only emits them for keys in EDGE mode, not for k1-k3).
         Inbound::Key { payload, .. }
             if matches!(payload.id.as_str(), "k1" | "k2" | "k3") =>
         {
@@ -205,24 +243,49 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
                 _ => 2usize,
             };
             match payload.action {
-                // Down -> jump to the configured chat number for this key.
-                KeyAction::Down => ctx.jump(idx),
-                // Long / Up (and anything else) -> nothing; the jump already
-                // fired on Down.
+                KeyAction::Click => ctx.jump(idx),
+                KeyAction::Double => ctx.switch(idx),
+                _ => ControlAction::None,
+            }
+        }
+
+        // Pending-confirm (post-ASR) edit intents. The firmware owns the
+        // pending-confirm state and emits these final actions directly (not
+        // down/up) when K4/K6 are pressed while awaiting confirmation. The
+        // Companion just injects the matching composer edit:
+        //   cancel_char -> Backspace (delete one char)
+        //   cancel_all  -> Ctrl+A, Delete (clear the composer) + board exits
+        //   confirm     -> Enter (submit) + board exits
+        // These are matched BEFORE the generic edge arm because they are not
+        // trigger edges (is_trigger only sees Down/Long).
+        Inbound::Key { payload, .. }
+            if matches!(
+                payload.action,
+                KeyAction::CancelChar | KeyAction::CancelAll | KeyAction::Confirm
+            ) =>
+        {
+            match payload.action {
+                KeyAction::CancelChar => ControlAction::Chord(Chord::Backspace),
+                KeyAction::CancelAll => ControlAction::Chord(Chord::ClearInput),
+                KeyAction::Confirm => ControlAction::Chord(Chord::Enter),
                 _ => ControlAction::None,
             }
         }
 
         Inbound::Key { payload, .. } if is_trigger(payload.action) => {
             match payload.id.as_str() {
-                // K4 = push-to-talk: pressing it starts voice; the recognized
-                // text comes back later as a `macro` frame (handled above).
+                // K5 = voice push-to-talk (v0.3): pressing it starts voice; the
+                // recognized text comes back later as an `asr` / `macro` frame
+                // (handled above). No chord on the key edge itself.
+                "k5" => ControlAction::None,
+                // K4 = cancel in pending-confirm; outside pending-confirm the
+                // firmware does not emit a trigger for it in a way we act on.
                 "k4" => ControlAction::None,
-                // K5 = submit / continue.
-                "k5" => ControlAction::Chord(Chord::Enter),
+                // K6 = confirm in pending-confirm; outside it, no-op here (the
+                // firmware emits `confirm` only while pending).
+                "k6" => ControlAction::None,
                 // EC11 push = confirm (replaces the v0.2 nav-center Enter).
                 "enc" => ControlAction::Chord(Chord::Enter),
-                // K6 is reserved in v0.3 — bind it in the UI later.
                 _ => ControlAction::None,
             }
         }
@@ -503,6 +566,8 @@ mod windows_impl {
             Chord::CtrlK => ctrl_k(),
             Chord::JumpChat(n) if (1..=9).contains(&n) => alt_tap(0x30 + n as u16), // Alt+'1'..'9'
             Chord::JumpChat(n) => Err(format!("JumpChat({n}) out of range 1..=9")),
+            Chord::SwitchInstance(n) if (1..=9).contains(&n) => ctrl_tap(0x30 + n as u16), // Ctrl+'1'..'9'
+            Chord::SwitchInstance(n) => Err(format!("SwitchInstance({n}) out of range 1..=9")),
             Chord::PrevChat => alt_tap(VK_LEFT),  // Alt+Left
             Chord::NextChat => alt_tap(VK_RIGHT), // Alt+Right
             Chord::FocusInput => alt_tap(VK_RETURN), // Alt+Enter
@@ -939,6 +1004,10 @@ mod tests {
         assert_eq!(Chord::parse("chat3"), Some(Chord::JumpChat(3)));
         assert_eq!(Chord::parse("chat9"), Some(Chord::JumpChat(9)));
         assert_eq!(Chord::parse("chat0"), None);
+        assert_eq!(Chord::parse("instance1"), Some(Chord::SwitchInstance(1)));
+        assert_eq!(Chord::parse("INSTANCE3"), Some(Chord::SwitchInstance(3)));
+        assert_eq!(Chord::parse("instance0"), None);
+        assert_eq!(Chord::parse("instance10"), None);
         assert_eq!(Chord::parse("nope"), None);
         assert_eq!(Chord::parse(""), None);
     }
@@ -975,61 +1044,79 @@ mod tests {
     // ── Router: K5 → Enter ─────────────────────────────────────
 
     #[test]
-    fn k5_down_routes_to_enter_chord() {
+    fn k5_voice_edge_is_none_text_comes_via_asr() {
+        // v0.3: K5 is voice push-to-talk. Its down/long edges produce no chord;
+        // the recognized text arrives later as an `asr`/`macro` frame.
         let ctx = ControlCtx::default();
-        assert_eq!(
-            route_input(&key("k5", KeyAction::Down), &ctx),
-            ControlAction::Chord(Chord::Enter)
-        );
-        // Long press also triggers.
-        assert_eq!(
-            route_input(&key("k5", KeyAction::Long), &ctx),
-            ControlAction::Chord(Chord::Enter)
-        );
+        assert_eq!(route_input(&key("k5", KeyAction::Down), &ctx), ControlAction::None);
+        assert_eq!(route_input(&key("k5", KeyAction::Long), &ctx), ControlAction::None);
     }
 
-    // ── Router: K1–K3 → Alt+<configured number> jump on Down only ──
+    // ── Router: K1–K3 → click = Alt+<chat> jump, double = Ctrl+<instance> ──
 
     #[test]
-    fn k1_k2_k3_down_jumps_to_configured_chat_number() {
+    fn k1_k2_k3_click_jumps_to_configured_chat_number() {
         // Non-default numbers to prove the router reads ctx.jump_chats.
-        let ctx = ControlCtx { jump_chats: vec![5, 2, 9] };
+        let ctx = ControlCtx { jump_chats: vec![5, 2, 9], switch_instances: vec![1, 2, 3] };
         assert_eq!(
-            route_input(&key("k1", KeyAction::Down), &ctx),
+            route_input(&key("k1", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(5))
         );
         assert_eq!(
-            route_input(&key("k2", KeyAction::Down), &ctx),
+            route_input(&key("k2", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(2))
         );
         assert_eq!(
-            route_input(&key("k3", KeyAction::Down), &ctx),
+            route_input(&key("k3", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(9))
         );
     }
 
     #[test]
-    fn k1_k2_k3_down_uses_defaults() {
+    fn k1_k2_k3_double_switches_to_configured_instance() {
+        // double-click -> Ctrl+N switch instance (Local / Remote Crew).
+        let ctx = ControlCtx { jump_chats: vec![1, 2, 3], switch_instances: vec![1, 2, 3] };
+        assert_eq!(
+            route_input(&key("k1", KeyAction::Double), &ctx),
+            ControlAction::Chord(Chord::SwitchInstance(1))
+        );
+        assert_eq!(
+            route_input(&key("k2", KeyAction::Double), &ctx),
+            ControlAction::Chord(Chord::SwitchInstance(2))
+        );
+        assert_eq!(
+            route_input(&key("k3", KeyAction::Double), &ctx),
+            ControlAction::Chord(Chord::SwitchInstance(3))
+        );
+    }
+
+    #[test]
+    fn k1_k2_k3_click_uses_defaults() {
         let ctx = ControlCtx::with_default_jumps();
         assert_eq!(
-            route_input(&key("k1", KeyAction::Down), &ctx),
+            route_input(&key("k1", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(1))
         );
         assert_eq!(
-            route_input(&key("k2", KeyAction::Down), &ctx),
+            route_input(&key("k2", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(2))
         );
         assert_eq!(
-            route_input(&key("k3", KeyAction::Down), &ctx),
+            route_input(&key("k3", KeyAction::Click), &ctx),
             ControlAction::Chord(Chord::JumpChat(3))
         );
     }
 
     #[test]
-    fn k1_k3_long_and_up_are_none() {
+    fn k1_k3_raw_edges_are_none() {
         let ctx = ControlCtx::with_default_jumps();
-        // The jump fires on Down; Long and Up edges of the same press do nothing.
+        // Firmware classifies k1-k3; raw down/up/long are no-ops at the router.
         for id in ["k1", "k2", "k3"] {
+            assert_eq!(
+                route_input(&key(id, KeyAction::Down), &ctx),
+                ControlAction::None,
+                "{id} Down should be None (gesture classified by firmware)"
+            );
             assert_eq!(
                 route_input(&key(id, KeyAction::Long), &ctx),
                 ControlAction::None,
@@ -1038,42 +1125,57 @@ mod tests {
             assert_eq!(
                 route_input(&key_held(id, KeyAction::Up, 120), &ctx),
                 ControlAction::None,
-                "{id} short Up should be None"
-            );
-            assert_eq!(
-                route_input(&key_held(id, KeyAction::Up, 1500), &ctx),
-                ControlAction::None,
-                "{id} long-tail Up should be None"
+                "{id} Up should be None"
             );
         }
     }
 
     #[test]
-    fn k1_k3_down_none_when_number_unset_or_out_of_range() {
+    fn k1_k3_click_none_when_number_unset_or_out_of_range() {
         // Missing index (short jump_chats vector) -> None.
-        let short = ControlCtx { jump_chats: vec![1] };
-        assert_eq!(route_input(&key("k2", KeyAction::Down), &short), ControlAction::None);
-        assert_eq!(route_input(&key("k3", KeyAction::Down), &short), ControlAction::None);
+        let short = ControlCtx { jump_chats: vec![1], switch_instances: vec![1, 2, 3] };
+        assert_eq!(route_input(&key("k2", KeyAction::Click), &short), ControlAction::None);
+        assert_eq!(route_input(&key("k3", KeyAction::Click), &short), ControlAction::None);
         // Out-of-range number (0 or >9) -> None.
-        let bad = ControlCtx { jump_chats: vec![0, 10, 3] };
-        assert_eq!(route_input(&key("k1", KeyAction::Down), &bad), ControlAction::None);
-        assert_eq!(route_input(&key("k2", KeyAction::Down), &bad), ControlAction::None);
+        let bad = ControlCtx { jump_chats: vec![0, 10, 3], switch_instances: vec![1, 2, 3] };
+        assert_eq!(route_input(&key("k1", KeyAction::Click), &bad), ControlAction::None);
+        assert_eq!(route_input(&key("k2", KeyAction::Click), &bad), ControlAction::None);
         assert_eq!(
-            route_input(&key("k3", KeyAction::Down), &bad),
+            route_input(&key("k3", KeyAction::Click), &bad),
             ControlAction::Chord(Chord::JumpChat(3))
         );
         // Empty vector (default ControlCtx) -> None.
         let empty = ControlCtx::default();
-        assert_eq!(route_input(&key("k1", KeyAction::Down), &empty), ControlAction::None);
+        assert_eq!(route_input(&key("k1", KeyAction::Click), &empty), ControlAction::None);
     }
 
     #[test]
-    fn k4_press_is_none_text_comes_via_macro() {
+    fn pending_confirm_edits_map_to_composer_chords() {
+        // v0.3 pending-confirm: firmware emits final edit actions directly.
         let ctx = ControlCtx::with_default_jumps();
-        assert_eq!(route_input(&key("k4", KeyAction::Down), &ctx), ControlAction::None);
+        assert_eq!(
+            route_input(&key("k4", KeyAction::CancelChar), &ctx),
+            ControlAction::Chord(Chord::Backspace)
+        );
+        assert_eq!(
+            route_input(&key("k4", KeyAction::CancelAll), &ctx),
+            ControlAction::Chord(Chord::ClearInput)
+        );
+        assert_eq!(
+            route_input(&key("k6", KeyAction::Confirm), &ctx),
+            ControlAction::Chord(Chord::Enter)
+        );
     }
 
-    // ── Router: nav → composer editing / navigation / submit ───
+    #[test]
+    fn k4_k6_raw_edges_are_none_outside_pending() {
+        // Outside pending-confirm the firmware does not emit actionable edges
+        // for K4/K6; the router treats their raw down/long as no-ops.
+        let ctx = ControlCtx::with_default_jumps();
+        assert_eq!(route_input(&key("k4", KeyAction::Down), &ctx), ControlAction::None);
+        assert_eq!(route_input(&key("k6", KeyAction::Down), &ctx), ControlAction::None);
+        assert_eq!(route_input(&key("k6", KeyAction::Long), &ctx), ControlAction::None);
+    }
 
     #[test]
     fn encoder_clockwise_scrolls_down() {
@@ -1115,13 +1217,6 @@ mod tests {
             route_input(&key("enc", KeyAction::Down), &ctx),
             ControlAction::Chord(Chord::Enter)
         );
-    }
-
-    #[test]
-    fn k6_is_reserved_none() {
-        let ctx = ControlCtx::with_default_jumps();
-        assert_eq!(route_input(&key("k6", KeyAction::Down), &ctx), ControlAction::None);
-        assert_eq!(route_input(&key("k6", KeyAction::Long), &ctx), ControlAction::None);
     }
 
     // ── Router: non-triggering / ignored events → None ─────────
@@ -1167,14 +1262,20 @@ mod tests {
     #[test]
     fn control_router_wraps_route_input() {
         let router = ControlRouter::new(ControlCtx::with_default_jumps());
+        // EC11 push confirms with Enter.
         assert_eq!(
-            router.route(&key("k5", KeyAction::Down)),
+            router.route(&key("enc", KeyAction::Down)),
             ControlAction::Chord(Chord::Enter)
         );
-        // And a K1 Down jumps to the configured number.
+        // A K1 click jumps to the configured chat number.
         assert_eq!(
-            router.route(&key("k1", KeyAction::Down)),
+            router.route(&key("k1", KeyAction::Click)),
             ControlAction::Chord(Chord::JumpChat(1))
+        );
+        // A K1 double-click switches Crew instance.
+        assert_eq!(
+            router.route(&key("k1", KeyAction::Double)),
+            ControlAction::Chord(Chord::SwitchInstance(1))
         );
     }
 
