@@ -785,8 +785,8 @@ button.watched-watch.active {
 
 .binding-row {
   display: grid;
-  grid-template-columns: 122px minmax(150px, 1fr) auto 64px auto;
-  align-items: center;
+  grid-template-columns: 122px minmax(120px, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
+  align-items: end;
   gap: 8px;
   margin-top: 12px;
 }
@@ -795,30 +795,34 @@ button.watched-watch.active {
   margin-top: 6px;
 }
 
-.binding-slot-label,
-.binding-alt-label,
-.binding-reset {
-  white-space: nowrap;
-}
-
 .binding-slot-label {
+  white-space: nowrap;
   color: var(--text);
   font-size: 13px;
+  align-self: center;
 }
 
-.binding-alt-label {
-  color: var(--success);
-  font-weight: 700;
+/* A labelled control cell: a small caption stacked over the select. */
+.binding-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.binding-field .hint {
+  margin: 0;
+}
+
+.binding-field select {
+  width: 100%;
+  min-width: 0;
 }
 
 .binding-alias-input,
 .binding-chat-select {
   width: 100%;
   min-width: 0;
-}
-
-.binding-reset {
-  min-width: 112px;
 }
 
 @media (max-width: 620px) {
@@ -842,7 +846,7 @@ button.watched-watch.active {
   .watched-detail-head .watched-watch { grid-column: 1 / -1; }
 
   .binding-row {
-    grid-template-columns: 1fr auto 64px auto;
+    grid-template-columns: 1fr 1fr;
   }
 
   .binding-slot-label,
@@ -1027,4 +1031,84 @@ button.activation-toggle:active {
   .activation-step small {
     font-size: 9px;
   }
+}
+
+/* Collapsible panel variant (e.g. the Agent Status Hook fallback). The
+   <summary> carries the panel title; the body is padded like a normal panel. */
+.panel-collapsible {
+  padding: 0;
+}
+
+.panel-collapsible > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.panel-collapsible > summary::-webkit-details-marker {
+  display: none;
+}
+
+.panel-collapsible > summary::before {
+  content: "\25B6"; /* ▶ */
+  color: var(--warning);
+  font-size: 10px;
+  transition: transform 0.12s ease;
+}
+
+.panel-collapsible[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.panel-collapsible > summary h3 {
+  margin: 0;
+}
+
+.panel-collapsible[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-collapsible-body {
+  padding: 12px;
+}
+
+/* Mode 2 long-press bind: selectable Watched Chat cards + status banners. */
+.watched-compact-card {
+  cursor: pointer;
+}
+
+.watched-compact-card.selected {
+  outline: 2px solid var(--success);
+  outline-offset: -2px;
+}
+
+.watched-selected-banner,
+.watched-bind-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.watched-selected-banner {
+  border-color: var(--success);
+  color: var(--text);
+}
+
+.watched-selected-banner code,
+.watched-bind-notice code {
+  color: var(--success);
+}
+
+.watched-bind-notice {
+  border-color: var(--warning);
+  color: var(--text);
 }

@@ -320,11 +320,40 @@ function App() {
   const [kcStatuses, setKcStatuses] = useState<Record<string, KcStatus>>({});
   const [watchedView, setWatchedView] = useState<WatchedView>("compact");
   const [quickBindDraft, setQuickBindDraft] = useState<QuickBindDraft | null>(null);
+  // Mode 2 (long-press bind): the session the user picked in the Watched Chat
+  // list as the target for the next physical K1/K2/K3 long-press. Long-pressing
+  // a key binds this session to that key's slot (K1->A, K2->B, K3->C), writing
+  // through the SAME path as the dropdown bind so the settings UI stays in sync.
+  const [selectedSession, setSelectedSession] = useState("");
+  // Transient banner shown after a long-press bind completes (also mirrored to
+  // the keyboard screen via a display frame).
+  const [longBindNotice, setLongBindNotice] = useState("");
   // FP-4b Route STATUS (option A): the pinned "watched chat". "" = follow all
   // sessions. Non-empty = only that session's status drives the board LCD.
   const [pinnedSession, setPinnedSession] = useState("");
   // FP-4b: Crew ScriptHookStore hooks apply globally to dashboard agent turns.
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
+
+  // The `board-event` listener is registered once, so it reads live values
+  // through refs instead of its (stale) initial closure. These mirror the state
+  // the long-press auto-bind path needs: the picked session, the API chat list,
+  // and the current bind numbers/aliases.
+  const selectedSessionRef = useRef("");
+  const crewSlotsRef = useRef<CrewSlot[]>([]);
+  const bindsRef = useRef<ChatNumbers>([]);
+  const bindAliasesRef = useRef<ChatAliases>(["", "", ""]);
+  useEffect(() => {
+    selectedSessionRef.current = selectedSession;
+  }, [selectedSession]);
+  useEffect(() => {
+    crewSlotsRef.current = crewSlots;
+  }, [crewSlots]);
+  useEffect(() => {
+    bindsRef.current = binds;
+  }, [binds]);
+  useEffect(() => {
+    bindAliasesRef.current = bindAliases;
+  }, [bindAliases]);
 
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
@@ -713,6 +742,50 @@ function App() {
     });
   }
 
+  // Mode 2: a physical K1/K2/K3 long-press binds the currently selected
+  // Watched Chat session to that key's slot. Reads live values from refs (the
+  // board-event listener closure is stale). Writes through bindSession — the
+  // SAME path as the dropdown — so the settings UI updates automatically, then
+  // mirrors a confirmation to the keyboard screen via a display frame.
+  async function longPressBind(slot: number) {
+    const sessionId = selectedSessionRef.current.trim();
+    if (!sessionId) {
+      setLongBindNotice(
+        `长按 K${slot}:先在 Watched Chat 列表里选择一个对话,再长按按键绑定。`,
+      );
+      return;
+    }
+    const slots = crewSlotsRef.current;
+    const match = slots.find((s) => s.key === sessionId);
+    if (!match) {
+      setLongBindNotice(`长按 K${slot}:选中的对话已不在 API 列表中,无法绑定。`);
+      return;
+    }
+    // Preserve the slot's existing Alt+N fallback number (session binding is
+    // what drives the jump while the API is connected; the number is only the
+    // offline fallback and must stay a valid 1..=9 for the backend).
+    const defaultName = SLOT_DEFAULT_NAMES[slot - 1];
+    const number = bindsRef.current[slot - 1] ?? slot;
+    const alias = bindAliasesRef.current[slot - 1] || defaultName;
+    await runBind(async () => {
+      await bindSession(slot, number, sessionId);
+      setSelectedSession("");
+      const label = match.title || sessionDisplayName(sessionId);
+      setLongBindNotice(`已绑定 Chat ${defaultName} (K${slot}) → ${label}`);
+      // Mirror to the keyboard screen (best-effort; ignored when board offline).
+      try {
+        await invoke("send_display", {
+          chatSlot: slot,
+          agentName: alias,
+          displayState: "idle",
+          text: `Bound K${slot}->Chat ${defaultName}`,
+        });
+      } catch {
+        // Board may be disconnected; the on-screen UI notice still confirms it.
+      }
+    });
+  }
+
   function bindAliasDraft(slot: number, alias: string) {
     setBindAliases((current) => {
       const next = [...current];
@@ -824,6 +897,15 @@ function App() {
       if (payload.kind === "key" && payload.id) {
         if (payload.action === "down" || payload.action === "long") {
           setLastKey(payload.id);
+          // Mode 2: long-pressing K1/K2/K3 auto-binds the selected chat to the
+          // matching A/B/C slot. Fire-and-forget; longPressBind reads live refs.
+          if (
+            payload.action === "long" &&
+            (payload.id === "k1" || payload.id === "k2" || payload.id === "k3")
+          ) {
+            const slot = payload.id === "k1" ? 1 : payload.id === "k2" ? 2 : 3;
+            void longPressBind(slot);
+          }
         } else if (payload.action === "up") {
           // Release clears the highlight so the INPUT view reflects only the
           // current physical trigger state, not the last-pressed key.
@@ -1577,17 +1659,23 @@ function App() {
 
             <Panel title="Bind Chats with Keys (Control)">
               <p className="hint">
-                Bind Chat A, B, and C to a stable Kiro Crew API chat and optionally name each
-                slot. K1–K3 select the API chat without focusing a window; ASR fills its draft
-                and K5 submits it. The Alt+ number remains the fallback when API/WS is offline
-                or no stable chat is bound. Names are saved when you press Enter or click
-                elsewhere; use up to {ALIAS_MAX_CHARS} English letters, numbers, spaces, or symbols.
+                为 Chat A / B / C 各绑定一个稳定的 Kiro Crew API 对话,并可选命名。K1–K3 直接
+                选中对应的 API 对话(不抢窗口焦点),ASR 填入草稿、K5 提交。也可以在下方
+                Watched Chat 列表里<strong>选中一个对话后长按 K1/K2/K3 自动绑定</strong>,结果会同步到这里。
+                别名在回车或失焦时保存,最多 {ALIAS_MAX_CHARS} 个英文字母、数字、空格或符号。
+              </p>
+              <p className="hint">
+                末尾的 <strong>Alt+N</strong> 仅作兜底:API/WebSocket 离线或该槽位没有绑定稳定对话时,
+                K1–K3 才回退到按 Kiro Crew 侧栏顺序跳转的 <code>Alt+N</code>。选择
+                <strong>"— 自动"</strong> 表示使用默认兜底号(A→1、B→2、C→3)。由于侧栏顺序会随排序规则变化,
+                绑定了稳定 API 对话时请以 API 对话为准。
               </p>
 
               {[1, 2, 3].map((slot) => {
                 const n = binds[slot - 1];
                 const alias = bindAliases[slot - 1] ?? "";
                 const defaultName = SLOT_DEFAULT_NAMES[slot - 1];
+                const isDefaultFallback = (n ?? slot) === slot;
                 return (
                   <div key={slot} className="binding-row">
                     <strong className="binding-slot-label">
@@ -1599,7 +1687,7 @@ function App() {
                       maxLength={ALIAS_MAX_CHARS}
                       disabled={bindBusy}
                       aria-label={`Chat ${defaultName} name; blank uses ${defaultName}`}
-                      placeholder={`Name · default ${defaultName}`}
+                      placeholder={`别名 · 默认 ${defaultName}`}
                       onChange={(event) => bindAliasDraft(slot, event.target.value)}
                       onBlur={(event) =>
                         runBind(() => bindAliasSave(slot, event.currentTarget.value))
@@ -1608,39 +1696,8 @@ function App() {
                         if (event.key === "Enter") event.currentTarget.blur();
                       }}
                     />
-                    <span className="binding-alt-label">Alt+</span>
-                    <select
-                      className="binding-chat-select"
-                      value={n ?? ""}
-                      disabled={bindBusy}
-                      aria-label={`Chat ${defaultName} shortcut number`}
-                      onChange={(event) =>
-                        runBind(() => bindSet(slot, Number(event.target.value)))
-                      }
-                    >
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-                        <option key={num} value={num}>
-                          {num}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      className="secondary binding-reset"
-                      disabled={bindBusy}
-                      onClick={() => runBind(() => bindClear(slot))}
-                    >
-                      Reset to {slot}
-                    </button>
-                    <div
-                      style={{
-                        gridColumn: "2 / -1",
-                        display: "grid",
-                        gridTemplateColumns: "90px minmax(0, 1fr)",
-                        alignItems: "center",
-                        gap: 8,
-                      }}
-                    >
-                      <span className="hint">API chat</span>
+                    <div className="binding-field">
+                      <span className="hint">API 对话</span>
                       <select
                         value={bindSessions[slot - 1] ?? ""}
                         disabled={bindBusy || crewSlots.length === 0}
@@ -1654,10 +1711,36 @@ function App() {
                           );
                         }}
                       >
-                        <option value="">Not bound · use Alt+{n ?? slot} fallback</option>
+                        <option value="">未绑定 · 用 Alt+{n ?? slot} 兜底</option>
                         {crewSlots.map((crewSlot) => (
                           <option key={crewSlot.key} value={crewSlot.key}>
                             {crewSlot.title || crewSlot.key} · {crewSlot.key}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="binding-field">
+                      <span className="hint">Alt+N 兜底</span>
+                      <select
+                        className="binding-chat-select"
+                        // 0 is the UI-only "— 自动" value: it resets this slot to
+                        // its default fallback number (A->1/B->2/C->3). The
+                        // backend always keeps a valid 1..=9, so "自动" means
+                        // "use the default fallback", not "no fallback".
+                        value={isDefaultFallback ? 0 : (n ?? 0)}
+                        disabled={bindBusy}
+                        aria-label={`Chat ${defaultName} Alt+N fallback`}
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          runBind(() =>
+                            value === 0 ? bindClear(slot) : bindSet(slot, value),
+                          );
+                        }}
+                      >
+                        <option value={0}>— 自动 (默认 Alt+{slot})</option>
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                          <option key={num} value={num}>
+                            Alt+{num}
                           </option>
                         ))}
                       </select>
@@ -1730,7 +1813,7 @@ function App() {
               {lcError && <div className="error-banner" style={{ marginTop: 14 }}>{lcError}</div>}
             </Panel>
 
-            <Panel title="Agent Status Hook (Fallback)">
+            <Panel title="Agent Status Hook (Fallback)" collapsible defaultOpen={false}>
               <p className="hint">
                 Fallback path when the primary WebSocket is unavailable. It receives Kiro Crew
                 <strong> agent hooks</strong> on
@@ -1854,6 +1937,38 @@ function App() {
                 Watch chooses which live chat can update the keyboard screen.
               </p>
 
+              <p className="hint">
+                长按绑定:在下方列表里<strong>点选一个对话</strong>,再<strong>长按键盘上的
+                K1 / K2 / K3</strong>,即可把它绑定到 Chat A / B / C。绑定结果会同步到上方
+                "Bind Chats with Keys" 设置,并在键盘屏幕上显示提示。
+              </p>
+
+              {selectedSession && (
+                <div className="watched-selected-banner">
+                  已选中:<code>{selectedSession}</code> · 现在长按 K1/K2/K3 完成绑定
+                  <button
+                    className="secondary"
+                    onClick={() => setSelectedSession("")}
+                    style={{ marginLeft: 8 }}
+                  >
+                    取消选择
+                  </button>
+                </div>
+              )}
+
+              {longBindNotice && (
+                <div className="watched-bind-notice">
+                  {longBindNotice}
+                  <button
+                    className="secondary"
+                    onClick={() => setLongBindNotice("")}
+                    style={{ marginLeft: 8 }}
+                  >
+                    知道了
+                  </button>
+                </div>
+              )}
+
               <div className="watched-tabs" role="tablist" aria-label="Watched chat view">
                 <button
                   role="tab"
@@ -1881,12 +1996,43 @@ function App() {
                 ) : watchedView === "compact" ? (
                   sortedKcStatuses.map((s) => {
                     const isPinned = s.session_id === pinnedSession;
+                    const isSelected = s.session_id === selectedSession;
                     const boundSlot = bindSessions.findIndex((id) => id === s.session_id) + 1;
                     const draftForSession = quickBindDraft?.sessionId === s.session_id;
                     return (
                       <div
-                        className={`watched-compact-card${isPinned ? " pinned" : ""}`}
+                        className={`watched-compact-card${isPinned ? " pinned" : ""}${isSelected ? " selected" : ""}`}
                         key={s.session_id}
+                        role="button"
+                        tabIndex={0}
+                        aria-pressed={isSelected}
+                        title="点击选中此对话,然后长按 K1/K2/K3 绑定到 Chat A/B/C"
+                        onClick={(event) => {
+                          // Ignore clicks that land on an inner control (the
+                          // quick-bind buttons, Watch, the chat # select) so
+                          // selecting the card never fights those actions.
+                          if (
+                            (event.target as HTMLElement).closest(
+                              "button, select, input, label",
+                            )
+                          ) {
+                            return;
+                          }
+                          setSelectedSession((cur) =>
+                            cur === s.session_id ? "" : s.session_id,
+                          );
+                        }}
+                        onKeyDown={(event) => {
+                          if (
+                            (event.key === "Enter" || event.key === " ") &&
+                            event.target === event.currentTarget
+                          ) {
+                            event.preventDefault();
+                            setSelectedSession((cur) =>
+                              cur === s.session_id ? "" : s.session_id,
+                            );
+                          }
+                        }}
                       >
                         <div className="watched-compact-row">
                           <div className="watched-session-summary">
@@ -2064,7 +2210,30 @@ function App() {
   );
 }
 
-function Panel({ title, children }: { title: string; children: ReactNode }) {
+function Panel({
+  title,
+  children,
+  collapsible = false,
+  defaultOpen = true,
+}: {
+  title: string;
+  children: ReactNode;
+  // When collapsible, the panel renders as a <details> whose summary is the
+  // title. `defaultOpen` controls the initial state (Hook fallback starts
+  // collapsed to keep the primary API/WS controls above the fold).
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+}) {
+  if (collapsible) {
+    return (
+      <details className="panel panel-collapsible" open={defaultOpen}>
+        <summary>
+          <h3>{title}</h3>
+        </summary>
+        <div className="panel-collapsible-body">{children}</div>
+      </details>
+    );
+  }
   return (
     <section className="panel">
       <h3>{title}</h3>
