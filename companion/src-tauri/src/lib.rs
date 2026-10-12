@@ -209,7 +209,7 @@ mod app {
         SendReceipt,
     };
     use crate::pc_asr::{self, VoiceAction, VoiceSource};
-    use crate::protocol::{self, Inbound, KeyAction, NavDir};
+    use crate::protocol::{self, Inbound, KeyAction};
     use crate::hook_install;
     use crate::kirocrew_control::{Chord, ControlAction, ControlRouter, KiroCrewController};
     use crate::bind_store::BindStore;
@@ -712,20 +712,29 @@ mod app {
         let (aliases, status_payloads) = {
             let inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
             let aliases = inner.kc_binds.aliases.clone();
-            let status_payloads = inner
-                .kc_binds
-                .sessions
-                .iter()
-                .take(3)
-                .enumerate()
-                .filter_map(|(index, session_id)| {
-                    let status = inner.kc_status.get(session_id.trim())?;
-                    Some(protocol::display_payload(
-                        index as u8 + 1,
-                        &status.agent_name,
-                        &status.state,
-                        &status.text,
-                    ))
+            let status_payloads = (0..3)
+                .map(|index| {
+                    let session_id = inner
+                        .kc_binds
+                        .sessions
+                        .get(index)
+                        .map(|value| value.trim())
+                        .unwrap_or("");
+                    if let Some(status) = inner
+                        .kc_status
+                        .get(session_id)
+                        .filter(|_| !session_id.is_empty())
+                    {
+                        protocol::display_payload(
+                            index as u8 + 1,
+                            &status.agent_name,
+                            &status.state,
+                            &status.text,
+                        )
+                    } else {
+                        let alias = aliases.get(index).map(String::as_str).unwrap_or("");
+                        protocol::display_payload(index as u8 + 1, alias, "unbound", "")
+                    }
                 })
                 .collect::<Vec<_>>();
             (aliases, status_payloads)
@@ -733,8 +742,8 @@ mod app {
         if let Err(err) = write_board(shared, &protocol::binding_aliases_payload(&aliases)) {
             log_line(&app, format!("[WARN] binding alias sync failed: {err}"));
         }
-        // A fresh board link has no display history, so replay every bound
-        // chat's last projection instead of waiting for another status event.
+        // Replay all three slots on every board link. Explicit unbound frames
+        // clear stale colors for slots that have no current cached status.
         for payload in status_payloads {
             if let Err(err) = write_board(shared, &payload) {
                 log_line(&app, format!("[WARN] status replay failed: {err}"));
@@ -1600,28 +1609,19 @@ mod app {
                 }
                 false
             }
-            // ASR/macro text and K5 use the same live composer path. Fill-back
-            // types without sending; K5 injects Enter so user edits are kept.
+            // ASR/macro text, K5, and composer edits use the same live
+            // composer path. Fill-back types without sending; K5 injects Enter.
             Inbound::Asr { .. } | Inbound::Macro { .. } => false,
             Inbound::Key { payload, .. } if payload.id == "k5" => false,
-            Inbound::Nav { payload, .. } => match (payload.dir, payload.action) {
-                (NavDir::Left, KeyAction::Up) if payload.held_ms < 800 => {
-                    edit_crew_draft(app, state, DraftEdit::Backspace)
-                }
-                (NavDir::Left, KeyAction::Long) => {
-                    edit_crew_draft(app, state, DraftEdit::DeleteWord)
-                }
-                (NavDir::Up, KeyAction::Long) => {
-                    edit_crew_draft(app, state, DraftEdit::Clear)
-                }
-                _ => false,
-            },
+            // Let the live composer router handle Backspace, word deletion,
+            // and clear so board edits affect the text the user can see.
+            Inbound::Nav { .. } => false,
             _ => false,
         }
     }
 
-    // Kept for the nav-driven REST draft editor and UI compatibility; ASR and
-    // macro fill-back intentionally bypass this store for the live composer.
+    // Kept for REST draft UI compatibility. Board fill-back and editing
+    // intentionally bypass this store for the live composer.
     #[allow(dead_code)]
     fn append_crew_draft(app: &AppHandle, state: &Shared, text: &str) -> bool {
         if text.is_empty() {
@@ -1648,12 +1648,14 @@ mod app {
         }
     }
 
+    #[allow(dead_code)]
     enum DraftEdit {
         Backspace,
         DeleteWord,
         Clear,
     }
 
+    #[allow(dead_code)]
     fn edit_crew_draft(app: &AppHandle, state: &Shared, edit: DraftEdit) -> bool {
         let updated = state.inner.lock().ok().and_then(|mut inner| {
             let slot = inner.crew_api_active_slot.clone()?;
