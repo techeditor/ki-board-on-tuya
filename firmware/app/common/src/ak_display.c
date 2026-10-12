@@ -15,6 +15,7 @@
 #include "tdd_disp_st7789.h"
 #include "tdl_display_draw.h"
 #include "tdl_display_manage.h"
+#include "tkl_gpio.h"
 
 #define AK_DISPLAY_NAME "ak_lcd"
 #define AK_LCD_FB_BYTES (AK_LCD_NATIVE_WIDTH * AK_LCD_NATIVE_HEIGHT * 2U)
@@ -79,6 +80,19 @@ static OPERATE_RET register_panel(void)
     cfg.power.active_level   = AK_LCD_CONTROL_ACTIVE;
 
     tdd_disp_spi_st7789_set_init_seq(s_st7789_init_seq_noinv);
+
+    /* v0.3: FPC pin7/TE reaches P7 via a 10k series resistor and is driven by
+     * the panel. Keep P7 a high-impedance INPUT so it never fights the TE
+     * output. Mirrors ak_statuslcd.c; required even though ak_display is the
+     * secondary path. */
+    {
+        TUYA_GPIO_BASE_CFG_T te_cfg = {
+            .mode   = TUYA_GPIO_FLOATING,
+            .direct = TUYA_GPIO_INPUT,
+            .level  = TUYA_GPIO_LEVEL_HIGH,
+        };
+        (void)tkl_gpio_init(AK_LCD_TE_PIN, &te_cfg);
+    }
     return tdd_disp_spi_st7789_register(AK_DISPLAY_NAME, &cfg);
 }
 

@@ -40,12 +40,22 @@ static bool level_is_pressed(TUYA_GPIO_LEVEL_E level)
 }
 
 /* ── EC11 quadrature decoder ──────────────────────────────────────────────
- * Standard table-driven decoder. The 2-bit state is (A<<1)|B. On each A/B edge
- * we look up the transition in a table that yields +1 / -1 / 0, and accumulate
- * quarter-steps; one mechanical detent is a full 4-quarter cycle, so we emit a
- * step when the accumulator reaches +/-4. The table rejects illegal (bouncing)
- * transitions as 0, which debounces the contacts without a timer.
+ * Per-phase debounced, table-driven decoder — kept in sync with the bring-up
+ * decoder in firmware/bringup/input_scan. Each A/B phase is debounced
+ * INDEPENDENTLY (candidate level must hold ENC_DEBOUNCE_MS before it is taken
+ * as stable); the 2-bit stable Gray code (A<<1)|B is then run through a
+ * transition table. Debouncing each phase separately means A and B never flip
+ * in the same decode step, so the code always moves between ADJACENT Gray
+ * states — this both rejects contact bounce AND avoids the lost-step bug a
+ * single raw read per poll has when both phases change inside one poll window.
+ * One mechanical detent is a full 4-quarter cycle, so a step is emitted when
+ * the accumulator reaches +/-4. The table maps illegal (diagonal) transitions
+ * to 0.
  */
+#ifndef AK_ENC_DEBOUNCE_MS
+#define AK_ENC_DEBOUNCE_MS 2U
+#endif
+
 static const int8_t QUAD_TABLE[16] = {
     0, -1, +1, 0,
     +1, 0, 0, -1,
@@ -53,18 +63,48 @@ static const int8_t QUAD_TABLE[16] = {
     0, +1, -1, 0,
 };
 
-static uint8_t s_enc_prev_state = 0U; /* last (A<<1)|B */
-static int32_t s_enc_subcount   = 0;  /* accumulated quarter-steps */
+typedef struct {
+    TUYA_GPIO_LEVEL_E stable;         /* debounced level */
+    TUYA_GPIO_LEVEL_E candidate;      /* last raw read */
+    uint32_t          candidate_since;/* when the candidate first appeared */
+} ak_enc_phase_t;
 
-static uint8_t ak_enc_read_state(void)
+static ak_enc_phase_t s_enc_a;
+static ak_enc_phase_t s_enc_b;
+static uint8_t        s_enc_code     = 0U; /* last stable (A<<1)|B */
+static int32_t        s_enc_subcount = 0;  /* accumulated quarter-steps */
+
+static uint8_t phase_bit(const ak_enc_phase_t *p)
 {
-    TUYA_GPIO_LEVEL_E a = AK_KEY_INACTIVE_LEVEL;
-    TUYA_GPIO_LEVEL_E b = AK_KEY_INACTIVE_LEVEL;
-    (void)tkl_gpio_read(AK_ENC_A_PIN, &a);
-    (void)tkl_gpio_read(AK_ENC_B_PIN, &b);
-    uint8_t sa = (a == TUYA_GPIO_LEVEL_HIGH) ? 1U : 0U;
-    uint8_t sb = (b == TUYA_GPIO_LEVEL_HIGH) ? 1U : 0U;
-    return (uint8_t)((sa << 1) | sb);
+    return (p->stable == TUYA_GPIO_LEVEL_HIGH) ? 1U : 0U;
+}
+
+/* Debounce one phase; returns true when its stable level changed this tick. */
+static bool ak_enc_scan_phase(ak_enc_phase_t *p, TUYA_GPIO_NUM_E pin, uint32_t now_ms)
+{
+    TUYA_GPIO_LEVEL_E raw;
+    if (tkl_gpio_read(pin, &raw) != OPRT_OK) {
+        return false;
+    }
+    if (raw != p->candidate) {
+        p->candidate       = raw;
+        p->candidate_since = now_ms;
+        return false;
+    }
+    if (raw == p->stable || (uint32_t)(now_ms - p->candidate_since) < AK_ENC_DEBOUNCE_MS) {
+        return false;
+    }
+    p->stable = raw;
+    return true;
+}
+
+static void ak_enc_phase_init(ak_enc_phase_t *p, TUYA_GPIO_NUM_E pin)
+{
+    TUYA_GPIO_LEVEL_E level = TUYA_GPIO_LEVEL_HIGH;
+    (void)tkl_gpio_read(pin, &level);
+    p->stable          = level;
+    p->candidate       = level;
+    p->candidate_since = 0U;
 }
 
 OPERATE_RET ak_input_init(void)
@@ -104,8 +144,10 @@ OPERATE_RET ak_input_init(void)
     if (rt != OPRT_OK) {
         return rt;
     }
-    s_enc_prev_state = ak_enc_read_state();
-    s_enc_subcount   = 0;
+    ak_enc_phase_init(&s_enc_a, AK_ENC_A_PIN);
+    ak_enc_phase_init(&s_enc_b, AK_ENC_B_PIN);
+    s_enc_code     = (uint8_t)((phase_bit(&s_enc_a) << 1) | phase_bit(&s_enc_b));
+    s_enc_subcount = 0;
     return OPRT_OK;
 }
 
@@ -124,12 +166,17 @@ void ak_input_poll(uint32_t now_ms, ak_input_event_cb cb, ak_encoder_event_cb en
         }
     }
 
-    /* EC11 rotation: fold every A/B transition into net detents this tick. */
-    uint8_t state = ak_enc_read_state();
-    if (state != s_enc_prev_state) {
-        uint8_t index = (uint8_t)((s_enc_prev_state << 2) | state);
+    /* EC11 rotation: debounce each phase, then step the Gray code. Because the
+     * phases are debounced independently they move one at a time, so prev->new
+     * is always an adjacent transition (never a dropped diagonal). */
+    bool changed = false;
+    changed |= ak_enc_scan_phase(&s_enc_a, AK_ENC_A_PIN, now_ms);
+    changed |= ak_enc_scan_phase(&s_enc_b, AK_ENC_B_PIN, now_ms);
+    if (changed) {
+        uint8_t new_code = (uint8_t)((phase_bit(&s_enc_a) << 1) | phase_bit(&s_enc_b));
+        uint8_t index    = (uint8_t)((s_enc_code << 2) | new_code);
         s_enc_subcount += QUAD_TABLE[index & 0x0FU];
-        s_enc_prev_state = state;
+        s_enc_code = new_code;
     }
     if (s_enc_subcount >= 4 || s_enc_subcount <= -4) {
         int32_t detents = s_enc_subcount / 4;
