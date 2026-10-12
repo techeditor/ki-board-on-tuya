@@ -630,6 +630,24 @@ mod app {
         )
     }
 
+    /// Downlink the per-key role table to the board (plan A: the Companion is
+    /// the keymap config authority). `roles` are k1..k6 then enc; each must be
+    /// one of "none"/"chat"/"voice"/"cancel"/"confirm" (empty = leave that
+    /// key's current role unchanged). The board derives each key's gesture
+    /// mode from its role, caches the table in TAL KV, and acks.
+    #[tauri::command]
+    fn set_keymap(state: State<Shared>, roles: Vec<String>) -> Result<(), String> {
+        const VALID: [&str; 5] = ["none", "chat", "voice", "cancel", "confirm"];
+        for role in &roles {
+            if !role.is_empty() && !VALID.contains(&role.as_str()) {
+                return Err(format!(
+                    "invalid role '{role}' (expected one of {VALID:?} or empty)"
+                ));
+            }
+        }
+        write_board(state.inner(), &protocol::keymap_payload(&roles))
+    }
+
     /// Provision Wi-Fi on the board: send SSID + password over the JSONL
     /// channel. The board applies it via netmgr and reports back a wifi_status
     /// frame (surfaced to the UI as a 'wifi-status' event).
@@ -1424,6 +1442,7 @@ mod app {
                 send_led,
                 send_config,
                 set_device_settings,
+                set_keymap,
                 send_wifi,
                 send_license,
                 read_license,

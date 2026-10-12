@@ -112,6 +112,29 @@ pub fn device_settings_payload(volume: u8, brightness: u8) -> Value {
     })
 }
 
+/// PC -> board: downlink the per-key role table (plan A, keymap config
+/// authority). `roles` are the roles for k1..k6 then enc (index 0..=6);
+/// each is one of "none"/"chat"/"voice"/"cancel"/"confirm". The firmware
+/// derives each key's gesture mode from its role and caches the table in
+/// TAL KV. Entries beyond the first 7 are ignored; missing ones are omitted
+/// (the board keeps that key's current role).
+pub fn keymap_payload(roles: &[String]) -> Value {
+    const SLOT_IDS: [&str; 7] = ["k1", "k2", "k3", "k4", "k5", "k6", "enc"];
+    let mut payload = serde_json::Map::new();
+    for (i, id) in SLOT_IDS.iter().enumerate() {
+        if let Some(role) = roles.get(i) {
+            if !role.is_empty() {
+                payload.insert((*id).to_string(), Value::String(role.clone()));
+            }
+        }
+    }
+    serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "type": "keymap",
+        "payload": Value::Object(payload)
+    })
+}
+
 /// PC -> board: provision Wi-Fi credentials. The board connects via netmgr and
 /// reports back a `wifi_status` frame.
 pub fn wifi_payload(ssid: &str, pass: &str) -> Value {
@@ -801,6 +824,32 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn keymap_payload_emits_named_roles_and_omits_empty() {
+        let roles = vec![
+            "chat".to_string(),
+            "chat".to_string(),
+            "chat".to_string(),
+            "cancel".to_string(),
+            "voice".to_string(),
+            "confirm".to_string(),
+            "none".to_string(),
+        ];
+        let v = keymap_payload(&roles);
+        assert_eq!(v["type"], "keymap");
+        assert_eq!(v["payload"]["k1"], "chat");
+        assert_eq!(v["payload"]["k4"], "cancel");
+        assert_eq!(v["payload"]["k5"], "voice");
+        assert_eq!(v["payload"]["k6"], "confirm");
+        assert_eq!(v["payload"]["enc"], "none");
+        // An empty role is omitted (partial update: keep the board's current).
+        let partial = vec!["".to_string(), "voice".to_string()];
+        let p = keymap_payload(&partial);
+        assert!(p["payload"].get("k1").is_none(), "empty role omitted");
+        assert_eq!(p["payload"]["k2"], "voice");
+        assert!(p["payload"].get("k3").is_none(), "missing role omitted");
     }
 
     #[test]
