@@ -15,16 +15,26 @@
  * taken as channel 4. The divider is 3M (high side) + 1M (low side), so the
  * node voltage is BAT * 1M/(3M+1M) = BAT/4; undo it by multiplying by 4.
  *
- * Li-ion single cell maps 3300 mV (empty) .. 4200 mV (full) to 0..100%. All of
- * these are tunable without touching logic below.
+ * The ADC is opened in CONTINUOUS mode with INNER_SAMPLE_VOL, matching the two
+ * stock T5 battery users in TuyaOpen (apps/.../app_system_info.c and
+ * tdd_power_soc.c). SINGLE mode returned 0 mV on T5.
+ *
+ * A Li-ion cell's voltage->charge curve is non-linear, so a 11-point lookup
+ * table (same breakpoints the stock T5 fuel gauge uses) is interpolated instead
+ * of a flat 3300..4200 line, which badly misreads the mid-range. All of these
+ * are tunable without touching the logic below.
  */
 #define AK_BAT_ADC_PORT      TUYA_ADC_NUM_0
 #define AK_BAT_ADC_CHANNEL   4U      /* "ADC4" per pinmap; confirm on board */
 #define AK_BAT_DIVIDER_NUM   4       /* (3M + 1M) / 1M = 4 */
-#define AK_BAT_EMPTY_MV      3300    /* 0%  cell voltage */
-#define AK_BAT_FULL_MV       4200    /* 100% cell voltage */
 #define AK_BAT_SAMPLE_PERIOD 2000U   /* ms between real ADC reads */
 #define AK_BAT_SMOOTH_SHIFT  2       /* EMA factor: new = old + (raw-old)>>2 */
+
+/* Cell mV at 0,10,..,100% (same curve the stock T5 fuel gauge uses). */
+#define AK_BAT_CURVE_POINTS  11
+static const int32_t s_bvc_map[AK_BAT_CURVE_POINTS] = {
+    3300, 3600, 3680, 3740, 3790, 3830, 3870, 3920, 3980, 4080, 4200,
+};
 
 static bool     s_available   = false;
 static uint8_t  s_percent     = 0U;
@@ -35,13 +45,12 @@ static uint32_t s_last_read   = 0U;
 OPERATE_RET ak_battery_init(void)
 {
     TUYA_ADC_BASE_CFG_T cfg = {0};
-    cfg.ch_list.data = 0U;
-    cfg.ch_list.bits.ch_4 = 1U;   /* AK_BAT_ADC_CHANNEL */
+    cfg.ch_list.data = 1U << AK_BAT_ADC_CHANNEL;
     cfg.ch_nums  = 1U;
     cfg.width    = 12U;           /* 12-bit; platform clamps if unsupported */
     cfg.freq     = 0U;            /* platform default */
     cfg.type     = TUYA_ADC_INNER_SAMPLE_VOL;
-    cfg.mode     = TUYA_ADC_SINGLE;
+    cfg.mode     = TUYA_ADC_CONTINUOUS; /* SINGLE returned 0 mV on T5 */
     cfg.conv_cnt = 1U;
     cfg.ref_vol  = 0U; /* use the platform default reference */
 
@@ -74,16 +83,25 @@ int32_t ak_battery_read_mv(void)
     return node_mv;
 }
 
+/* Interpolate the 11-point curve: find the bracketing segment and lerp. */
 static uint8_t cell_mv_to_percent(int32_t cell_mv)
 {
-    if (cell_mv <= AK_BAT_EMPTY_MV) {
+    if (cell_mv <= s_bvc_map[0]) {
         return 0U;
     }
-    if (cell_mv >= AK_BAT_FULL_MV) {
+    if (cell_mv >= s_bvc_map[AK_BAT_CURVE_POINTS - 1]) {
         return 100U;
     }
-    int32_t span = AK_BAT_FULL_MV - AK_BAT_EMPTY_MV;
-    return (uint8_t)(((cell_mv - AK_BAT_EMPTY_MV) * 100 + span / 2) / span);
+    for (int i = 1; i < AK_BAT_CURVE_POINTS; i++) {
+        if (cell_mv < s_bvc_map[i]) {
+            int32_t lo   = s_bvc_map[i - 1];
+            int32_t hi   = s_bvc_map[i];
+            int32_t base = (int32_t)(i - 1) * 10;    /* 0,10,..,90 */
+            int32_t frac = ((cell_mv - lo) * 10 + (hi - lo) / 2) / (hi - lo);
+            return (uint8_t)(base + frac);
+        }
+    }
+    return 100U;
 }
 
 uint8_t ak_battery_percent(void)
