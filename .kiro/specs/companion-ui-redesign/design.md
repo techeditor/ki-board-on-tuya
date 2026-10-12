@@ -131,6 +131,60 @@ through SendInput again. Its own steps keep their gating and `(i)` help.
 
 Switching calls the Tauri window-resize API and flips a `mode` flag; no data refetch.
 
+## 5.5 Keymap config — role-driven, board-map default + table advanced / 按键配置
+
+The v0.3 keymap panel (Phase 4.5) presents each key's behaviour as a
+**(state × gesture) → (action, LED)** matrix, but that matrix is **derived from a
+single per-key ROLE**, not edited row by row. This is stage 甲 (A); fully
+per-rule editing is stage 乙 (B), deferred.
+
+### 5.5.1 Two entry points
+- **Board map (default, option C).** A physical-layout grid of K1-K6 + the EC11
+  push. Each key cell shows its role label and a live LED dot that **mirrors the
+  board's real-time light** (idle green, busy red, waiting orange, info blue;
+  effect = single/double/breathing). Clicking a key opens an **inspector** below
+  the grid showing that key's read-only (state × gesture) rule rows for its
+  current role, plus the one editable control: the **role picker**. This is the
+  default surface — "what is each key, and what is it doing right now".
+- **Table (advanced, option A).** A disclosure ("Advanced — table view") flips to
+  a dense one-row-per-key table: role picker + K1-K3 chat#/instance# inline,
+  all 7 keys on one screen for a power user to set everything at once. Same data,
+  same `set_keymap` downlink; purely a denser editor.
+
+### 5.5.2 Role → rule-matrix map (the inspector's read-only rows)
+A role fully determines a key's behaviour across states; the inspector renders
+these rows (NOT editable in 甲 — change behaviour by changing the role):
+
+| role | state | gesture | action | LED (color · effect) |
+|---|---|---|---|---|
+| `chat` | any | click | jump to chat N (Alt+N) | follow-press · single blink |
+| `chat` | any | double | switch instance N (Ctrl+N, Local/Remote) | follow-press · double blink |
+| `voice` | idle | hold | push-to-talk record | — (voice UI drives it) |
+| `cancel` | pending-confirm | click | delete one char | red · single blink |
+| `cancel` | pending-confirm | long | delete all (+ exit pending) | red · breathing |
+| `confirm` | pending-confirm | click | confirm / submit (+ exit) | green · single blink |
+| `none` | any | — | report only / local nav (enc) | — |
+
+`chat` keys additionally expose two numbers (chat# for click→Alt+N,
+instance# for double→Ctrl+N). The gesture-detection mode shown is derived:
+`chat` → single/double, else edge. The whole table above is static UI data in
+`src/keymap/roleRules.ts` keyed by role; it is NOT fetched and NOT editable in 甲.
+
+### 5.5.3 LED legend + live mirror
+The board map renders the §0.3/§0.5 LED legend once (color = state, effect =
+gesture) and each key dot reflects the board's current light, so the panel
+doubles as the LED status view (T4.5.3's pending-confirm visualizer lights K4
+red-breathing / K6 green-blink exactly as the board does).
+
+### 5.5.4 Stage 甲 vs 乙
+- **甲 (this spec):** role is the unit of configuration; the (state×gesture→
+  action,LED) matrix is role-defined and read-only. `set_keymap` downlinks the
+  7 roles. Matches the shipped firmware exactly.
+- **乙 (future):** per-rule editing — a user redefines what K1 double does and
+  which LED it drives. Requires extending the firmware keymap from "one role per
+  key" to "a (state×gesture)→(action,LED) rule table per key" + a richer downlink
+  frame. Out of scope here; the roleRules.ts table is the seed for its defaults.
+
 ## 6. Tooltip component / 浮层组件
 
 - `<InfoTip k="help.control.step1" />` renders a small `(i)`; on hover/focus shows a popover with

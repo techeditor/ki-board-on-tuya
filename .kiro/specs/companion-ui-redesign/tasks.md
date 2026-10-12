@@ -72,13 +72,18 @@
 > this phase is the Companion UI that configures and visualizes it. The chosen MOCKUP is the spec —
 > record which option was picked before building.
 
-- [ ] **T4.5.1 Keymap config panel (plan A).** Per-key role editor for K1-K6 + enc: each key picks a
-  role from `none/chat/voice/cancel/confirm`; the panel derives + shows the gesture mode (chat →
-  single/double, else edge) read-only. "Apply" downlinks via the `set_keymap` Tauri command
-  (roles k1..k6, enc). Defaults mirror the firmware v0.3 table (K5 voice / K4 cancel / K6 confirm /
-  K1-K3 chat). Advanced-only.
-  _Accept:_ changing a role + Apply calls `set_keymap` with the 7-slot role vector; the board acks;
-  an empty role leaves that key unchanged.
+- [ ] **T4.5.1 Keymap config panel (plan A, stage 甲 — see design §5.5).** Default = **board-map**
+  (option C): physical K1-K6 + EC11 grid, each cell showing its role + a live LED dot mirroring the
+  board's real-time light; clicking a key opens an inspector with that role's **read-only
+  (state×gesture)→(action,LED) rule rows** (data from `src/keymap/roleRules.ts`) plus the one
+  editable control — the **role picker** (none/chat/voice/cancel/confirm). An **"Advanced — table
+  view"** disclosure flips to option A: dense one-row-per-key table (role + K1-K3 chat#/instance#
+  inline), all 7 keys at once. Both call `set_keymap` with the 7-slot role vector; the board acks;
+  an empty role leaves that key unchanged. Behaviour is role-defined and NOT per-rule editable in 甲
+  (that is stage 乙, deferred — see design §5.5.4). Advanced-only (Simple shows none).
+  _Accept:_ board-map default renders 7 keys with live LED dots; clicking a key shows its role's
+  rule rows + role picker; advanced disclosure shows the table; changing a role + Apply downlinks
+  `set_keymap`; the roleRules table matches design §5.5.2.
 - [ ] **T4.5.2 K1-K3 chat/instance binding.** For each CHAT key, two configurable numbers: the chat #
   it jumps to on single-click (Alt+N, existing `kc_bind_set`) and the Crew instance # it switches to
   on double-click (Ctrl+N — Local / Remote Crew; `BindStore.instances`). Show the resolved shortcut
