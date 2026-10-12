@@ -245,7 +245,18 @@ static bool     s_test_active;
 static uint8_t  s_test_key_mask;      /* bit i set while K(i+1) is held; bit 6 = enc */
 static int32_t  s_test_enc_count;     /* net EC11 detents since entering */
 static int32_t  s_test_hue;           /* EC11-tuned colour for lit key LEDs */
-static uint32_t s_test_ws_phase;      /* WS2812 chase animation phase */
+static uint32_t s_test_ws_phase;      /* WS2812 effect animation phase */
+/* LED effect mode in the test page (K1-K6 pick, EC11 tunes), like the bringup
+ * full_selftest. SOLID/COMET/BREATHE/RAINBOW/CHASE/BLINK = 0..5. */
+static int      s_test_fx;            /* current effect 0..5 */
+static int32_t  s_test_fx_param[6];   /* per-effect EC11 param (hue or speed) */
+#define AK_TEST_FX_COUNT   6
+#define AK_TEST_FX_LEVEL   48
+#define AK_TEST_FX_SPEED_MIN 1
+#define AK_TEST_FX_SPEED_MAX 10
+static const char *const s_test_fx_names[AK_TEST_FX_COUNT] = {
+    "SOLID", "COMET", "BREATHE", "RAINBOW", "CHASE", "BLINK",
+};
 #endif
 
 static void transport_write_frame_unlocked(const char *frame, size_t capacity, int length)
@@ -1481,7 +1492,10 @@ static void ak_test_draw_enc(void)
 {
     char line[48];
     ak_gfx_fill_rect(0U, AK_TEST_Y_ENC, AK_STATUSLCD_W, 14U, AK_COL_BLACK);
-    (void)snprintf(line, sizeof(line), "EC11 turn: %+ld detents", (long)s_test_enc_count);
+    (void)snprintf(line, sizeof(line), "FX %s  %s %ld  (EC11 %+ld)",
+                   s_test_fx_names[s_test_fx],
+                   s_test_fx == 0 ? "hue" : "spd",
+                   (long)s_test_fx_param[s_test_fx], (long)s_test_enc_count);
     ak_gfx_text_thin(6U, AK_TEST_Y_ENC, line, AK_COL_CYAN, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
 }
@@ -1500,11 +1514,14 @@ static void ak_test_draw_frame(void)
         ak_test_draw_key_cell(i, false);
     }
 
-    (void)snprintf(line, sizeof(line), "EC11 turn: %+ld detents", (long)s_test_enc_count);
+    (void)snprintf(line, sizeof(line), "FX %s  %s %ld  (EC11 %+ld)",
+                   s_test_fx_names[s_test_fx],
+                   s_test_fx == 0 ? "hue" : "spd",
+                   (long)s_test_fx_param[s_test_fx], (long)s_test_enc_count);
     ak_gfx_text_thin(6U, AK_TEST_Y_ENC, line, AK_COL_CYAN, AK_COL_BLACK, 1);
 
     (void)snprintf(line, sizeof(line), "WS2812 x%u: %s", (unsigned)AK_LEDS_COUNT,
-                   ak_leds_available() ? "key lights LED, EC11 hue" : "unavailable");
+                   ak_leds_available() ? "K1-K6 effect, EC11 tune" : "unavailable");
     ak_gfx_text_thin(6U, AK_TEST_Y_WS, line, ak_leds_available() ? AK_COL_GREEN : AK_COL_RED,
                      AK_COL_BLACK, 1);
 
@@ -1518,7 +1535,7 @@ static void ak_test_draw_frame(void)
 
     ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 33U, AK_COL_BLACK);
     ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
-    ak_gfx_text_thin(4U, 213U, "Press keys / turn EC11 to test", AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, 213U, "K1-K6 pick effect  EC11 tune", AK_COL_CYAN, AK_COL_BLACK, 1);
     ak_gfx_text_thin(4U, 227U, "Double-click EC11 to exit", AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
 }
@@ -1566,21 +1583,73 @@ static void ak_test_draw_slow(void)
 static volatile bool s_test_exit_req;
 static ak_dclick_t   s_test_enc_dclick;
 
-/* Light each LED whose key is currently held, using the EC11-tuned hue, and
- * clear the rest. LEDn <-> Kn, LED7 <-> enc (per §0.5), so pressing a key lights
- * exactly the LED beneath it and turning EC11 sweeps the colour. */
+/* --- Test-page LED effects (ported from bringup full_selftest) -------------
+ * Six effects; K1-K6 pick one, EC11 tunes it (SOLID = hue, others = speed).
+ * The chain is 7 LEDs. Rendered each animation frame from s_test_ws_phase. */
+
+/* Scale 0..AK_TEST_FX_LEVEL hue colour by n/d into an RGB written to LED i. */
+static void ak_test_fx_set_scaled(uint32_t i, int32_t hue, int32_t n, int32_t d)
+{
+    if (d <= 0) d = 1;
+    if (n < 0)  n = 0;
+    /* Resolve hue->rgb at full level, then scale. Reuse set_hue by scaling the
+     * level argument (hue ramp is linear in level for our wheel). */
+    uint8_t lvl = (uint8_t)((int32_t)AK_TEST_FX_LEVEL * n / d);
+    ak_leds_set_hue(i, hue, lvl);
+}
+
 static void ak_test_leds_render(void)
 {
     if (!ak_leds_available()) {
         return;
     }
     ak_leds_clear();
-    for (int i = 0; i < AK_LEDS_COUNT && i < 7; i++) {
-        if (s_test_key_mask & (1U << i)) {
-            ak_leds_set_hue((uint32_t)i, s_test_hue, 48U);
+    int32_t  p   = s_test_fx_param[s_test_fx];
+    uint32_t ph  = s_test_ws_phase;
+    uint32_t n   = AK_LEDS_COUNT;
+
+    switch (s_test_fx) {
+    case 0: /* SOLID: whole chain one colour, EC11 sweeps hue (p). */
+        for (uint32_t i = 0; i < n; i++) ak_leds_set_hue(i, p, AK_TEST_FX_LEVEL);
+        break;
+    case 1: /* COMET: bright head + fading tail. */
+        for (uint32_t i = 0; i < n; i++) {
+            int32_t dist = (int32_t)((ph + n - i) % n);
+            ak_test_fx_set_scaled(i, (int32_t)ph, (int32_t)n - dist, (int32_t)n);
         }
+        break;
+    case 2: { /* BREATHE: whole chain fades up/down. */
+        int32_t t   = (int32_t)(ph % 32U);
+        int32_t lvl = (t < 16) ? t : (32 - t); /* 0..16 */
+        for (uint32_t i = 0; i < n; i++)
+            ak_test_fx_set_scaled(i, (int32_t)(ph / 32), lvl, 16);
+        break;
+    }
+    case 3: /* RAINBOW: hue spread across the chain, scrolling. */
+        for (uint32_t i = 0; i < n; i++)
+            ak_leds_set_hue(i, (int32_t)(ph + i * (AK_LEDS_HUE_STEPS / n)), AK_TEST_FX_LEVEL);
+        break;
+    case 4: /* CHASE: one lit pixel marching -> verifies each LED in turn. */
+        ak_leds_set_hue(ph % n, (int32_t)ph, AK_TEST_FX_LEVEL);
+        break;
+    default: /* BLINK: whole chain flashes on/off. */
+        if (ph & 1U)
+            for (uint32_t i = 0; i < n; i++) ak_leds_set_hue(i, (int32_t)(ph / 2), AK_TEST_FX_LEVEL);
+        break;
     }
     (void)ak_leds_show();
+}
+
+/* ms between animation frames for the current effect (SOLID is static). */
+static uint32_t ak_test_fx_frame_ms(void)
+{
+    if (s_test_fx == 0) {
+        return 1000U;
+    }
+    int32_t speed = s_test_fx_param[s_test_fx];
+    if (speed < AK_TEST_FX_SPEED_MIN) speed = AK_TEST_FX_SPEED_MIN;
+    if (speed > AK_TEST_FX_SPEED_MAX) speed = AK_TEST_FX_SPEED_MAX;
+    return (uint32_t)(360 - speed * 32); /* 1->328ms .. 10->40ms */
 }
 
 static void ak_test_input_cb(ak_input_kind_t kind, const char *id,
@@ -1594,12 +1663,15 @@ static void ak_test_input_cb(ak_input_kind_t kind, const char *id,
 
     if (event == AK_INPUT_EVENT_DOWN) {
         s_test_key_mask |= (uint8_t)(1U << bit);
+        /* K1-K6 pick one of the six LED effects (bit 0..5). */
+        if (bit >= 0 && bit < AK_TEST_FX_COUNT) {
+            s_test_fx = bit;
+            ak_test_leds_render();
+        }
         ak_test_draw_keys();
-        ak_test_leds_render(); /* light the LED under this key immediately */
     } else if (event == AK_INPUT_EVENT_UP) {
         s_test_key_mask &= (uint8_t)~(1U << bit);
         ak_test_draw_keys();
-        ak_test_leds_render();
     }
 
     /* Double-click of the EC11 push exits. Feeding every enc edge lets the
@@ -1616,7 +1688,15 @@ static void ak_test_input_cb(ak_input_kind_t kind, const char *id,
 static void ak_test_enc_cb(int32_t detents)
 {
     s_test_enc_count += detents;
-    s_test_hue += detents; /* EC11 sweeps the colour of the lit key LEDs */
+    /* EC11 tunes the current effect: SOLID = hue, others = speed (clamped). */
+    if (s_test_fx == 0) {
+        s_test_fx_param[0] += detents;
+    } else {
+        int32_t v = s_test_fx_param[s_test_fx] + detents;
+        if (v < AK_TEST_FX_SPEED_MIN) v = AK_TEST_FX_SPEED_MIN;
+        if (v > AK_TEST_FX_SPEED_MAX) v = AK_TEST_FX_SPEED_MAX;
+        s_test_fx_param[s_test_fx] = v;
+    }
     ak_test_draw_enc();
     ak_test_leds_render();
 }
@@ -1636,14 +1716,20 @@ static void ak_test_run(void)
     s_test_hue          = 0;
     s_test_ws_phase     = 0U;
     s_test_uart_rx      = 0U;
+    s_test_fx           = 0;            /* start on SOLID */
+    s_test_fx_param[0]  = 0;            /* SOLID hue */
+    for (int fi = 1; fi < AK_TEST_FX_COUNT; fi++) {
+        s_test_fx_param[fi] = 5;       /* mid speed */
+    }
     s_settings_active   = false;
     ak_dclick_init(&s_test_enc_dclick);
 
     ak_test_draw_frame();
     ak_test_draw_slow();
-    ak_test_leds_render(); /* all off until a key is held */
+    ak_test_leds_render();
 
     uint32_t last_tick = tal_system_get_millisecond();
+    uint32_t last_fx_ms = last_tick;
 
     while (!s_test_exit_req) {
         uint32_t now = tal_system_get_millisecond();
@@ -1665,11 +1751,17 @@ static void ak_test_run(void)
 #endif
         }
 
-        /* Periodic: repaint the slow status rows. LEDs are driven directly by
-         * key presses / EC11 (ak_test_leds_render), not animated here. */
+        /* Periodic: repaint the slow status rows (120ms). */
         if ((uint32_t)(now - last_tick) >= AK_TEST_TICK_MS) {
             last_tick = now;
             ak_test_draw_slow();
+        }
+
+        /* Advance the LED effect animation at the effect's own frame rate. */
+        if ((uint32_t)(now - last_fx_ms) >= ak_test_fx_frame_ms()) {
+            last_fx_ms = now;
+            s_test_ws_phase++;
+            ak_test_leds_render();
         }
 
         tal_system_sleep(POLL_INTERVAL_MS);
