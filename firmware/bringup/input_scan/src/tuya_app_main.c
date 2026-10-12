@@ -92,6 +92,23 @@ static OPERATE_RET gpio_input_init(TUYA_GPIO_NUM_E pin, TUYA_GPIO_LEVEL_E *level
     return tkl_gpio_read(pin, level);
 }
 
+/* EC11 A/B carry external 10k pull-ups + RC on the board (EC11I-152 datasheet),
+ * so the internal pull must be OFF — use a plain floating input. Keep this in
+ * sync with firmware/app ak_input.c. SW stays an active-low key (pull-up). */
+static OPERATE_RET ec11_phase_init(TUYA_GPIO_NUM_E pin, TUYA_GPIO_LEVEL_E *level)
+{
+    TUYA_GPIO_BASE_CFG_T input_cfg = {
+        .mode   = TUYA_GPIO_FLOATING,
+        .direct = TUYA_GPIO_INPUT,
+        .level  = TUYA_GPIO_LEVEL_HIGH,
+    };
+    OPERATE_RET rt = tkl_gpio_init(pin, &input_cfg);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+    return tkl_gpio_read(pin, level);
+}
+
 static OPERATE_RET inputs_init(void)
 {
     OPERATE_RET       rt;
@@ -108,14 +125,14 @@ static OPERATE_RET inputs_init(void)
         s_keys[index].candidate_since = now;
     }
 
-    rt = gpio_input_init(AK_EC11_A_PIN, &level);
+    rt = ec11_phase_init(AK_EC11_A_PIN, &level);
     if (rt != OPRT_OK) {
         return rt;
     }
     s_phase_a.stable = s_phase_a.candidate = level;
     s_phase_a.candidate_since              = now;
 
-    rt = gpio_input_init(AK_EC11_B_PIN, &level);
+    rt = ec11_phase_init(AK_EC11_B_PIN, &level);
     if (rt != OPRT_OK) {
         return rt;
     }
