@@ -7,7 +7,7 @@ import "./styles.css";
 import "./theme/components.css";
 import { ThemeProvider, THEMES, type ThemeId } from "./theme";
 import { I18nProvider, LOCALES, useI18n, type Locale } from "./i18n";
-import { Card } from "./ui/primitives";
+import { Card, StateBadge } from "./ui/primitives";
 
 // ─── Types mirroring the Rust backend (src-tauri/src/lib.rs) ────────────────
 
@@ -177,24 +177,6 @@ const defaultStatus: Status = {
   device_settings_synced: false,
 };
 
-// Our 5 mechanical keys (k1..k5) with their phase-1 default intents. This is a
-// reference mapping placeholder — remapping UI lands in a later pass. `wide`
-// marks K4 as the double-width push-to-talk key in the INPUT layout.
-const KEY_MAP: { id: string; label: string; intent: string; wide?: boolean }[] = [
-  { id: "k1", label: "K1", intent: "Chat A" },
-  { id: "k2", label: "K2", intent: "Chat B" },
-  { id: "k3", label: "K3", intent: "Chat C" },
-  { id: "k4", label: "K4", intent: "Push-to-Talk (voice)", wide: true },
-  { id: "k5", label: "K5", intent: "Submit / Continue" },
-];
-
-// 3×3 grid positions for the compact 5-way navigation cluster.
-const NAV_LAYOUT: (string | null)[] = [
-  null, "up", null,
-  "left", "center", "right",
-  null, "down", null,
-];
-
 function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => void }) {
   const { t, locale, setLocale } = useI18n();
   const [status, setStatus] = useState<Status>(defaultStatus);
@@ -245,7 +227,7 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
   });
   const [deviceSettingsBusy, setDeviceSettingsBusy] = useState(false);
   const [lastKey, setLastKey] = useState("");
-  const [lastNav, setLastNav] = useState("");
+  const [, setLastNav] = useState("");
   const [voiceActive, setVoiceActive] = useState(false);
   const [activeView, setActiveView] = useState<"device" | "input" | "kirocrew" | "logs">("device");
   const [uiError, setUiError] = useState("");
@@ -1294,73 +1276,46 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
         )}
 
         {activeView === "input" && (
-          <Panel title="Live Input">
-            <p className="hint">
-              Highlights the last key / direction reported by the board. Default intents shown are a
-              placeholder for the remapping UI.
-            </p>
-            <div className="lcd" style={{ marginTop: 6 }}>
-              <span>KIRO CREW CONTROL</span>
-              <strong className={status.control_enabled ? "good-text" : ""}>
-                {status.control_enabled ? "ENABLED — keys drive Kiro Crew" : "DISABLED — trigger check only"}
-              </strong>
+          <Card title={t("nav.input")}>
+            <div className="kc-field" style={{ marginTop: 0 }}>
+              <span>{t("nav.control")}</span>
+              <StateBadge tone={status.control_enabled ? "success" : "neutral"}>
+                {status.control_enabled ? t("common.on") : t("common.off")}
+              </StateBadge>
             </div>
-            <div className="actions" style={{ marginTop: 6 }}>
+            <div className="kc-keymap-head" style={{ marginTop: 8 }}>
               <button
-                className={status.control_enabled ? "secondary" : ""}
-                onClick={() => runAction(() => toggleControl(false))}
-              >
-                Disable control
-              </button>
-              <button
-                className={status.control_enabled ? "" : "secondary"}
+                type="button"
+                className={`kc-seg ${status.control_enabled ? "on" : ""}`}
                 onClick={() => runAction(() => toggleControl(true))}
               >
-                Enable control
+                {t("common.on")}
+              </button>
+              <button
+                type="button"
+                className={`kc-seg ${!status.control_enabled ? "on" : ""}`}
+                onClick={() => runAction(() => toggleControl(false))}
+              >
+                {t("common.off")}
               </button>
             </div>
-            <p className="hint">
-              Default is <strong>enabled</strong>: board keys/nav drive the local Kiro Crew window,
-              and K4 may activate system dictation. Disable control to keep input visualization
-              while blocking every board-triggered PC action.
-            </p>
-            <div className="input-row">
-              <div className="nav-cluster">
-                <label className="cluster-label">5-WAY NAV</label>
-                <div className="nav-pad">
-                  {NAV_LAYOUT.map((dir, index) => (
+            <div className="kc-board" style={{ marginTop: 12 }}>
+              {[["k1", "k2", "k3"], ["k4", "k5", "k6"], ["enc"]].map((row, ri) => (
+                <div key={ri} className={`kc-board-row ${row[0] === "enc" ? "enc" : ""}`}>
+                  {row.map((kid) => (
                     <div
-                      key={index}
-                      className={
-                        dir === null
-                          ? "nav-cell"
-                          : lastNav === dir
-                            ? "nav-cell dir hit"
-                            : "nav-cell dir"
-                      }
+                      key={kid}
+                      className={`kc-bkey ${lastKey === kid ? "sel" : ""}`}
+                      style={{ cursor: "default" }}
                     >
-                      {dir ? dir.toUpperCase() : ""}
+                      <span className="kc-bkey-id">{kid === "enc" ? t("keymap.knob") : kid.toUpperCase()}</span>
+                      <span className="kc-bkey-role">{lastKey === kid ? "●" : ""}</span>
                     </div>
                   ))}
                 </div>
-              </div>
-
-              <div className="key-row">
-                {KEY_MAP.map((key) => (
-                  <div
-                    className={
-                      (lastKey === key.id ? "key-card hit" : "key-card") +
-                      (key.wide ? " wide" : "")
-                    }
-                    key={key.id}
-                  >
-                    <div className="key-screen">{key.label}</div>
-                    <div className="key-map">{key.intent}</div>
-                  </div>
-                ))}
-              </div>
+              ))}
             </div>
-          </Panel>
+          </Card>
         )}
 
         {activeView === "kirocrew" && (
