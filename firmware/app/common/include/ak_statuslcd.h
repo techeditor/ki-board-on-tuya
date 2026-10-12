@@ -8,9 +8,10 @@
  * board can be judged directly without a serial monitor. UART JSONL stays as a
  * secondary channel.
  *
- * Orientation: MADCTL defaults to 0xA0 (landscape matching the rotation-270 that
- * was verified upright on the v1.2 expansion board). If the screen shows upside
- * down, flip AK_STATUSLCD_MADCTL to 0x60.
+ * Orientation: MADCTL defaults to 0xA0 for the v0.3 12P T280C7-C12-26 (ST7789P3)
+ * panel, verified upright on hardware 2026-10-09 (same value as the bringup
+ * lcd_st7789 probe). The old v1.2/CL28CK230-18A board used 0x60; on the v0.3
+ * panel 0x60 shows the screen 180-flipped. If upside down, flip to 0x60.
  */
 
 #ifndef AK_STATUSLCD_H_
@@ -23,7 +24,7 @@
 #define AK_STATUSLCD_H 240U /* logical landscape height */
 
 #ifndef AK_STATUSLCD_MADCTL
-#define AK_STATUSLCD_MADCTL 0x60U /* MV|MX landscape (verified upright); 0xA0 = 180-flipped */
+#define AK_STATUSLCD_MADCTL 0xA0U /* v0.3 ST7789P3 landscape (verified upright 2026-10-09); 0x60 = 180-flipped */
 #endif
 
 /**

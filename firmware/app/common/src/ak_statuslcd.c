@@ -58,8 +58,11 @@ static OPERATE_RET ak_statuslcd_restore_window(void)
 }
 
 /*
- * CL28CK230-18A ST7789 init: stock sequence with INVON replaced by INVOFF (this
- * panel is not inverted) and MADCTL set for landscape (see AK_STATUSLCD_MADCTL).
+ * v0.3 12P T280C7-C12-26 (ST7789P3) init: stock sequence with INVON kept (this
+ * panel shows every pixel bit-inverted -- red<->cyan, white<->black -- under
+ * INVOFF; INVON is correct, verified on hardware 2026-10-09, matching the
+ * bringup lcd_st7789 probe). MADCTL set for landscape (see AK_STATUSLCD_MADCTL).
+ * The old CL28CK230-18A board used INVOFF.
  */
 static const uint8_t s_st7789_init_seq[] = {
     1,
@@ -86,7 +89,7 @@ static const uint8_t s_st7789_init_seq[] = {
     0x33,
     1,
     0,
-    ST7789_INVOFF,
+    ST7789_INVON,
     2,
     0,
     ST7789_GCTRL,
@@ -167,7 +170,7 @@ static const uint8_t s_st7789_init_seq[] = {
     ST7789_SPI2EN,
     1,
     10,
-    ST7789_INVOFF,
+    ST7789_INVON,
     1,
     10,
     ST7789_DISPON,
