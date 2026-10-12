@@ -4,6 +4,7 @@
  */
 
 #include <string.h>
+#include <stdio.h>
 
 #include "ak_statuslcd.h"
 
@@ -339,4 +340,93 @@ void ak_statuslcd_title_links(const char *title, uint16_t bar_color, bool wifi_c
                 AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
     ak_gfx_icon(296U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH,
                 AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+}
+
+/* Draw a segmented battery gauge with the percentage drawn over the body.
+ * Geometry is in header (TITLE_H=22) coordinates. The far-right pixel of the
+ * terminal sits at x_right. */
+static void draw_battery(uint16_t x_right, uint8_t pct, uint16_t bar_color)
+{
+    if (pct > 100U) {
+        pct = 100U;
+    }
+    const uint16_t body_w = 30U;  /* battery body width  */
+    const uint16_t body_h = 14U;  /* battery body height */
+    const uint16_t term_w = 3U;   /* positive terminal nub width  */
+    const uint16_t term_h = 6U;   /* positive terminal nub height */
+    const uint16_t body_y = (uint16_t)((TITLE_H - body_h) / 2U); /* =4 */
+    const uint16_t term_x = (uint16_t)(x_right - term_w);
+    const uint16_t body_x = (uint16_t)(term_x - body_w);
+
+    /* Fill colour by charge level. */
+    uint16_t fill = pct > 50U ? AK_COL_GREEN : (pct >= 20U ? AK_COL_YELLOW : AK_COL_RED);
+
+    /* Outer shell: black outline then white border then black interior. */
+    ak_gfx_fill_rect(body_x, body_y, body_w, body_h, AK_COL_WHITE);
+    ak_gfx_fill_rect((uint16_t)(body_x + 1U), (uint16_t)(body_y + 1U),
+                     (uint16_t)(body_w - 2U), (uint16_t)(body_h - 2U), AK_COL_BLACK);
+    /* Positive terminal nub on the right, vertically centred. */
+    ak_gfx_fill_rect(term_x, (uint16_t)(body_y + (body_h - term_h) / 2U),
+                     term_w, term_h, AK_COL_WHITE);
+
+    /* Interior fill proportional to charge (2 px inset inside the border). */
+    const uint16_t in_x = (uint16_t)(body_x + 2U);
+    const uint16_t in_y = (uint16_t)(body_y + 2U);
+    const uint16_t in_w = (uint16_t)(body_w - 4U);
+    const uint16_t in_h = (uint16_t)(body_h - 4U);
+    uint16_t fill_w = (uint16_t)(((uint32_t)in_w * pct) / 100U);
+    if (fill_w > 0U) {
+        ak_gfx_fill_rect(in_x, in_y, fill_w, in_h, fill);
+    }
+
+    /* Percentage drawn over the body with the thin font. Right-justify so 100
+     * and single digits both sit inside the body. Each thin glyph is 8 px wide;
+     * use the interior fill colour as the glyph background where it overlaps so
+     * the number reads as sitting "in" the battery. */
+    char text[4];
+    (void)snprintf(text, sizeof(text), "%u", (unsigned)pct);
+    uint16_t digits = (uint16_t)strlen(text);
+    uint16_t text_w = (uint16_t)(digits * 8U);
+    uint16_t text_x = (uint16_t)(body_x + (body_w - text_w) / 2U);
+    uint16_t text_y = (uint16_t)(body_y + (body_h - 8U) / 2U);
+    for (uint16_t i = 0; i < digits; i++) {
+        uint16_t gx = (uint16_t)(text_x + i * 8U);
+        /* Background = the fill colour if this glyph cell is over the filled
+         * part, else black (empty part of the battery). Foreground is white. */
+        bool over_fill = (uint16_t)(gx + 4U) < (uint16_t)(in_x + fill_w);
+        uint16_t bg = over_fill ? fill : AK_COL_BLACK;
+        uint16_t fg = (over_fill && fill == AK_COL_YELLOW) ? AK_COL_BLACK : AK_COL_WHITE;
+        ak_gfx_char_thin(gx, text_y, text[i], fg, bg, 1);
+    }
+}
+
+void ak_statuslcd_header(const char *title, uint16_t bar_color, bool wifi_connected,
+                         bool usb_connected, bool ble_connected,
+                         uint8_t battery_pct, bool battery_valid)
+{
+    const uint16_t icon_y = (uint16_t)((TITLE_H - AK_ICON_H) / 2U);
+
+    ak_statuslcd_title(title, bar_color);
+    if (!s_ready) {
+        return;
+    }
+
+    if (battery_valid) {
+        /* Gauge terminal at the far right edge; link icons shifted left of it. */
+        draw_battery((uint16_t)(AK_STATUSLCD_W - 2U), battery_pct, bar_color);
+        ak_gfx_icon(214U, icon_y, wifi_connected ? AK_ICON_WIFI : AK_ICON_NO_WIFI,
+                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+        ak_gfx_icon(234U, icon_y, usb_connected ? AK_ICON_USB : AK_ICON_NO_USB,
+                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+        ak_gfx_icon(254U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH,
+                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+    } else {
+        /* No gauge: keep the original right-aligned icon layout. */
+        ak_gfx_icon(256U, icon_y, wifi_connected ? AK_ICON_WIFI : AK_ICON_NO_WIFI,
+                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+        ak_gfx_icon(276U, icon_y, usb_connected ? AK_ICON_USB : AK_ICON_NO_USB,
+                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+        ak_gfx_icon(296U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH,
+                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+    }
 }

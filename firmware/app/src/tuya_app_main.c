@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "ak_board_io.h"
+#include "ak_battery.h"
 #include "ak_display.h"
 #include "ak_features.h"
 #include "ak_font8x8.h"
@@ -1336,10 +1337,12 @@ static void ak_render_status(void)
     /* Header contract: fixed title + firmware version + WiFi/USB/BLE icons.
      * WiFi only updates its icon. Background is pale yellow while neither PC
      * transport is connected and light green after USB or BLE connects. */
-    ak_statuslcd_title_links("Ki-board for Kiro Crew", header_color,
-                             s_wifi_connected, usb_connected, ble_connected);
-    /* 22 title glyphs end at x=182; the thin version fits before WiFi at x=256. */
-    ak_gfx_text_thin(186U, 7U, "v" APP_FW_VERSION,
+    ak_statuslcd_header("Ki-board", header_color,
+                        s_wifi_connected, usb_connected, ble_connected,
+                        ak_battery_percent(), ak_battery_available());
+    /* Title "Ki-board" ends at x=70; the thin version sits just after it, well
+     * left of the shifted WiFi icon (x=214) and the battery gauge (x>=282). */
+    ak_gfx_text_thin(76U, 7U, "v" APP_FW_VERSION,
                      AK_COL_BLACK, header_color, 1);
     ak_draw_session_sidebar();
 
@@ -1830,6 +1833,11 @@ static void user_main(void)
     } else {
         ak_status_bar_set("LCD ready", AK_COL_GREEN);
         ak_render_status();
+    }
+    /* Battery fuel gauge (ADC). Optional: on failure the header omits the
+     * gauge and everything else keeps working. */
+    if (ak_battery_init() != OPRT_OK) {
+        PR_WARN("battery ADC init failed; header gauge disabled");
     }
 #endif
 

@@ -61,6 +61,21 @@ void ak_statuslcd_title(const char *title, uint16_t bar_color);
 void ak_statuslcd_title_links(const char *title, uint16_t bar_color, bool wifi_connected,
                               bool usb_connected, bool ble_connected);
 
+/**
+ * @brief Draw the title bar, the WiFi/USB/BLE link icons, AND a segmented
+ *        battery gauge at the far right with the percentage drawn over it.
+ *
+ * Same as ak_statuslcd_title_links() but the three link icons are shifted left
+ * to make room for the gauge. Pass battery_valid=false (e.g. ADC unavailable)
+ * to omit the gauge and fall back to the plain icon layout. Does NOT flush.
+ *
+ * @param battery_pct   0..100 charge estimate (clamped).
+ * @param battery_valid Whether to draw the gauge at all.
+ */
+void ak_statuslcd_header(const char *title, uint16_t bar_color, bool wifi_connected,
+                         bool usb_connected, bool ble_connected,
+                         uint8_t battery_pct, bool battery_valid);
+
 /** @brief Y coordinate where the content area starts (below the title bar). */
 #define AK_STATUSLCD_CONTENT_Y 26U
 
