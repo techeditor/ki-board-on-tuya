@@ -236,6 +236,7 @@ static bool                s_center_long_consumed;
 static bool     s_test_active;
 static uint8_t  s_test_key_mask;      /* bit i set while K(i+1) is held; bit 6 = enc */
 static int32_t  s_test_enc_count;     /* net EC11 detents since entering */
+static int32_t  s_test_hue;           /* EC11-tuned colour for lit key LEDs */
 static uint32_t s_test_ws_phase;      /* WS2812 chase animation phase */
 #endif
 
@@ -1439,7 +1440,7 @@ static void ak_test_draw_frame(void)
     ak_gfx_text_thin(6U, AK_TEST_Y_ENC, line, AK_COL_CYAN, AK_COL_BLACK, 1);
 
     (void)snprintf(line, sizeof(line), "WS2812 x%u: %s", (unsigned)AK_LEDS_COUNT,
-                   ak_leds_available() ? "chasing" : "unavailable");
+                   ak_leds_available() ? "key lights LED, EC11 hue" : "unavailable");
     ak_gfx_text_thin(6U, AK_TEST_Y_WS, line, ak_leds_available() ? AK_COL_GREEN : AK_COL_RED,
                      AK_COL_BLACK, 1);
 
@@ -1501,6 +1502,23 @@ static void ak_test_draw_slow(void)
 static volatile bool s_test_exit_req;
 static ak_dclick_t   s_test_enc_dclick;
 
+/* Light each LED whose key is currently held, using the EC11-tuned hue, and
+ * clear the rest. LEDn <-> Kn, LED7 <-> enc (per §0.5), so pressing a key lights
+ * exactly the LED beneath it and turning EC11 sweeps the colour. */
+static void ak_test_leds_render(void)
+{
+    if (!ak_leds_available()) {
+        return;
+    }
+    ak_leds_clear();
+    for (int i = 0; i < AK_LEDS_COUNT && i < 7; i++) {
+        if (s_test_key_mask & (1U << i)) {
+            ak_leds_set_hue((uint32_t)i, s_test_hue, 48U);
+        }
+    }
+    (void)ak_leds_show();
+}
+
 static void ak_test_input_cb(ak_input_kind_t kind, const char *id,
                              ak_input_event_t event, uint32_t held_ms)
 {
@@ -1513,9 +1531,11 @@ static void ak_test_input_cb(ak_input_kind_t kind, const char *id,
     if (event == AK_INPUT_EVENT_DOWN) {
         s_test_key_mask |= (uint8_t)(1U << bit);
         ak_test_draw_keys();
+        ak_test_leds_render(); /* light the LED under this key immediately */
     } else if (event == AK_INPUT_EVENT_UP) {
         s_test_key_mask &= (uint8_t)~(1U << bit);
         ak_test_draw_keys();
+        ak_test_leds_render();
     }
 
     /* Double-click of the EC11 push exits. Feeding every enc edge lets the
@@ -1532,7 +1552,9 @@ static void ak_test_input_cb(ak_input_kind_t kind, const char *id,
 static void ak_test_enc_cb(int32_t detents)
 {
     s_test_enc_count += detents;
+    s_test_hue += detents; /* EC11 sweeps the colour of the lit key LEDs */
     ak_test_draw_enc();
+    ak_test_leds_render();
 }
 
 /* Blocking, self-contained test page. Entered from Settings -> "Test hardware".
@@ -1547,6 +1569,7 @@ static void ak_test_run(void)
     s_test_exit_req     = false;
     s_test_key_mask     = 0U;
     s_test_enc_count    = 0;
+    s_test_hue          = 0;
     s_test_ws_phase     = 0U;
     s_test_uart_rx      = 0U;
     s_settings_active   = false;
@@ -1554,6 +1577,7 @@ static void ak_test_run(void)
 
     ak_test_draw_frame();
     ak_test_draw_slow();
+    ak_test_leds_render(); /* all off until a key is held */
 
     uint32_t last_tick = tal_system_get_millisecond();
 
@@ -1577,15 +1601,10 @@ static void ak_test_run(void)
 #endif
         }
 
-        /* Periodic: WS2812 chase + repaint the slow status rows. */
+        /* Periodic: repaint the slow status rows. LEDs are driven directly by
+         * key presses / EC11 (ak_test_leds_render), not animated here. */
         if ((uint32_t)(now - last_tick) >= AK_TEST_TICK_MS) {
             last_tick = now;
-            if (ak_leds_available()) {
-                ak_leds_clear();
-                ak_leds_set(s_test_ws_phase % AK_LEDS_COUNT, 40U, 40U, 40U);
-                (void)ak_leds_show();
-            }
-            s_test_ws_phase++;
             ak_test_draw_slow();
         }
 

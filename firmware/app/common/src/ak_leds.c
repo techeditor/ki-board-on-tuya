@@ -83,6 +83,27 @@ void ak_leds_set(uint32_t index, uint8_t r, uint8_t g, uint8_t b)
     s_buf[index].warm  = 0;
 }
 
+void ak_leds_set_hue(uint32_t index, int32_t hue, uint8_t level)
+{
+    /* HSV->RGB on a 6-sextant colour wheel at full saturation. */
+    int32_t steps  = (int32_t)AK_LEDS_HUE_STEPS;
+    int32_t seg    = ((hue % steps) + steps) % steps; /* 0..23 */
+    int32_t region = seg / 4;                          /* 0..5 */
+    int32_t frac   = (seg % 4) * (int32_t)level / 4;
+    uint8_t up     = (uint8_t)frac;
+    uint8_t dn     = (uint8_t)((int32_t)level - frac);
+    uint8_t r = 0, g = 0, b = 0;
+    switch (region) {
+    case 0: r = level; g = up;    b = 0;     break; /* R->Y */
+    case 1: r = dn;    g = level; b = 0;     break; /* Y->G */
+    case 2: r = 0;     g = level; b = up;    break; /* G->C */
+    case 3: r = 0;     g = dn;    b = level; break; /* C->B */
+    case 4: r = up;    g = 0;     b = level; break; /* B->M */
+    default:r = level; g = 0;     b = dn;    break; /* M->R */
+    }
+    ak_leds_set(index, r, g, b);
+}
+
 void ak_leds_set_all(uint8_t r, uint8_t g, uint8_t b)
 {
     for (uint32_t i = 0; i < AK_LEDS_COUNT; i++) {

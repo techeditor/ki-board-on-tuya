@@ -33,6 +33,12 @@ bool ak_leds_available(void);
  *  call ak_leds_show() to push to the chain. Out-of-range index is ignored. */
 void ak_leds_set(uint32_t index, uint8_t r, uint8_t g, uint8_t b);
 
+/** Set one LED from a colour-wheel hue (0..AK_LEDS_HUE_STEPS-1) at `level`
+ *  brightness (pre-cap). Buffered. Used by the hardware test page so EC11
+ *  rotation can sweep the colour while K1-K6 light their own LED. */
+#define AK_LEDS_HUE_STEPS 24U
+void ak_leds_set_hue(uint32_t index, int32_t hue, uint8_t level);
+
 /** Set every LED to the same RGB value (buffered). */
 void ak_leds_set_all(uint8_t r, uint8_t g, uint8_t b);
 
