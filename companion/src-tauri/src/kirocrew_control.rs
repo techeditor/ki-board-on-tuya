@@ -96,6 +96,9 @@ pub enum ControlAction {
     CommandBar(String),
     /// Inject a single named chord.
     Chord(Chord),
+    /// Inject a chord N times in a row (N>=1). Used by the EC11 encoder so a
+    /// multi-detent frame scrolls by that many steps.
+    ChordRepeat(Chord, u8),
     /// Type free text into the focused input (no command bar, no Enter).
     SendText(String),
     /// Focus the chat composer (Alt+Enter), then type the text — no Enter, so
@@ -161,8 +164,8 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 /// | `key k5` (down/long)           | `Chord(Enter)` — submit / continue  |
 /// | `key k6` (down/long)           | `None` — reserved; bind in the UI later (v0.3) |
 /// | `key enc` `Down`               | `Chord(Enter)` — EC11 push confirms (was nav center) |
-/// | `encoder { detents>0 }`        | `Chord(Down)` ×detents — clockwise scrolls down / next item |
-/// | `encoder { detents<0 }`        | `Chord(Up)` ×|detents| — counter-clockwise scrolls up |
+/// | `encoder { detents>0 }`        | `ChordRepeat(Down, detents)` — clockwise scrolls down, one step per detent |
+/// | `encoder { detents<0 }`        | `ChordRepeat(Up, |detents|)` — counter-clockwise scrolls up |
 /// | anything else / key `up`       | `None`                                    |
 pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
     match ev {
@@ -226,14 +229,16 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
 
         // EC11 rotation: scroll by one arrow key per detent. Clockwise
         // (positive) moves down / to the next item; counter-clockwise (negative)
-        // moves up. The caller applies the returned chord `detents` times.
+        // moves up. The chord is injected once per detent (capped to avoid a
+        // runaway from a malformed frame).
         Inbound::Encoder { payload, .. } => {
-            if payload.detents > 0 {
-                ControlAction::Chord(Chord::Down)
-            } else if payload.detents < 0 {
-                ControlAction::Chord(Chord::Up)
-            } else {
+            let mag = payload.detents.unsigned_abs().min(16) as u8;
+            if mag == 0 {
                 ControlAction::None
+            } else if payload.detents > 0 {
+                ControlAction::ChordRepeat(Chord::Down, mag)
+            } else {
+                ControlAction::ChordRepeat(Chord::Up, mag)
             }
         }
 
@@ -860,6 +865,12 @@ impl KiroCrewController {
         match action {
             ControlAction::CommandBar(cmd) => self.command_bar(cmd),
             ControlAction::Chord(c) => self.chord(*c),
+            ControlAction::ChordRepeat(c, n) => {
+                for _ in 0..(*n).max(1) {
+                    self.chord(*c)?;
+                }
+                Ok(())
+            }
             ControlAction::SendText(t) => self.send_text(t),
             ControlAction::Compose(t) => self.compose(t),
             ControlAction::StartDeleteWords => self.start_delete_words(),
@@ -1069,12 +1080,12 @@ mod tests {
         let ctx = ControlCtx::default();
         assert_eq!(
             route_input(&encoder(1), &ctx),
-            ControlAction::Chord(Chord::Down)
+            ControlAction::ChordRepeat(Chord::Down, 1)
         );
-        // Multi-step clockwise still yields Down; the caller repeats it.
+        // Multi-detent clockwise repeats Down by the detent count.
         assert_eq!(
             route_input(&encoder(3), &ctx),
-            ControlAction::Chord(Chord::Down)
+            ControlAction::ChordRepeat(Chord::Down, 3)
         );
     }
 
@@ -1083,11 +1094,11 @@ mod tests {
         let ctx = ControlCtx::default();
         assert_eq!(
             route_input(&encoder(-1), &ctx),
-            ControlAction::Chord(Chord::Up)
+            ControlAction::ChordRepeat(Chord::Up, 1)
         );
         assert_eq!(
             route_input(&encoder(-2), &ctx),
-            ControlAction::Chord(Chord::Up)
+            ControlAction::ChordRepeat(Chord::Up, 2)
         );
     }
 
