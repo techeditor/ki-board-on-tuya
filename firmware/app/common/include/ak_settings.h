@@ -1,6 +1,7 @@
 #ifndef AK_SETTINGS_H
 #define AK_SETTINGS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #define AK_SETTINGS_VOLUME_DEFAULT     70U
@@ -27,13 +28,15 @@ typedef enum {
 typedef enum {
     AK_SETTINGS_RESULT_NONE = 0,
     AK_SETTINGS_RESULT_CHANGED,
-    AK_SETTINGS_RESULT_CONFIRMED,
+    AK_SETTINGS_RESULT_ENTER_EDIT,  /* a value item was selected for adjusting */
+    AK_SETTINGS_RESULT_CONFIRMED,   /* edit finished / value committed */
     AK_SETTINGS_RESULT_ENTER_TEST,
     AK_SETTINGS_RESULT_EXIT,
 } ak_settings_result_t;
 
 typedef struct {
     ak_settings_item_t selected;
+    bool               editing;   /* true while a value item is being adjusted */
     uint8_t volume;
     uint8_t brightness;
 } ak_settings_model_t;

@@ -1073,20 +1073,28 @@ static void ak_settings_value_row(uint16_t y, ak_settings_item_t item,
                                   const char *label, uint8_t value)
 {
     bool selected = s_settings.selected == item;
+    bool editing  = selected && s_settings.editing;
     uint16_t bg = selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
-    uint16_t fg = selected ? AK_COL_WHITE : AK_COL_CYAN;
+    uint16_t fg = editing ? AK_COL_YELLOW : (selected ? AK_COL_WHITE : AK_COL_CYAN);
     char value_text[12];
 
     ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, 48U, bg);
     if (!selected) {
         ak_settings_outline(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, 48U,
                             AK_COL_GRAY);
+    } else if (editing) {
+        /* A bright outline signals "rotate now adjusts this value". */
+        ak_settings_outline(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, 48U,
+                            AK_COL_YELLOW);
     }
     ak_gfx_text_thin(24U, (uint16_t)(y + 8U), label,
                      selected ? AK_COL_WHITE : AK_COL_GRAY, bg, 1);
     (void)snprintf(value_text, sizeof(value_text), "< %3u%% >", value);
     ak_gfx_text_thin(232U, (uint16_t)(y + 8U), value_text, fg, bg, 1);
-    if (selected && s_settings_confirmed) {
+    if (editing) {
+        ak_gfx_text_thin(160U, (uint16_t)(y + 8U), "EDIT",
+                         AK_COL_YELLOW, bg, 1);
+    } else if (selected && s_settings_confirmed) {
         ak_gfx_text_thin(160U, (uint16_t)(y + 8U), "Applied",
                          AK_COL_WHITE, bg, 1);
     }
@@ -1095,7 +1103,8 @@ static void ak_settings_value_row(uint16_t y, ak_settings_item_t item,
                      selected ? AK_COL_BLACK : AK_COL_GRAY);
     ak_gfx_fill_rect(24U, (uint16_t)(y + 31U),
                      (uint16_t)((uint32_t)LCD_SETTINGS_BAR_W * value / 100U),
-                     6U, selected ? AK_COL_WHITE : LCD_SESSION_SELECTED_BG);
+                     6U, editing ? AK_COL_YELLOW
+                                 : (selected ? AK_COL_WHITE : LCD_SESSION_SELECTED_BG));
 }
 
 static void ak_settings_draw(void)
@@ -1147,10 +1156,17 @@ static void ak_settings_draw(void)
     ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 33U, AK_COL_BLACK);
     ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U,
                      LCD_SESSION_SELECTED_BG);
-    ak_gfx_text_thin(4U, 213U, "Up/Down Select  Left/Right Adjust",
-                     AK_COL_CYAN, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(4U, 227U, "Center Confirm", AK_COL_GRAY,
-                     AK_COL_BLACK, 1);
+    if (s_settings.editing) {
+        ak_gfx_text_thin(4U, 213U, "Rotate: adjust value",
+                         AK_COL_YELLOW, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(4U, 227U, "Click: confirm & exit edit", AK_COL_GRAY,
+                         AK_COL_BLACK, 1);
+    } else {
+        ak_gfx_text_thin(4U, 213U, "Rotate: select item",
+                         AK_COL_CYAN, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(4U, 227U, "Click: edit value / run Test / Exit",
+                         AK_COL_GRAY, AK_COL_BLACK, 1);
+    }
     ak_statuslcd_flush();
     s_lcd_redraw_pending = false;
 }
@@ -1216,31 +1232,38 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
         if (event == AK_INPUT_EVENT_DOWN) {
             s_center_long_consumed = false;
         } else if (event == AK_INPUT_EVENT_LONG) {
-            /* Long-press exits settings from anywhere. */
+            /* Long-press no longer does anything in settings: every transition
+             * is driven by a short click so a held encoder cannot re-trigger
+             * the item you just left (see also the test-page exit). Mark it so
+             * the following UP is swallowed, not treated as a click. */
             s_center_long_consumed = true;
-            s_settings_active = false;
-            s_settings_confirmed = false;
-            ak_render_status();
         } else if (event == AK_INPUT_EVENT_UP) {
             if (s_center_long_consumed) {
                 s_center_long_consumed = false;
                 return true;
             }
-            /* Short press: EXIT leaves settings; TEST enters the test page;
-             * any other item advances selection (single-knob navigation). */
-            if (s_settings.selected == AK_SETTINGS_ITEM_EXIT) {
+            /* Short click = CONFIRM. The model decides what that means for the
+             * current item/mode: value item -> enter/leave edit; TEST/EXIT ->
+             * execute directly. */
+            ak_settings_result_t result =
+                ak_settings_handle(&s_settings, AK_SETTINGS_ACTION_CONFIRM);
+            switch (result) {
+            case AK_SETTINGS_RESULT_EXIT:
                 s_settings_active = false;
                 s_settings_confirmed = false;
                 ak_render_status();
-                return true;
-            }
-            if (s_settings.selected == AK_SETTINGS_ITEM_TEST) {
+                break;
+            case AK_SETTINGS_RESULT_ENTER_TEST:
                 ak_test_run();
-                return true;
+                break;
+            case AK_SETTINGS_RESULT_ENTER_EDIT:
+            case AK_SETTINGS_RESULT_CONFIRMED:
+            default:
+                s_settings_confirmed =
+                    (result == AK_SETTINGS_RESULT_CONFIRMED);
+                ak_settings_draw();
+                break;
             }
-            ak_settings_handle(&s_settings, AK_SETTINGS_ACTION_DOWN);
-            s_settings_confirmed = false;
-            ak_settings_draw();
         }
         return true;
     }
@@ -1248,16 +1271,17 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
     return true;
 }
 
-/* EC11 rotation inside the modal settings UI: adjust the selected value live.
- * Negative detents decrease (LEFT), positive increase (RIGHT); applied one step
- * per detent. Returns true iff settings is active (so the frame is not sent). */
+/* EC11 rotation inside the modal settings UI. The two-level model decides what
+ * rotation means: while editing a value it adjusts it (one step per detent);
+ * otherwise it moves the selection. Positive detents = DOWN/increase, negative
+ * = UP/decrease. Returns true iff settings is active (so no frame is sent). */
 static bool ak_settings_consume_encoder(int32_t detents)
 {
     if (!s_settings_active || detents == 0) {
         return s_settings_active;
     }
     ak_settings_action_t action =
-        detents > 0 ? AK_SETTINGS_ACTION_RIGHT : AK_SETTINGS_ACTION_LEFT;
+        detents > 0 ? AK_SETTINGS_ACTION_DOWN : AK_SETTINGS_ACTION_UP;
     int32_t steps = detents > 0 ? detents : -detents;
     for (int32_t i = 0; i < steps; i++) {
         ak_settings_result_t result = ak_settings_handle(&s_settings, action);
@@ -1375,7 +1399,7 @@ static void ak_test_draw_frame(void)
     ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 33U, AK_COL_BLACK);
     ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
     ak_gfx_text_thin(4U, 213U, "Press keys / turn EC11 to test", AK_COL_CYAN, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(4U, 227U, "Long-press EC11 to exit", AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, 227U, "Double-click EC11 to exit", AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
 }
 
@@ -1415,16 +1439,17 @@ static void ak_test_draw_slow(void)
 /* ---- Test-page private input callbacks (used only inside ak_test_run) ----
  * These feed off the SAME ak_input_poll the main loop uses, but are routed here
  * only while the test page owns the loop. They update the live mask / detent
- * count and repaint ONLY the affected row; the EC11 long-press sets the exit
- * flag that breaks the run loop.
+ * count and repaint ONLY the affected row. EXIT is a DOUBLE-CLICK of the EC11
+ * push: a single click (and a long-press) must stay testable as ordinary key
+ * input, so only a double-click leaves the page.
  */
 static volatile bool s_test_exit_req;
+static ak_dclick_t   s_test_enc_dclick;
 
 static void ak_test_input_cb(ak_input_kind_t kind, const char *id,
                              ak_input_event_t event, uint32_t held_ms)
 {
     (void)kind;
-    (void)held_ms;
     int bit = ak_test_key_bit(id);
     if (bit < 0) {
         return;
@@ -1436,9 +1461,16 @@ static void ak_test_input_cb(ak_input_kind_t kind, const char *id,
     } else if (event == AK_INPUT_EVENT_UP) {
         s_test_key_mask &= (uint8_t)~(1U << bit);
         ak_test_draw_keys();
-    } else if (event == AK_INPUT_EVENT_LONG && bit == 6) {
-        /* Long-press of the EC11 push exits the test page. */
-        s_test_exit_req = true;
+    }
+
+    /* Double-click of the EC11 push exits. Feeding every enc edge lets the
+     * detector see DOWN/LONG/UP; a hold fires LONG which it excludes, so
+     * hold-to-test never trips the exit. */
+    if (bit == 6) {
+        if (ak_dclick_feed(&s_test_enc_dclick, event,
+                           tal_system_get_millisecond(), held_ms)) {
+            s_test_exit_req = true;
+        }
     }
 }
 
@@ -1449,11 +1481,11 @@ static void ak_test_enc_cb(int32_t detents)
 }
 
 /* Blocking, self-contained test page. Entered from Settings -> "Test hardware".
- * Owns its own poll/redraw loop so key latency and the EC11 long-press are not
- * starved by the main loop's full-screen redraws. The dedicated IoT thread
- * keeps the cloud link alive while this runs; we still drain UART0 each tick so
- * its RX buffer never overflows and the UART block shows live byte counts.
- * Leaves on an EC11 long-press and restores the settings page.
+ * Owns its own poll/redraw loop so key latency is not starved by the main
+ * loop's full-screen redraws. The dedicated IoT thread keeps the cloud link
+ * alive while this runs; UART0 is drained each tick so its RX buffer never
+ * overflows and the UART block shows live byte counts. Leaves on an EC11
+ * DOUBLE-CLICK (single click/long-press stay testable) and restores settings.
  */
 static void ak_test_run(void)
 {
@@ -1463,6 +1495,7 @@ static void ak_test_run(void)
     s_test_ws_phase     = 0U;
     s_test_uart_rx      = 0U;
     s_settings_active   = false;
+    ak_dclick_init(&s_test_enc_dclick);
 
     ak_test_draw_frame();
     ak_test_draw_slow();
@@ -1472,7 +1505,7 @@ static void ak_test_run(void)
     while (!s_test_exit_req) {
         uint32_t now = tal_system_get_millisecond();
 
-        /* Tight input polling -> keys feel immediate, long-press accrues. */
+        /* Tight input polling -> keys feel immediate. */
         ak_input_poll(now, ak_test_input_cb, ak_test_enc_cb);
 
         /* Keep draining UART0 so its buffer never overflows; count the bytes. */

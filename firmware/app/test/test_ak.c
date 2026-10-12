@@ -410,39 +410,63 @@ static void test_settings(void)
 
     ak_settings_init(&settings);
     CHECK(settings.selected == AK_SETTINGS_ITEM_VOLUME, "settings starts on volume");
+    CHECK(!settings.editing, "settings starts not editing");
     CHECK(settings.volume == 70U, "default volume is 70 percent");
     CHECK(settings.brightness == 100U, "default brightness is 100 percent");
 
+    /* Two-level model: rotation while NOT editing only moves the selection and
+     * never changes a value. */
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_LEFT) ==
+              AK_SETTINGS_RESULT_NONE && settings.volume == 70U,
+          "rotate without editing does not change the value");
+    CHECK(settings.selected == AK_SETTINGS_ITEM_EXIT,
+          "rotate-up from volume wraps the selection to exit");
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_RIGHT);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_VOLUME,
+          "rotate-down wraps back to volume");
+
+    /* First click on a value item enters edit mode. */
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
+              AK_SETTINGS_RESULT_ENTER_EDIT && settings.editing,
+          "click on a value item enters edit mode");
+    /* Now rotation adjusts the value, selection stays put. */
     CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_LEFT) ==
               AK_SETTINGS_RESULT_CHANGED && settings.volume == 60U,
-          "left lowers volume by ten");
+          "rotate while editing lowers volume by ten");
+    CHECK(settings.selected == AK_SETTINGS_ITEM_VOLUME,
+          "selection does not move while editing");
     for (unsigned i = 0; i < 8U; i++) {
         ak_settings_handle(&settings, AK_SETTINGS_ACTION_LEFT);
     }
-    CHECK(settings.volume == 0U, "volume clamps at zero");
+    CHECK(settings.volume == 0U, "volume clamps at zero while editing");
+    /* Second click commits and leaves edit mode. */
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
+              AK_SETTINGS_RESULT_CONFIRMED && !settings.editing,
+          "second click commits and leaves edit mode");
 
     ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
-    CHECK(settings.selected == AK_SETTINGS_ITEM_BRIGHTNESS, "down selects brightness");
+    CHECK(settings.selected == AK_SETTINGS_ITEM_BRIGHTNESS, "rotate selects brightness");
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM); /* enter edit */
     for (unsigned i = 0; i < 12U; i++) {
         ak_settings_handle(&settings, AK_SETTINGS_ACTION_LEFT);
     }
     CHECK(settings.brightness == AK_SETTINGS_BRIGHTNESS_MIN,
           "brightness keeps a visible ten-percent minimum");
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM); /* leave edit */
+    CHECK(!settings.editing, "brightness edit committed");
+
+    /* Action items execute directly on a single click (no edit mode). */
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_TEST, "rotate selects test");
     CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
-              AK_SETTINGS_RESULT_CONFIRMED,
-          "center confirms a value");
+              AK_SETTINGS_RESULT_ENTER_TEST && !settings.editing,
+          "click on test enters the test page directly");
 
     ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
-    CHECK(settings.selected == AK_SETTINGS_ITEM_TEST, "down selects test");
+    CHECK(settings.selected == AK_SETTINGS_ITEM_EXIT, "rotate selects exit");
     CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
-              AK_SETTINGS_RESULT_ENTER_TEST,
-          "center on test enters the test page");
-
-    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
-    CHECK(settings.selected == AK_SETTINGS_ITEM_EXIT, "down selects exit");
-    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
-              AK_SETTINGS_RESULT_EXIT,
-          "center confirms exit");
+              AK_SETTINGS_RESULT_EXIT && !settings.editing,
+          "click on exit exits directly");
     ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
     CHECK(settings.selected == AK_SETTINGS_ITEM_VOLUME, "selection wraps downward");
     ak_settings_handle(&settings, AK_SETTINGS_ACTION_UP);
