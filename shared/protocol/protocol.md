@@ -164,6 +164,21 @@ Companion 发：
 
 - `voice_engine`：`system`（Windows 系统 ASR）/ `cloud`（板端 Tuya ASR）
 
+### keymap（按键角色下发，方案 A：Companion 为配置权威，v0.3）
+
+Companion 下发按键角色表，覆盖固件 keymap 的默认值（见交互设计 §0.4）。固件把生效的表缓存进 TAL KV，断开后保留上次配置；重启后先读 KV，无记录则用 v0.3 默认表。
+
+```json
+{"v":1,"type":"keymap","payload":{"k1":"chat","k2":"chat","k3":"chat","k4":"cancel","k5":"voice","k6":"confirm","enc":"none"}}
+```
+
+- 每个键名（`k1`..`k6` / `enc`）的值是该键在基础态的**角色**；省略的键保留固件当前值（部分更新）。
+- 角色取值：`none`（仅上报事件，无本地行为）/ `chat`（K1-K3：单击切对话、双击切实例，由 Companion 映射）/ `voice`（语音 PTT）/ `cancel`（待确认态：单击删一字、长按删全部）/ `confirm`（待确认态：单击确认）。未知角色值被忽略（保留原值），解析容错。
+- **手势检测模式由角色推断**：`chat` → 延迟单/双击判定（方案 X）；其余角色 → 即时边沿。固件据此决定一个键上报 `click`/`double` 还是 `down`/`up`/`long`。
+- 固件应答 `ack`（带 `seq` 时）。
+- 载体：USB / BLE 均可（纯配置,无 UART0 依赖）。
+
+
 ### device_settings / device_settings_state（音量与屏幕亮度）
 
 Companion 修改当前运行值：

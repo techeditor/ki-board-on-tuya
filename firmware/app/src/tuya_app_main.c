@@ -199,6 +199,8 @@ static ak_dclick_t s_ptt_dclick;
 /* Runtime key-role table (v0.3 defaults; overridable by a Companion keymap
  * frame + cached in TAL KV). Replaces the old hard-coded AK_PTT_KEY_ID. */
 static ak_keymap_t s_keymap;
+/* TAL KV key holding the Companion-provided keymap override blob (plan A). */
+#define AK_KEYMAP_KV_KEY "ak_keymap"
 /* Deferred single/double classifiers for the CHAT keys (K1-K3). Index by the
  * keymap slot (0..2); other slots are unused. Scheme X: single is delayed to
  * tell it apart from a double, then reported as key.action "click"/"double". */
@@ -2196,6 +2198,47 @@ static void on_rx_line(const char *line)
             }
         }
         send_ack(seq);
+    } else if (strcmp(type, "keymap") == 0) {
+        /* Plan A: Companion downlinks per-key roles; apply to the live table,
+         * cache the result in TAL KV, and ack. Omitted keys keep their current
+         * role (partial update); unknown role strings are ignored. */
+        uint32_t seq = 0;
+        ak_json_uint(line, "seq", &seq);
+        static const char *const slot_ids[AK_KEYMAP_SLOTS] = {
+            "k1", "k2", "k3", "k4", "k5", "k6", "enc",
+        };
+        bool changed = false;
+        for (int i = 0; i < AK_KEYMAP_SLOTS; i++) {
+            char role_str[16] = "";
+            if (ak_json_str(line, slot_ids[i], role_str, sizeof(role_str))) {
+                ak_key_role_t role;
+                if (ak_keymap_role_from_str(role_str, &role)) {
+                    if (ak_keymap_apply_role(&s_keymap, slot_ids[i], role)) {
+                        changed = true;
+                    }
+                } else {
+                    PR_WARN("keymap: ignoring unknown role '%s' for %s",
+                            role_str, slot_ids[i]);
+                }
+            }
+        }
+        if (changed) {
+            /* Re-init the CHAT keys' gesture classifiers: a role change can
+             * switch a slot between edge and single/double detection. */
+            for (int gi = 0; gi < AK_KEYMAP_SLOTS; gi++) {
+                ak_gesture_init(&s_key_gesture[gi]);
+            }
+            uint8_t blob[AK_KEYMAP_BLOB_SIZE];
+            unsigned n = ak_keymap_to_blob(&s_keymap, blob, sizeof(blob));
+            if (n == AK_KEYMAP_BLOB_SIZE) {
+                if (tal_kv_set(AK_KEYMAP_KV_KEY, blob, n) == OPRT_OK) {
+                    PR_NOTICE("keymap: applied + cached %u-byte blob", n);
+                } else {
+                    PR_WARN("keymap: KV cache write failed (applied in RAM)");
+                }
+            }
+        }
+        send_ack(seq);
     } else if (strcmp(type, "device_settings") == 0) {
 #if AK_ENABLE_DISPLAY
         uint32_t value = 0U;
@@ -2409,6 +2452,21 @@ static void user_main(void)
     ak_cloud_set_activation_callback(on_cloud_activation);
     ak_dclick_init(&s_ptt_dclick);
     ak_keymap_init_defaults(&s_keymap);
+    /* Plan A: a Companion-provided keymap cached in TAL KV overrides the
+     * defaults so a disconnected board keeps the last map. A missing/corrupt
+     * blob leaves the v0.3 defaults in place. */
+    {
+        uint8_t *kv_buf = NULL;
+        size_t   kv_len = 0;
+        if (tal_kv_get(AK_KEYMAP_KV_KEY, &kv_buf, &kv_len) == OPRT_OK && kv_buf != NULL) {
+            if (ak_keymap_from_blob(&s_keymap, kv_buf, (unsigned)kv_len)) {
+                PR_NOTICE("keymap: loaded Companion override from KV");
+            } else {
+                PR_WARN("keymap: KV blob invalid, using v0.3 defaults");
+            }
+            tal_kv_free(kv_buf);
+        }
+    }
     for (int gi = 0; gi < AK_KEYMAP_SLOTS; gi++) {
         ak_gesture_init(&s_key_gesture[gi]);
     }

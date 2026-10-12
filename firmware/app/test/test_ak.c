@@ -589,6 +589,58 @@ static void test_keymap(void)
           "k5 voice uses immediate edges");
     CHECK(ak_keymap_role(&map, "zzz") == AK_KEY_ROLE_NONE,
           "unknown id defaults to no role");
+
+    /* role_from_str: known strings parse, unknown is rejected (keeps current). */
+    ak_key_role_t r = AK_KEY_ROLE_NONE;
+    CHECK(ak_keymap_role_from_str("chat", &r) && r == AK_KEY_ROLE_CHAT, "parse chat");
+    CHECK(ak_keymap_role_from_str("voice", &r) && r == AK_KEY_ROLE_VOICE, "parse voice");
+    CHECK(ak_keymap_role_from_str("cancel", &r) && r == AK_KEY_ROLE_CANCEL, "parse cancel");
+    CHECK(ak_keymap_role_from_str("confirm", &r) && r == AK_KEY_ROLE_CONFIRM, "parse confirm");
+    CHECK(ak_keymap_role_from_str("none", &r) && r == AK_KEY_ROLE_NONE, "parse none");
+    r = AK_KEY_ROLE_CHAT;
+    CHECK(!ak_keymap_role_from_str("bogus", &r) && r == AK_KEY_ROLE_CHAT,
+          "unknown role string rejected, out untouched");
+
+    /* gesture_for_role: chat -> single/double, others -> edge. */
+    CHECK(ak_keymap_gesture_for_role(AK_KEY_ROLE_CHAT) == AK_KEY_GESTURE_SINGLE_DOUBLE,
+          "chat role implies single/double");
+    CHECK(ak_keymap_gesture_for_role(AK_KEY_ROLE_VOICE) == AK_KEY_GESTURE_EDGE,
+          "voice role implies edge");
+
+    /* apply_role: changing k5 to chat flips its gesture to single/double. */
+    ak_keymap_t m2;
+    ak_keymap_init_defaults(&m2);
+    CHECK(ak_keymap_apply_role(&m2, "k5", AK_KEY_ROLE_CHAT), "apply role to k5");
+    CHECK(ak_keymap_role(&m2, "k5") == AK_KEY_ROLE_CHAT, "k5 role now chat");
+    CHECK(ak_keymap_gesture(&m2, "k5") == AK_KEY_GESTURE_SINGLE_DOUBLE,
+          "k5 gesture now single/double after role change");
+    CHECK(!ak_keymap_apply_role(&m2, "k9", AK_KEY_ROLE_CHAT), "apply to unknown id fails");
+
+    /* KV blob round-trip: serialize m2, load into a fresh map, compare. */
+    uint8_t blob[AK_KEYMAP_BLOB_SIZE];
+    CHECK(ak_keymap_to_blob(&m2, blob, sizeof(blob)) == AK_KEYMAP_BLOB_SIZE,
+          "blob serializes to fixed size");
+    CHECK(blob[0] == AK_KEYMAP_BLOB_VERSION, "blob carries version byte");
+    ak_keymap_t m3;
+    ak_keymap_init_defaults(&m3);
+    CHECK(ak_keymap_from_blob(&m3, blob, AK_KEYMAP_BLOB_SIZE), "blob loads");
+    CHECK(ak_keymap_role(&m3, "k5") == AK_KEY_ROLE_CHAT &&
+              ak_keymap_gesture(&m3, "k5") == AK_KEY_GESTURE_SINGLE_DOUBLE,
+          "round-trip preserves k5 chat + derived gesture");
+
+    /* Corrupt/wrong-version/size blobs are rejected, leaving map untouched. */
+    ak_keymap_t m4;
+    ak_keymap_init_defaults(&m4);
+    uint8_t bad_ver[AK_KEYMAP_BLOB_SIZE];
+    memcpy(bad_ver, blob, sizeof(bad_ver));
+    bad_ver[0] = 99;
+    CHECK(!ak_keymap_from_blob(&m4, bad_ver, AK_KEYMAP_BLOB_SIZE), "wrong version rejected");
+    CHECK(!ak_keymap_from_blob(&m4, blob, AK_KEYMAP_BLOB_SIZE - 1), "wrong size rejected");
+    uint8_t bad_role[AK_KEYMAP_BLOB_SIZE];
+    memcpy(bad_role, blob, sizeof(bad_role));
+    bad_role[1] = 42; /* out-of-range role */
+    CHECK(!ak_keymap_from_blob(&m4, bad_role, AK_KEYMAP_BLOB_SIZE), "out-of-range role rejected");
+    CHECK(ak_keymap_role(&m4, "k1") == AK_KEY_ROLE_CHAT, "rejected blob left map at defaults");
 }
 
 int main(void)

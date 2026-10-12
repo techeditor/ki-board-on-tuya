@@ -69,4 +69,32 @@ ak_key_role_t ak_keymap_role(const ak_keymap_t *map, const char *id);
 /** Gesture-detection mode for a key id, or AK_KEY_GESTURE_EDGE for unknown. */
 ak_key_gesture_mode_t ak_keymap_gesture(const ak_keymap_t *map, const char *id);
 
+/** Parse a role string ("none"/"chat"/"voice"/"cancel"/"confirm") into a role.
+ *  Returns false (and leaves *out untouched) for an unrecognized string, so a
+ *  tolerant decoder can keep the key's current role. */
+bool ak_keymap_role_from_str(const char *s, ak_key_role_t *out);
+
+/** The gesture-detection mode a role implies: CHAT -> deferred single/double
+ *  (K1-K3 need single vs double); every other role -> immediate edges. Keeps
+ *  the downlink wire format to one field per key (role), gesture derived. */
+ak_key_gesture_mode_t ak_keymap_gesture_for_role(ak_key_role_t role);
+
+/** Apply one role (by id) to `map`, setting both the role and its implied
+ *  gesture mode. No-op for an unknown id. Returns true if applied. */
+bool ak_keymap_apply_role(ak_keymap_t *map, const char *id, ak_key_role_t role);
+
+/* Compact KV blob: AK_KEYMAP_SLOTS bytes, one role per slot (k1..k6, enc).
+ * A leading version byte guards format changes. */
+#define AK_KEYMAP_BLOB_VERSION 1u
+#define AK_KEYMAP_BLOB_SIZE    (1u + AK_KEYMAP_SLOTS) /* version + 7 roles */
+
+/** Serialize `map` into a fixed AK_KEYMAP_BLOB_SIZE byte buffer for TAL KV.
+ *  Returns the number of bytes written (AK_KEYMAP_BLOB_SIZE) or 0 on error. */
+unsigned ak_keymap_to_blob(const ak_keymap_t *map, uint8_t *buf, unsigned buf_size);
+
+/** Load `map` from a KV blob produced by ak_keymap_to_blob. Rejects a wrong
+ *  version/size (returns false, leaving `map` untouched) so a stale/corrupt
+ *  blob falls back to defaults rather than scrambling the table. */
+bool ak_keymap_from_blob(ak_keymap_t *map, const uint8_t *buf, unsigned len);
+
 #endif /* AK_KEYMAP_H */
