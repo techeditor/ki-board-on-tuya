@@ -1573,12 +1573,9 @@ mod app {
                 }
                 false
             }
-            Inbound::Asr { payload, .. } => {
-                append_crew_draft(app, state, payload.text.trim())
-            }
-            Inbound::Macro { payload, .. } => {
-                append_crew_draft(app, state, payload.name.trim())
-            }
+            // Route ASR/macro fill-back through Compose instead: focus the live
+            // composer and append at the caret without sending. K5 submits.
+            Inbound::Asr { .. } | Inbound::Macro { .. } => false,
             Inbound::Key { payload, .. }
                 if payload.id == "k5" && payload.action == KeyAction::Down =>
             {
