@@ -50,7 +50,6 @@
 #define HEARTBEAT_INTERVAL_MS 2000U
 
 #define LCD_PATTERN_MS  1500U
-#define WS_PATTERN_MS   1000U
 #define UART_REFRESH_MS 300U
 #define WIFI_SCAN_MS    5000U
 
@@ -451,24 +450,6 @@ static void lcd_show(uint32_t step)
 
 /* ------------------------------------------------------------ WS2812 mode */
 
-#define WRGB(r, g, b)                                                                                                  \
-    {                                                                                                                  \
-        .red = (r), .green = (g), .blue = (b), .cold = 0, .warm = 0                                                    \
-    }
-
-typedef struct {
-    const char   *name;
-    PIXEL_COLOR_T colors[AK_WS2812_COUNT];
-} WS_PATTERN_T;
-
-static const WS_PATTERN_T s_ws_patterns[] = {
-    {"all_off", {[0 ... AK_WS2812_COUNT - 1] = WRGB(0, 0, 0)}},
-    {"all_red", {[0 ... AK_WS2812_COUNT - 1] = WRGB(WS_LEVEL, 0, 0)}},
-    {"all_green", {[0 ... AK_WS2812_COUNT - 1] = WRGB(0, WS_LEVEL, 0)}},
-    {"all_blue", {[0 ... AK_WS2812_COUNT - 1] = WRGB(0, 0, WS_LEVEL)}},
-    {"all_white", {[0 ... AK_WS2812_COUNT - 1] = WRGB(WS_LEVEL, WS_LEVEL, WS_LEVEL)}},
-};
-
 static OPERATE_RET ws_send(const PIXEL_COLOR_T colors[AK_WS2812_COUNT])
 {
     OPERATE_RET rt;
@@ -478,25 +459,215 @@ static OPERATE_RET ws_send(const PIXEL_COLOR_T colors[AK_WS2812_COUNT])
     return tdl_pixel_dev_refresh(s_pixels);
 }
 
-static void ws_show(uint32_t step)
-{
-    const WS_PATTERN_T *p  = &s_ws_patterns[step % CNTSOF(s_ws_patterns)];
-    OPERATE_RET         rt = OPRT_OK;
+/* ---- interactive WS2812 effects: K1-K6 pick an effect, EC11 tunes it ---- */
 
-    if (s_ws_ok) {
-        rt = ws_send(p->colors);
+typedef enum {
+    WSFX_SOLID = 0, /* K1: single colour, EC11 sweeps the hue           */
+    WSFX_COMET,     /* K2: a bright head trailing a fading tail (water) */
+    WSFX_BREATHE,   /* K3: whole chain fades up and down                */
+    WSFX_RAINBOW,   /* K4: a rainbow scrolling along the chain          */
+    WSFX_CHASE,     /* K5: one lit pixel marching down the chain        */
+    WSFX_BLINK,     /* K6: the whole chain flashes on/off               */
+    WSFX_COUNT,
+} WS_FX_E;
+
+static const char *const s_ws_fx_names[WSFX_COUNT] = {
+    "SOLID", "COMET", "BREATHE", "RAINBOW", "CHASE", "BLINK",
+};
+
+/* The EC11-tuned parameter per effect. SOLID = hue index (0..23); every
+ * other effect = speed level (1..10, higher is faster). */
+#define WS_SPEED_MIN   1
+#define WS_SPEED_MAX   10
+#define WS_HUE_STEPS   24
+
+static WS_FX_E  s_ws_fx          = WSFX_SOLID;
+static int32_t  s_ws_param[WSFX_COUNT] = {0, 5, 5, 5, 5, 5};
+static uint32_t s_ws_phase       = 0;   /* animation phase, advanced per frame */
+static bool     s_ws_ui_dirty    = true;
+
+/* HSV->RGB at the fixed WS_LEVEL brightness. h in [0,WS_HUE_STEPS), s/v implied. */
+static PIXEL_COLOR_T ws_hue(int32_t h, uint8_t level)
+{
+    PIXEL_COLOR_T c = {0};
+    int32_t       seg = ((h % WS_HUE_STEPS) + WS_HUE_STEPS) % WS_HUE_STEPS; /* 0..23 */
+    int32_t       region = seg / 4;         /* 0..5 colour wheel sextant */
+    int32_t       frac   = (seg % 4) * level / 4; /* ramp within a sextant */
+    uint8_t       up     = (uint8_t)frac;
+    uint8_t       dn     = (uint8_t)(level - frac);
+    switch (region) {
+    case 0: c.red = level; c.green = up;    c.blue = 0;     break; /* R->Y */
+    case 1: c.red = dn;    c.green = level; c.blue = 0;     break; /* Y->G */
+    case 2: c.red = 0;     c.green = level; c.blue = up;    break; /* G->C */
+    case 3: c.red = 0;     c.green = dn;    c.blue = level; break; /* C->B */
+    case 4: c.red = up;    c.green = 0;     c.blue = level; break; /* B->M */
+    default:c.red = level; c.green = 0;     c.blue = dn;    break; /* M->R */
     }
+    return c;
+}
+
+/* Scale a colour by n/d (for tails and breathing). */
+static PIXEL_COLOR_T ws_scale(PIXEL_COLOR_T c, int32_t n, int32_t d)
+{
+    if (d <= 0) {
+        d = 1;
+    }
+    if (n < 0) {
+        n = 0;
+    }
+    c.red   = (uint8_t)((int32_t)c.red * n / d);
+    c.green = (uint8_t)((int32_t)c.green * n / d);
+    c.blue  = (uint8_t)((int32_t)c.blue * n / d);
+    return c;
+}
+
+/* Render the current effect at the current phase into the chain. */
+static OPERATE_RET ws_render(void)
+{
+    PIXEL_COLOR_T buf[AK_WS2812_COUNT] = {0};
+    int32_t       p = s_ws_param[s_ws_fx];
+
+    switch (s_ws_fx) {
+    case WSFX_SOLID: {
+        PIXEL_COLOR_T c = ws_hue(p, WS_LEVEL);
+        for (uint32_t i = 0; i < AK_WS2812_COUNT; i++) {
+            buf[i] = c;
+        }
+        break;
+    }
+    case WSFX_COMET: {
+        uint32_t head = s_ws_phase % AK_WS2812_COUNT;
+        for (uint32_t i = 0; i < AK_WS2812_COUNT; i++) {
+            /* distance behind the head along the chain */
+            int32_t       dist = (int32_t)((head + AK_WS2812_COUNT - i) % AK_WS2812_COUNT);
+            PIXEL_COLOR_T c    = ws_hue((int32_t)s_ws_phase, WS_LEVEL);
+            buf[i]             = ws_scale(c, AK_WS2812_COUNT - dist, AK_WS2812_COUNT);
+        }
+        break;
+    }
+    case WSFX_BREATHE: {
+        /* triangular 0..LEVEL..0 over 32 phase steps */
+        int32_t       t = (int32_t)(s_ws_phase % 32U);
+        int32_t       lvl = (t < 16) ? t : (32 - t);          /* 0..16 */
+        PIXEL_COLOR_T c   = ws_hue((int32_t)(s_ws_phase / 32), WS_LEVEL);
+        c                 = ws_scale(c, lvl, 16);
+        for (uint32_t i = 0; i < AK_WS2812_COUNT; i++) {
+            buf[i] = c;
+        }
+        break;
+    }
+    case WSFX_RAINBOW: {
+        for (uint32_t i = 0; i < AK_WS2812_COUNT; i++) {
+            buf[i] = ws_hue((int32_t)(s_ws_phase + i * (WS_HUE_STEPS / AK_WS2812_COUNT)), WS_LEVEL);
+        }
+        break;
+    }
+    case WSFX_CHASE: {
+        uint32_t on = s_ws_phase % AK_WS2812_COUNT;
+        buf[on]     = ws_hue((int32_t)s_ws_phase, WS_LEVEL);
+        break;
+    }
+    case WSFX_BLINK: {
+        if (s_ws_phase & 1U) {
+            PIXEL_COLOR_T c = ws_hue((int32_t)(s_ws_phase / 2), WS_LEVEL);
+            for (uint32_t i = 0; i < AK_WS2812_COUNT; i++) {
+                buf[i] = c;
+            }
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    return s_ws_ok ? ws_send(buf) : OPRT_OK;
+}
+
+/* How many ms between animation frames, from the current effect's speed. */
+static uint32_t ws_frame_ms(void)
+{
+    if (s_ws_fx == WSFX_SOLID) {
+        return 1000U; /* static; slow refresh keeps the chain lit */
+    }
+    int32_t speed = s_ws_param[s_ws_fx]; /* 1..10 */
+    if (speed < WS_SPEED_MIN) {
+        speed = WS_SPEED_MIN;
+    }
+    if (speed > WS_SPEED_MAX) {
+        speed = WS_SPEED_MAX;
+    }
+    return (uint32_t)(360 - speed * 32); /* speed 1 -> 328ms, speed 10 -> 40ms */
+}
+
+/* Redraw the WS2812 mode UI (effect name + tunable parameter). */
+static void ws_draw_ui(OPERATE_RET rt)
+{
+    char line[32];
+    int32_t p = s_ws_param[s_ws_fx];
 
     clear_content();
-    ak_gfx_text(8, CONTENT_Y + 10, "WS2812 x7 @ SPI1 P4", AK_COL_WHITE, AK_COL_BLACK, 1);
-    ak_gfx_text(8, CONTENT_Y + 40, "Pattern:", AK_COL_GRAY, AK_COL_BLACK, 2);
-    ak_gfx_text(8, CONTENT_Y + 70, p->name, AK_COL_YELLOW, AK_COL_BLACK, 2);
+    ak_gfx_text(8, CONTENT_Y + 6, "WS2812 x7 @ SPI1 P4", AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text(8, CONTENT_Y + 26, "K1-K6: effect  EC11: tune", AK_COL_GRAY, AK_COL_BLACK, 1);
+
+    (void)snprintf(line, sizeof(line), "FX: %s", s_ws_fx_names[s_ws_fx]);
+    ak_gfx_text(8, CONTENT_Y + 54, line, AK_COL_YELLOW, AK_COL_BLACK, 2);
+
+    if (s_ws_fx == WSFX_SOLID) {
+        (void)snprintf(line, sizeof(line), "HUE: %ld/%d", (long)p, WS_HUE_STEPS);
+    } else {
+        (void)snprintf(line, sizeof(line), "SPEED: %ld/%d", (long)p, WS_SPEED_MAX);
+    }
+    ak_gfx_text(8, CONTENT_Y + 88, line, AK_COL_CYAN, AK_COL_BLACK, 2);
+
     if (!s_ws_ok || rt != OPRT_OK) {
-        ak_gfx_text(8, CONTENT_Y + 110, "DRIVER ERROR", AK_COL_RED, AK_COL_BLACK, 2);
+        ak_gfx_text(8, CONTENT_Y + 122, "DRIVER ERROR", AK_COL_RED, AK_COL_BLACK, 2);
     }
     lcd_flush();
-    emit("{\"v\":1,\"type\":\"selftest\",\"payload\":{\"mode\":\"WS2812\",\"pattern\":\"%s\",\"result\":%d}}\n",
-         p->name, rt);
+}
+
+/* Advance one animation frame + refresh the UI when needed. */
+static void ws_show(uint32_t step)
+{
+    (void)step;
+    OPERATE_RET rt = ws_render();
+    if (s_ws_ui_dirty) {
+        s_ws_ui_dirty = false;
+        ws_draw_ui(rt);
+        emit("{\"v\":1,\"type\":\"selftest\",\"payload\":{\"mode\":\"WS2812\",\"fx\":\"%s\",\"param\":%ld,"
+             "\"result\":%d}}\n",
+             s_ws_fx_names[s_ws_fx], (long)s_ws_param[s_ws_fx], rt);
+    }
+}
+
+/* Switch the active effect (K1-K6 while in the WS2812 test). */
+static void ws_select_fx(WS_FX_E fx)
+{
+    if (fx >= WSFX_COUNT || fx == s_ws_fx) {
+        return;
+    }
+    s_ws_fx       = fx;
+    s_ws_phase    = 0;
+    s_ws_ui_dirty = true;
+    ws_show(0);
+}
+
+/* Tune the current effect's parameter (EC11 rotation while in the WS2812 test). */
+static void ws_tune(int dir)
+{
+    int32_t *p = &s_ws_param[s_ws_fx];
+    if (s_ws_fx == WSFX_SOLID) {
+        *p = ((*p + dir) % WS_HUE_STEPS + WS_HUE_STEPS) % WS_HUE_STEPS;
+    } else {
+        *p += dir;
+        if (*p < WS_SPEED_MIN) {
+            *p = WS_SPEED_MIN;
+        }
+        if (*p > WS_SPEED_MAX) {
+            *p = WS_SPEED_MAX;
+        }
+    }
+    s_ws_ui_dirty = true;
+    ws_show(0);
 }
 
 /* ------------------------------------------------------------ UART mode */
@@ -621,6 +792,8 @@ static void mode_enter(TEST_MODE_E mode)
         lcd_show(0);
         break;
     case TEST_WS2812:
+        s_ws_phase    = 0;
+        s_ws_ui_dirty = true;
         ws_show(0);
         break;
     case TEST_UART:
@@ -644,7 +817,8 @@ static void switch_mode(void)
 {
     /* Turn LEDs off when leaving the WS2812 test so they don't stay lit. */
     if (s_mode == TEST_WS2812 && s_ws_ok) {
-        (void)ws_send(s_ws_patterns[0].colors);
+        PIXEL_COLOR_T off[AK_WS2812_COUNT] = {0};
+        (void)ws_send(off);
     }
     mode_enter((TEST_MODE_E)((s_mode + 1) % TEST_COUNT));
 }
@@ -670,10 +844,10 @@ static void mode_tick(uint32_t now)
         break;
 
     case TEST_WS2812:
-        if ((uint32_t)(now - s_last_tick) >= WS_PATTERN_MS) {
+        if ((uint32_t)(now - s_last_tick) >= ws_frame_ms()) {
             s_last_tick = now;
-            s_step++;
-            ws_show(s_step);
+            s_ws_phase++;
+            ws_show(s_ws_phase);
         }
         break;
 
@@ -881,7 +1055,8 @@ static OPERATE_RET ws2812_init(void)
 {
     PIXEL_DRIVER_CONFIG_T cfg = {
         .port     = AK_WS2812_SPI_PORT,
-        .line_seq = RGB_ORDER,
+        /* WS2812 wire protocol is GRB; RGB_ORDER swaps red<->green on real HW. */
+        .line_seq = GRB_ORDER,
     };
     OPERATE_RET rt = tdd_ws2812_driver_register(WS_DEV_NAME, &cfg);
     if (rt != OPRT_OK) {
@@ -964,6 +1139,9 @@ static void user_main(void)
                 if (s_mode == TEST_INPUT) {
                     input_report(&s_inputs[i], ev, held);
                     s_input_dirty = true;
+                } else if (s_mode == TEST_WS2812 && ev == EV_DOWN && i < 6U) {
+                    /* K1..K6 pick the WS2812 effect. */
+                    ws_select_fx((WS_FX_E)i);
                 }
             }
         }
@@ -971,9 +1149,13 @@ static void user_main(void)
         /* Scan the EC11 rotation; report + redraw only in the INPUT test. */
         {
             int dir = scan_encoder(now);
-            if (dir != 0 && s_mode == TEST_INPUT) {
-                enc_report(dir);
-                s_input_dirty = true;
+            if (dir != 0) {
+                if (s_mode == TEST_INPUT) {
+                    enc_report(dir);
+                    s_input_dirty = true;
+                } else if (s_mode == TEST_WS2812) {
+                    ws_tune(dir);
+                }
             }
         }
 
