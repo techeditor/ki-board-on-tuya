@@ -19,7 +19,6 @@
 #include "ak_board_io.h"
 #include "ak_battery.h"
 #include "ak_leds.h"
-#include "ak_display.h"
 #include "ak_features.h"
 #include "ak_font8x8.h"
 #include "ak_asr.h"
@@ -244,7 +243,6 @@ static bool                s_center_long_consumed;
 static bool     s_test_active;
 static uint8_t  s_test_key_mask;      /* bit i set while K(i+1) is held; bit 6 = enc */
 static int32_t  s_test_enc_count;     /* net EC11 detents since entering */
-static int32_t  s_test_hue;           /* EC11-tuned colour for lit key LEDs */
 static uint32_t s_test_ws_phase;      /* WS2812 effect animation phase */
 /* LED effect mode in the test page (K1-K6 pick, EC11 tunes), like the bringup
  * full_selftest. SOLID/COMET/BREATHE/RAINBOW/CHASE/BLINK = 0..5. */
@@ -668,19 +666,26 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
 #if AK_ENABLE_DISPLAY
     if (s_pending_confirm &&
         (role == AK_KEY_ROLE_CANCEL || role == AK_KEY_ROLE_CONFIRM)) {
-        static bool s_pc_long_fired;
+        /* Per-key long-press guard (K4 and K6 tracked separately) so one key's
+         * long press cannot suppress the other's click, and a long press is
+         * never mistaken for a click on release. */
+        static bool s_pc_long_fired[AK_KEYMAP_SLOTS];
+        int slot = ak_keymap_slot_for_id(id);
+        bool *long_fired = (slot >= 0) ? &s_pc_long_fired[slot] : &s_pc_long_fired[0];
         if (event == AK_INPUT_EVENT_DOWN) {
-            s_pc_long_fired = false;
+            *long_fired = false;
         } else if (event == AK_INPUT_EVENT_LONG) {
+            /* Any long press marks this press so the following UP is NOT a click.
+             * K4 long = cancel_all (+exit); K6 long has no action but must still
+             * block the release from being read as a confirm. */
+            *long_fired = true;
             if (role == AK_KEY_ROLE_CANCEL) {
-                s_pc_long_fired = true;
                 dispatch_edit_action(id, "cancel_all");
                 ak_pending_confirm_exit();
                 ak_status_bar_set("Input cancelled", AK_COL_ORANGE);
             }
-            /* K6 long has no action; ignore. */
         } else if (event == AK_INPUT_EVENT_UP) {
-            if (!s_pc_long_fired) {
+            if (!*long_fired) {
                 if (role == AK_KEY_ROLE_CANCEL) {
                     dispatch_edit_action(id, "cancel_char"); /* delete one char */
                 } else { /* CONFIRM */
@@ -689,7 +694,7 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
                     ak_status_bar_set("Input confirmed", AK_COL_GREEN);
                 }
             }
-            s_pc_long_fired = false;
+            *long_fired = false;
         }
         ak_render_status();
         return; /* swallow: no raw edge while in pending-confirm */
@@ -1713,7 +1718,6 @@ static void ak_test_run(void)
     s_test_exit_req     = false;
     s_test_key_mask     = 0U;
     s_test_enc_count    = 0;
-    s_test_hue          = 0;
     s_test_ws_phase     = 0U;
     s_test_uart_rx      = 0U;
     s_test_fx           = 0;            /* start on SOLID */
@@ -2008,7 +2012,13 @@ static void ak_voice_ui_tick(uint32_t now_ms)
             ak_chat_history_add(&s_sessions[s_selected_session], s_asr_pending_text, false);
             ak_status_bar_set("Confirm: K6 / Cancel: K4", AK_COL_GREEN);
             /* Text is now in the PC composer; enter pending-confirm so K4/K6
-             * become edit keys and the hint LEDs light. */
+             * become edit keys and the hint LEDs light. A new result arriving
+             * while a previous one is still pending (user re-dictated without
+             * confirming) cleanly supersedes it: exit the old state first so the
+             * hint LEDs and animation phase reset rather than carrying over. */
+            if (s_pending_confirm) {
+                ak_pending_confirm_exit();
+            }
             ak_pending_confirm_enter(now_ms);
         } else if (strcmp(s_asr_pending_text, "asr_empty") == 0) {
             ak_status_bar_set("Warning: no speech", AK_COL_ORANGE);

@@ -547,6 +547,21 @@ static void test_gesture(void)
           "release after long emits nothing");
     CHECK(ak_gesture_tick(&g, 2000) == AK_GESTURE_NONE,
           "long leaves no pending single");
+
+    /* --- single immediately followed by a long press: the single is owed --- */
+    ak_gesture_init(&g);
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, 0, 0);
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, 20, 20) == AK_GESTURE_NONE,
+          "first short release arms a pending single");
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, 60, 0);           /* second press begins in window */
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_LONG, 900, 840) == AK_GESTURE_LONG,
+          "second press held long resolves as long");
+    CHECK(ak_gesture_tick(&g, 905) == AK_GESTURE_SINGLE,
+          "the preempted single is still delivered on the next tick");
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, 1000, 940) == AK_GESTURE_NONE,
+          "release of that long press emits nothing");
+    CHECK(ak_gesture_tick(&g, 2000) == AK_GESTURE_NONE,
+          "no further gesture owed");
 }
 
 static void test_keymap(void)

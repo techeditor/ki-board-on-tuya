@@ -39,7 +39,6 @@ set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_leds.c
     ${AK_COMMON_PATH}/src/ak_protocol.c
     ${AK_COMMON_PATH}/src/ak_rx.c
-    ${AK_COMMON_PATH}/src/ak_display.c
     ${AK_COMMON_PATH}/src/ak_gfx.c
     ${AK_COMMON_PATH}/src/ak_statuslcd.c
 )

@@ -117,6 +117,7 @@ typedef struct {
     bool     pending_single; /* a first short release is waiting out the window */
     uint32_t first_up_ms;    /* when that release happened */
     bool     press_had_long; /* current press already fired LONG */
+    bool     deferred_single;/* a pending single preempted by a long press, owed on the next tick */
 } ak_gesture_state_t;
 
 /** Reset a gesture classifier to idle. */

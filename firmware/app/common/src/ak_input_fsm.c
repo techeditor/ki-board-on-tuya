@@ -121,9 +121,10 @@ bool ak_dclick_feed(ak_dclick_t *dc, ak_input_event_t event, uint32_t now_ms, ui
 
 void ak_gesture_init(ak_gesture_state_t *g)
 {
-    g->pending_single = false;
-    g->first_up_ms    = 0;
-    g->press_had_long = false;
+    g->pending_single  = false;
+    g->first_up_ms     = 0;
+    g->press_had_long  = false;
+    g->deferred_single = false;
 }
 
 ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
@@ -138,9 +139,15 @@ ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
         return AK_GESTURE_NONE;
 
     case AK_INPUT_EVENT_LONG:
-        /* Long press resolves immediately and cancels any pending single. */
+        /* Long press resolves immediately. If a single was still pending (a
+         * short click immediately followed by a long press on the same key),
+         * that click was real and is owed: defer it to the next tick rather
+         * than dropping it. The LONG is returned now. */
         g->press_had_long = true;
-        g->pending_single = false;
+        if (g->pending_single) {
+            g->pending_single  = false;
+            g->deferred_single = true;
+        }
         return AK_GESTURE_LONG;
 
     case AK_INPUT_EVENT_UP:
@@ -167,6 +174,11 @@ ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
 
 ak_gesture_t ak_gesture_tick(ak_gesture_state_t *g, uint32_t now_ms)
 {
+    /* A single preempted by a following long press is owed first. */
+    if (g->deferred_single) {
+        g->deferred_single = false;
+        return AK_GESTURE_SINGLE;
+    }
     if (g->pending_single &&
         (uint32_t)(now_ms - g->first_up_ms) > AK_GESTURE_DCLICK_MS) {
         g->pending_single = false;
