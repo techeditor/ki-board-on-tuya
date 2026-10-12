@@ -47,7 +47,96 @@
 > ⚠️ tyutool 的确切子命令/参数以 `tyutool_cli --help` 为准，如不同请调整脚本中 `write`/`monitor` 行。
 > 拉下来的 `fw.bin` 已被 `.gitignore` 忽略（`*.bin`），不入库。
 
+## 设备 License 注入（新方案：通用 bin + 烧录后 USB 下发）
+
+> 推荐的量产方案。替代下方 `flash-licensed.ps1` 的「每别名各编一个 bin」老方案。
+
+**模型**：EC2 编译出**不含真 License 的通用 bin**（`ak_tuya_authkey.h` 的 UUID/AuthKey
+为占位，PID 保留真值、编译期固定）。烧录后由本机脚本经 **USB/UART0** 把每台设备各自的
+UUID/AuthKey 下发给固件，`tuya_authorize_write()` 写入持久化存储，之后每次开机
+`tuya_authorize_read()` 读出并**优先于编译期占位**。一个 bin 烧所有板，每块板现场拿到各自身份。
+
+License 写入固件侧**只接受 USB/UART 传输**（BLE 一律拒），烧录用的 USB 线天然满足。
+
+### 1. 准备 key 文件
+把 `licenses.json.example` 复制成 `licenses.json`（已被 `.gitignore` 忽略，**切勿提交**），填入真值：
+```json
+{
+  "licenses": [
+    {"alias":"Orange","product_id":"raqcmxucdchre5ga","uuid":"<20字符>","authkey":"<32字符>"},
+    {"alias":"Purple","product_id":"raqcmxucdchre5ga","uuid":"<20字符>","authkey":"<32字符>"}
+  ]
+}
+```
+- `product_id`：固件编译期的 PID，脚本用它**校验**（防把一套 License 下给错误 build）。
+- `uuid` 20 字符、`authkey` 32 字符；`alias` 用来选用哪条。
+
+### 2. 一条命令：烧录 + 配发（flash-and-provision.ps1）
+```powershell
+# 烧通用 bin 到 COM12，设备启动后自动下发 Orange 的 License 并校验
+.\flash-and-provision.ps1 -Port COM12 -Alias Orange
+
+# ssh 别名是 devbox、配发完顺带开监视看联云
+.\flash-and-provision.ps1 -Port COM12 -Alias Purple -SshHost devbox -Monitor
+
+# 设备已烧过通用 bin，只补发 License（跳过烧录）
+.\flash-and-provision.ps1 -Port COM12 -Alias Orange -SkipFlash
+```
+内部顺序：`flash.ps1` 烧通用 bin → 等 tyutool 释放串口 + 设备启动（`-SettleSec`，默认 6s）
+→ `provision-license.ps1` 握手下发并校验。烧录与配发**共用同一 COM 口、严格串行**。
+
+### 3. 只配发不烧（provision-license.ps1，可单用）
+```powershell
+.\provision-license.ps1 -Port COM12 -Alias Orange
+.\provision-license.ps1 -Port COM12 -KeyFile C:\keys\licenses.json -Alias Purple
+```
+流程：打开 COM@115200 → 发 `hello` 等 `hello_ack` → 发 `license` 帧 → 等
+`license_status:written` → 发 `license_read` 核对回显 UUID。**AuthKey 明文不打印**，只显示长度 + UUID。
+
+| 参数（flash-and-provision） | 默认 | 说明 |
+|------|------|------|
+| `-Port` | 必填 | 烧录+配发共用的串口，如 COM12 |
+| `-Alias` | （单条时自动） | 选 licenses.json 的哪条 |
+| `-App` | `firmware/app` | 要烧的产品固件 app 目录 |
+| `-KeyFile` | `scripts\licenses.json` | key 文件路径 |
+| `-SkipFlash` | 关 | 只配发不烧 |
+| `-Build` | 关 | 透传给 flash.ps1，先在 devbox 重编 |
+| `-Monitor` | 关 | 配发成功后开串口监视 |
+| `-SettleSec` | 6 | 烧完到配发之间等端口释放+启动的秒数 |
+| `-SshHost` | `devbox-ssm` | SSH 别名 |
+| `-ForceProvision` | 关 | 强制重写 License（即使设备已持有目标 UUID）|
+| `-NoSkipIfMatch` | 关 | 关闭幂等跳过，总是执行写入 |
+
+### 4. 重复烧录（key 没变自动跳过写）
+
+重烧**通用 bin 不会清掉已下发的 License**——它写在持久化存储（TAL KV），
+固件 bin 只覆盖应用分区。所以 key 没变时你有三种做法：
+
+| 想要 | 命令 | 行为 |
+|------|------|------|
+| **幂等（推荐，默认）** | `.\flash-and-provision.ps1 -Port COM12 -Alias Orange` | 烧 bin → `license_read` 读设备现有 UUID → 和目标**一致就跳过写**（只读确认，几百 ms），不一致/为空才写 |
+| **只烧不配发** | `.\flash.ps1 -Port COM12 -App firmware/app` | 纯烧 bin，完全不碰 License（你确信 License 还在时用）|
+| **强制重写（换 key）** | `.\flash-and-provision.ps1 -Port COM12 -Alias Orange -ForceProvision` | 不管设备里有啥，强制重写 License |
+
+- `provision-license.ps1` 默认 `-SkipIfMatch` 开：写入前先 `license_read`，UUID 匹配就报
+  `already holds this license -- skipping write` 并以 0 退出。因此**同一条命令反复跑**：
+  key 没变时近似"只 flash"，key 变了（换 alias / 改了 JSON）时它检测到不一致自动重写。
+- 要无条件写用 `-ForceProvision`（覆盖 SkipIfMatch）；要关掉幂等但不强制，用
+  `-NoSkipIfMatch`（provision 脚本层）或 `flash-and-provision -NoSkipIfMatch`。
+
+> ⚠️ 若做过 QIO **整片擦除**或触发过三次快速上电 `tuya_iot_reset`，前者可能连 License 区
+> 一起清；此时幂等预检会读不到 License 而自动改为写入——这正是默认开着幂等更稳的原因，
+> 不要盲目依赖"只 flash.ps1"。
+
+> ⚠️ 这是运行期注入（路径 C），要求固件是支持 UART0 `license` 命令的产品固件
+> （`firmware/app` 的 DUAL/UART profile）。bring-up/早期固件不含该命令，无法用此法。
+> ⚠️ 串口 PowerShell 用 .NET `System.IO.Ports.SerialPort`（Windows 自带，无需额外依赖）。
+
 ## flash-licensed.ps1 — 按设备别名选择已编译固件
+
+> ⚠️ **旧方案（编译期嵌入，路径 A）**：每个别名在 devbox **各编一个把 License 嵌进去的 bin**，
+> 本脚本只负责按别名选对那个预编 bin 来烧。已被上面的「通用 bin + USB 下发」方案取代——
+> 新设备请优先用 `flash-and-provision.ps1`。此脚本保留用于复现历史锁定发布（v0.1.8 等）。
 
 这是独立包装脚本，**不修改 `flash.ps1`**。它先按 `Orange` / `Purple` 选择一个
 明确的 QIO 固件，通过 SCP 下载并校验 SHA256，然后调用现有

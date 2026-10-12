@@ -66,6 +66,9 @@ $RECYCLE.BIN/
 *.bak
 *.swp
 
+# ===== Kiro Crew CLI runtime lock (per-machine, never committed) =====
+.kiro/settings/.kirocrew-cli-settings.lock
+
 
 .playwright-mcp/
 
@@ -103,6 +106,10 @@ companion/src-tauri/target/release/bundle/
 **/*authkey*
 **/*auth_key*
 uuid_authkey*.txt
+# Device license list for provision-license.ps1: the filled licenses.json holds
+# real UUID/AuthKey and is NEVER committed; keep ONLY the template tracked.
+scripts/licenses.json
+!scripts/licenses.json.example
 # FP-3 Tuya license header: the real ak_tuya_authkey.h is ignored (matches
 # **/*authkey* above); keep ONLY the placeholder template tracked.
 !**/ak_tuya_authkey.h.example
