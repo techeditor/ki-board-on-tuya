@@ -86,9 +86,10 @@ Companion 发：
 ```
 
 - `id`：`k1`..`k6`（6 个热插拔茶轴按键，v0.3）或 `enc`（EC11 旋钮按下，v0.3）
-- `action`：`down` / `up` / `long` / `click` / `double`
+- `action`：`down` / `up` / `long` / `click` / `double` / `cancel_char` / `cancel_all` / `confirm`
   - `down` / `up` / `long`：原始边沿（即时上报），用于需要立即响应的键（如 K5 语音 PTT：`down` 立即开始录音）。
   - `click` / `double`：**固件识别的最终手势**（延迟判定，方案 X）。短按释放后固件等待一个双击窗口（默认 250ms），窗口内无第二击 → `click`（单击），有 → `double`（双击）。用于单击/双击动作不同的键（K1-K3：单击=切对话 `Alt+N`，双击=切实例 `Ctrl+N`），避免两者都触发。
+  - `cancel_char` / `cancel_all` / `confirm`：**待确认态（post-ASR）编辑意图**。语音识别文本注入 PC 输入框后固件进入待确认态，此时 K4/K6 发这些意图，Companion 注入对应 PC 编辑键：`cancel_char`→退格（删一字，K4 单击）、`cancel_all`→清空输入框（Ctrl+A 后 Delete，K4 长按，并退出待确认态）、`confirm`→回车提交（K6 单击，并退出待确认态）。`id` 仍是物理键（默认 `k4`/`k6`），动作由固件按角色+待确认态判定。
   - 一个键用 `down`/`up`/`long` 还是 `click`/`double`，由固件 keymap 的手势模式决定（见交互设计 §0.4）。
 - `held_ms`：按下时长（`up`/`long` 时有意义）
 - v0.2 为 `k1`..`k5`；v0.3 扩到 6 键，并把 EC11 旋钮按下作为 `id:"enc"` 的 `key` 事件上报

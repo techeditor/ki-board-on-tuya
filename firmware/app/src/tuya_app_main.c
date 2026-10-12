@@ -217,6 +217,14 @@ typedef enum {
 
 static ak_voice_ui_state_t s_voice_ui_state = AK_VOICE_UI_IDLE;
 static uint32_t            s_voice_ui_state_since_ms;
+/* Post-ASR pending-confirm state (firmware-led, scheme "乙"): after a successful
+ * recognition the text is already in the PC composer; the firmware enters this
+ * state so K4/K6 become edit keys (cancel_char / cancel_all / confirm, sent to
+ * the Companion to inject) and LED4/LED6 give the red-breathing / green-blink
+ * hints. Cleared on confirm, cancel-all, or a timeout. */
+static bool                s_pending_confirm;
+static uint32_t            s_pending_confirm_since_ms;
+#define PENDING_CONFIRM_TIMEOUT_MS 20000U
 /* ASR callbacks run on the AI event thread. They copy one complete result and
  * publish the volatile flag last; the app thread consumes it before drawing. */
 static char                s_asr_pending_text[ASR_TRANSCRIPT_MAX];
@@ -514,6 +522,11 @@ static void send_device_settings(void);
 static void ak_voice_ui_set_state(ak_voice_ui_state_t state);
 static void ak_voice_ui_queue_result(const char *text, bool is_error);
 static void ak_voice_ui_tick(uint32_t now_ms);
+static void ak_pending_confirm_enter(uint32_t now_ms);
+static void ak_pending_confirm_exit(void);
+static void ak_pending_confirm_tick(uint32_t now_ms);
+static void ak_status_bar_set(const char *text, uint16_t color);
+static void dispatch_edit_action(const char *id, const char *action);
 static void ak_select_session_key(const char *id);
 static void ak_render_status(void);
 static void ak_settings_draw(void);
@@ -591,6 +604,20 @@ static void dispatch_key_gesture(const char *id, ak_key_role_t role, ak_gesture_
     PR_DEBUG("gesture %s %s", id, action);
 }
 
+/* Emit a post-ASR edit intent (cancel_char / cancel_all / confirm) as a key
+ * frame; the Companion injects the matching PC edit key. */
+static void dispatch_edit_action(const char *id, const char *action)
+{
+    char     frame[FRAME_BUFFER_SIZE];
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(
+        frame, ak_proto_key(frame, sizeof(frame), sequence, id, action, 0U));
+    PR_DEBUG("edit %s %s", id, action);
+}
+
 /* Input event -> local settings UI or JSONL frame on the active transport. */
 static void on_input_event(ak_input_kind_t kind, const char *id,
                            ak_input_event_t event, uint32_t held_ms)
@@ -621,6 +648,42 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
         }
         return;
     }
+
+    /* Pending-confirm (post-ASR): K4/K6 become edit keys. Intercept BEFORE the
+     * raw edge is forwarded so no stray down/up leaks while confirming.
+     * K4 (cancel): long = cancel_all (+exit), click = cancel_char.
+     * K6 (confirm): click = confirm (+exit). A LONG sets a per-event flag so the
+     * following UP is not also treated as a click. */
+#if AK_ENABLE_DISPLAY
+    if (s_pending_confirm &&
+        (role == AK_KEY_ROLE_CANCEL || role == AK_KEY_ROLE_CONFIRM)) {
+        static bool s_pc_long_fired;
+        if (event == AK_INPUT_EVENT_DOWN) {
+            s_pc_long_fired = false;
+        } else if (event == AK_INPUT_EVENT_LONG) {
+            if (role == AK_KEY_ROLE_CANCEL) {
+                s_pc_long_fired = true;
+                dispatch_edit_action(id, "cancel_all");
+                ak_pending_confirm_exit();
+                ak_status_bar_set("Input cancelled", AK_COL_ORANGE);
+            }
+            /* K6 long has no action; ignore. */
+        } else if (event == AK_INPUT_EVENT_UP) {
+            if (!s_pc_long_fired) {
+                if (role == AK_KEY_ROLE_CANCEL) {
+                    dispatch_edit_action(id, "cancel_char"); /* delete one char */
+                } else { /* CONFIRM */
+                    dispatch_edit_action(id, "confirm");
+                    ak_pending_confirm_exit();
+                    ak_status_bar_set("Input confirmed", AK_COL_GREEN);
+                }
+            }
+            s_pc_long_fired = false;
+        }
+        ak_render_status();
+        return; /* swallow: no raw edge while in pending-confirm */
+    }
+#endif
 
     /* EDGE keys: forward the raw edge as before. */
     ak_emit_input_frame(kind, id, event, held_ms);
@@ -1260,6 +1323,7 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
         }
         if (event == AK_INPUT_EVENT_LONG) {
             s_center_long_consumed = true;
+            ak_pending_confirm_exit(); /* drop pending-confirm + its hint LEDs */
             s_settings_active = true;
             s_settings_confirmed = false;
             ak_settings_draw();
@@ -1778,6 +1842,59 @@ static void ak_voice_ui_set_state(ak_voice_ui_state_t state)
     ak_render_status();
 }
 
+/* ---- Post-ASR pending-confirm (firmware-led) -----------------------------
+ * Enter after a successful recognition; LED4 (K4=cancel) breathes red and LED6
+ * (K6=confirm) blinks green to cue the gestures. ak_pending_confirm_tick drives
+ * the animation; exit clears both LEDs. The lit LEDs are indices 3 (K4) and 5
+ * (K6) per the LEDn<->Kn mapping (§0.5). */
+#define AK_PC_LED_K4 3U /* LED4 under K4 */
+#define AK_PC_LED_K6 5U /* LED6 under K6 */
+
+static void ak_pending_confirm_enter(uint32_t now_ms)
+{
+    s_pending_confirm          = true;
+    s_pending_confirm_since_ms = now_ms;
+}
+
+static void ak_pending_confirm_exit(void)
+{
+    if (!s_pending_confirm) {
+        return;
+    }
+    s_pending_confirm = false;
+    if (ak_leds_available()) {
+        ak_leds_set(AK_PC_LED_K4, 0, 0, 0);
+        ak_leds_set(AK_PC_LED_K6, 0, 0, 0);
+        (void)ak_leds_show();
+    }
+}
+
+/* Animate the two hint LEDs while in pending-confirm: K4 red breathing (long =
+ * cancel-all), K6 green single blink (click = confirm). Also times the state
+ * out. Called from the main loop. */
+static void ak_pending_confirm_tick(uint32_t now_ms)
+{
+    if (!s_pending_confirm) {
+        return;
+    }
+    if ((uint32_t)(now_ms - s_pending_confirm_since_ms) >= PENDING_CONFIRM_TIMEOUT_MS) {
+        ak_pending_confirm_exit();
+        return;
+    }
+    if (!ak_leds_available()) {
+        return;
+    }
+    uint32_t t = now_ms - s_pending_confirm_since_ms;
+    /* K4 red breathing: triangle 0..48..0 over ~1.6s. */
+    uint32_t bp    = t % 1600U;
+    uint32_t level = bp < 800U ? (bp * 48U / 800U) : ((1600U - bp) * 48U / 800U);
+    ak_leds_set(AK_PC_LED_K4, (uint8_t)level, 0, 0);
+    /* K6 green single blink: ~150ms on at the start of each 1000ms period. */
+    bool on = (t % 1000U) < 150U;
+    ak_leds_set(AK_PC_LED_K6, 0, on ? 48U : 0U, 0);
+    (void)ak_leds_show();
+}
+
 static void ak_voice_ui_queue_result(const char *text, bool is_error)
 {
     if (text == NULL) {
@@ -1797,7 +1914,10 @@ static void ak_voice_ui_tick(uint32_t now_ms)
         bool is_error = s_asr_result_is_error;
         if (!is_error) {
             ak_chat_history_add(&s_sessions[s_selected_session], s_asr_pending_text, false);
-            ak_status_bar_set("ASR input received", AK_COL_GREEN);
+            ak_status_bar_set("Confirm: K6 / Cancel: K4", AK_COL_GREEN);
+            /* Text is now in the PC composer; enter pending-confirm so K4/K6
+             * become edit keys and the hint LEDs light. */
+            ak_pending_confirm_enter(now_ms);
         } else if (strcmp(s_asr_pending_text, "asr_empty") == 0) {
             ak_status_bar_set("Warning: no speech", AK_COL_ORANGE);
         } else {
@@ -2472,6 +2592,11 @@ static void user_main(void)
                 dispatch_key_gesture(id, s_keymap.entries[gi].role, g);
             }
         }
+
+#if AK_ENABLE_DISPLAY
+        /* Animate the post-ASR pending-confirm hint LEDs + time the state out. */
+        ak_pending_confirm_tick(now);
+#endif
 
         uint8_t rx[64];
         int     got = ak_transport_read(rx, sizeof(rx));
