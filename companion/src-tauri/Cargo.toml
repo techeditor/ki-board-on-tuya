@@ -1,6 +1,6 @@
 [package]
 name = "agentic-keyboard-companion"
-version = "0.1.0"
+version = "0.3.0"
 description = "Companion app for the T5AI-Core agentic keyboard"
 authors = ["Kiro"]
 edition = "2021"
