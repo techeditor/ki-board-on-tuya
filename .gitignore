@@ -113,3 +113,5 @@ ref_projects/
 # ===== Nested independent repo (has its own .git; managed separately) =====
 ki-board/
 deck/
+
+licenses.json
