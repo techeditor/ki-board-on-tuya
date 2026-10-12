@@ -86,4 +86,56 @@ void ak_dclick_init(ak_dclick_t *dc);
  */
 bool ak_dclick_feed(ak_dclick_t *dc, ak_input_event_t event, uint32_t now_ms, uint32_t held_ms);
 
+/* --- Gesture classifier (single / double / long, deferred) ------------------
+ * Layered on the FSM event stream like ak_dclick, but it emits a FINAL gesture
+ * for EVERY press, not just double-clicks: SINGLE, DOUBLE, or LONG. A short
+ * release is held for AK_GESTURE_DCLICK_MS to see whether a second short press
+ * follows (DOUBLE); if none arrives in the window, SINGLE is emitted. LONG is
+ * emitted immediately on the FSM LONG edge and never participates in a double.
+ *
+ * This is "scheme X" (deferred single): the single-click is delayed by up to
+ * the double-click window so single vs double can be told apart cleanly. Use it
+ * for keys whose single and double actions differ and must not both fire (K1-K3:
+ * single = switch chat, double = switch instance). Keys that need an immediate
+ * edge (K5 push-to-talk) should NOT use this — poll the raw FSM events instead.
+ *
+ * Usage: feed every FSM event into ak_gesture_feed(), AND call ak_gesture_tick()
+ * every poll so a pending single can time out when no further event arrives.
+ * Both return the resolved gesture (or AK_GESTURE_NONE). */
+#ifndef AK_GESTURE_DCLICK_MS
+#define AK_GESTURE_DCLICK_MS 250U /* window to wait for a second short press */
+#endif
+
+typedef enum {
+    AK_GESTURE_NONE = 0,
+    AK_GESTURE_SINGLE,
+    AK_GESTURE_DOUBLE,
+    AK_GESTURE_LONG,
+} ak_gesture_t;
+
+typedef struct {
+    bool     pending_single; /* a first short release is waiting out the window */
+    uint32_t first_up_ms;    /* when that release happened */
+    bool     press_had_long; /* current press already fired LONG */
+} ak_gesture_state_t;
+
+/** Reset a gesture classifier to idle. */
+void ak_gesture_init(ak_gesture_state_t *g);
+
+/**
+ * Feed one FSM event (DOWN/UP/LONG/NONE). Returns the resolved gesture when one
+ * completes this call (DOUBLE on the second short release, LONG on a long-press
+ * edge), else AK_GESTURE_NONE. A first short release does NOT resolve here — it
+ * arms the window and resolves later via ak_gesture_tick().
+ */
+ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
+                             uint32_t now_ms, uint32_t held_ms);
+
+/**
+ * Call every poll tick. Returns AK_GESTURE_SINGLE once when a pending first
+ * short release has waited out AK_GESTURE_DCLICK_MS with no second press, else
+ * AK_GESTURE_NONE.
+ */
+ak_gesture_t ak_gesture_tick(ak_gesture_state_t *g, uint32_t now_ms);
+
 #endif /* AK_INPUT_FSM_H */

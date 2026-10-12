@@ -31,6 +31,7 @@ set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_reset_netcfg.c
     ${AK_COMMON_PATH}/src/ak_wifi.c
     ${AK_COMMON_PATH}/src/ak_input_fsm.c
+    ${AK_COMMON_PATH}/src/ak_keymap.c
     ${AK_COMMON_PATH}/src/ak_voice_route.c
     ${AK_COMMON_PATH}/src/ak_settings.c
     ${AK_COMMON_PATH}/src/ak_input.c

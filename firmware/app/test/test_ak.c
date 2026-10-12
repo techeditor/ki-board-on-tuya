@@ -11,6 +11,7 @@
 #include "ak_icons16.h"
 #include "ak_session_icons.h"
 #include "ak_input_fsm.h"
+#include "ak_keymap.h"
 #include "ak_protocol.h"
 #include "ak_rx.h"
 #include "ak_settings.h"
@@ -506,6 +507,75 @@ static void test_voice_route(void)
     CHECK_STR(ak_voice_source_str(AK_VOICE_SYSTEM), "system", "system source string");
 }
 
+static void test_gesture(void)
+{
+    printf("test_gesture\n");
+    ak_gesture_state_t g;
+
+    /* --- single: one short press, no second within the window ------------- */
+    ak_gesture_init(&g);
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, 0, 0) == AK_GESTURE_NONE,
+          "down alone resolves nothing");
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, 30, 30) == AK_GESTURE_NONE,
+          "first short release defers (no immediate single)");
+    /* still inside the window -> no resolution yet */
+    CHECK(ak_gesture_tick(&g, 30 + AK_GESTURE_DCLICK_MS) == AK_GESTURE_NONE,
+          "tick at window edge does not resolve early");
+    /* past the window -> single */
+    CHECK(ak_gesture_tick(&g, 30 + AK_GESTURE_DCLICK_MS + 1) == AK_GESTURE_SINGLE,
+          "tick past window resolves single");
+    CHECK(ak_gesture_tick(&g, 30 + AK_GESTURE_DCLICK_MS + 100) == AK_GESTURE_NONE,
+          "single resolves exactly once");
+
+    /* --- double: second short press within the window --------------------- */
+    ak_gesture_init(&g);
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, 0, 0);
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, 20, 20) == AK_GESTURE_NONE,
+          "first release of a double defers");
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, 60, 0);
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, 90, 30) == AK_GESTURE_DOUBLE,
+          "second short release inside window = double");
+    CHECK(ak_gesture_tick(&g, 90 + AK_GESTURE_DCLICK_MS + 10) == AK_GESTURE_NONE,
+          "double consumed the pending single");
+
+    /* --- long: resolves immediately, never a double --------------------- */
+    ak_gesture_init(&g);
+    ak_gesture_feed(&g, AK_INPUT_EVENT_DOWN, 0, 0);
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_LONG, 800, 800) == AK_GESTURE_LONG,
+          "long press resolves to long immediately");
+    CHECK(ak_gesture_feed(&g, AK_INPUT_EVENT_UP, 900, 900) == AK_GESTURE_NONE,
+          "release after long emits nothing");
+    CHECK(ak_gesture_tick(&g, 2000) == AK_GESTURE_NONE,
+          "long leaves no pending single");
+}
+
+static void test_keymap(void)
+{
+    printf("test_keymap\n");
+    ak_keymap_t map;
+    ak_keymap_init_defaults(&map);
+
+    CHECK(ak_keymap_slot_for_id("k1") == 0 && ak_keymap_slot_for_id("k6") == 5 &&
+              ak_keymap_slot_for_id("enc") == 6,
+          "slot ids map k1..k6/enc to 0..6");
+    CHECK(ak_keymap_slot_for_id("k7") == -1 && ak_keymap_slot_for_id(NULL) == -1,
+          "unknown id has no slot");
+
+    /* v0.3 defaults: K5=voice, K4=cancel, K6=confirm, K1-K3=chat. */
+    CHECK(ak_keymap_role(&map, "k5") == AK_KEY_ROLE_VOICE, "k5 is voice");
+    CHECK(ak_keymap_role(&map, "k4") == AK_KEY_ROLE_CANCEL, "k4 is cancel");
+    CHECK(ak_keymap_role(&map, "k6") == AK_KEY_ROLE_CONFIRM, "k6 is confirm");
+    CHECK(ak_keymap_role(&map, "k1") == AK_KEY_ROLE_CHAT, "k1 is chat");
+
+    /* K1-K3 use deferred single/double; voice uses immediate edges. */
+    CHECK(ak_keymap_gesture(&map, "k1") == AK_KEY_GESTURE_SINGLE_DOUBLE,
+          "k1 uses single/double detection");
+    CHECK(ak_keymap_gesture(&map, "k5") == AK_KEY_GESTURE_EDGE,
+          "k5 voice uses immediate edges");
+    CHECK(ak_keymap_role(&map, "zzz") == AK_KEY_ROLE_NONE,
+          "unknown id defaults to no role");
+}
+
 int main(void)
 {
     printf("== ak host tests ==\n");
@@ -513,6 +583,8 @@ int main(void)
     test_long_press();
     test_debounce_bounce();
     test_dclick();
+    test_gesture();
+    test_keymap();
     test_settings();
     test_voice_route();
     test_protocol();

@@ -118,3 +118,59 @@ bool ak_dclick_feed(ak_dclick_t *dc, ak_input_event_t event, uint32_t now_ms, ui
         return false;
     }
 }
+
+void ak_gesture_init(ak_gesture_state_t *g)
+{
+    g->pending_single = false;
+    g->first_up_ms    = 0;
+    g->press_had_long = false;
+}
+
+ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
+                             uint32_t now_ms, uint32_t held_ms)
+{
+    (void)held_ms;
+
+    switch (event) {
+    case AK_INPUT_EVENT_DOWN:
+        /* New press begins; assume short until a LONG says otherwise. */
+        g->press_had_long = false;
+        return AK_GESTURE_NONE;
+
+    case AK_INPUT_EVENT_LONG:
+        /* Long press resolves immediately and cancels any pending single. */
+        g->press_had_long = true;
+        g->pending_single = false;
+        return AK_GESTURE_LONG;
+
+    case AK_INPUT_EVENT_UP:
+        if (g->press_had_long) {
+            /* Release of a long press: already resolved as LONG, consume it. */
+            g->press_had_long = false;
+            return AK_GESTURE_NONE;
+        }
+        if (g->pending_single &&
+            (uint32_t)(now_ms - g->first_up_ms) <= AK_GESTURE_DCLICK_MS) {
+            /* Second short release inside the window -> double. */
+            g->pending_single = false;
+            return AK_GESTURE_DOUBLE;
+        }
+        /* First short release: arm the window; SINGLE resolves on tick. */
+        g->pending_single = true;
+        g->first_up_ms    = now_ms;
+        return AK_GESTURE_NONE;
+
+    default:
+        return AK_GESTURE_NONE;
+    }
+}
+
+ak_gesture_t ak_gesture_tick(ak_gesture_state_t *g, uint32_t now_ms)
+{
+    if (g->pending_single &&
+        (uint32_t)(now_ms - g->first_up_ms) > AK_GESTURE_DCLICK_MS) {
+        g->pending_single = false;
+        return AK_GESTURE_SINGLE;
+    }
+    return AK_GESTURE_NONE;
+}

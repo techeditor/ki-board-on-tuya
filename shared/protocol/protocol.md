@@ -86,7 +86,10 @@ Companion 发：
 ```
 
 - `id`：`k1`..`k6`（6 个热插拔茶轴按键，v0.3）或 `enc`（EC11 旋钮按下，v0.3）
-- `action`：`down` / `up` / `long`
+- `action`：`down` / `up` / `long` / `click` / `double`
+  - `down` / `up` / `long`：原始边沿（即时上报），用于需要立即响应的键（如 K5 语音 PTT：`down` 立即开始录音）。
+  - `click` / `double`：**固件识别的最终手势**（延迟判定，方案 X）。短按释放后固件等待一个双击窗口（默认 250ms），窗口内无第二击 → `click`（单击），有 → `double`（双击）。用于单击/双击动作不同的键（K1-K3：单击=切对话 `Alt+N`，双击=切实例 `Ctrl+N`），避免两者都触发。
+  - 一个键用 `down`/`up`/`long` 还是 `click`/`double`，由固件 keymap 的手势模式决定（见交互设计 §0.4）。
 - `held_ms`：按下时长（`up`/`long` 时有意义）
 - v0.2 为 `k1`..`k5`；v0.3 扩到 6 键，并把 EC11 旋钮按下作为 `id:"enc"` 的 `key` 事件上报
   （复用 key 通道，不新增帧）。

@@ -13,6 +13,7 @@ python3 "${app}/tools/version.py" check >/dev/null
 gcc -std=c11 -Wall -Wextra -Werror \
     -I "${app}/common/include" \
     "${app}/common/src/ak_input_fsm.c" \
+    "${app}/common/src/ak_keymap.c" \
     "${app}/common/src/ak_voice_route.c" \
     "${app}/common/src/ak_settings.c" \
     "${app}/common/src/ak_protocol.c" \
