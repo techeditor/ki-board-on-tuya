@@ -709,15 +709,36 @@ mod app {
         // greeting deliberately waits until after notify-subscription).
         spawn_board_reader(app.clone(), shared.clone(), line_rx, connection_id);
         write_board(shared, &protocol::hello_payload())?;
-        let aliases = shared
-            .inner
-            .lock()
-            .map_err(|_| "state lock poisoned")?
-            .kc_binds
-            .aliases
-            .clone();
+        let (aliases, status_payloads) = {
+            let inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
+            let aliases = inner.kc_binds.aliases.clone();
+            let status_payloads = inner
+                .kc_binds
+                .sessions
+                .iter()
+                .take(3)
+                .enumerate()
+                .filter_map(|(index, session_id)| {
+                    let status = inner.kc_status.get(session_id.trim())?;
+                    Some(protocol::display_payload(
+                        index as u8 + 1,
+                        &status.agent_name,
+                        &status.state,
+                        &status.text,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            (aliases, status_payloads)
+        };
         if let Err(err) = write_board(shared, &protocol::binding_aliases_payload(&aliases)) {
             log_line(&app, format!("[WARN] binding alias sync failed: {err}"));
+        }
+        // A fresh board link has no display history, so replay every bound
+        // chat's last projection instead of waiting for another status event.
+        for payload in status_payloads {
+            if let Err(err) = write_board(shared, &payload) {
+                log_line(&app, format!("[WARN] status replay failed: {err}"));
+            }
         }
         log_line(
             &app,
@@ -1054,6 +1075,12 @@ mod app {
                     inner.crew_api_connected = connection.connected;
                     inner.crew_api_base_url = connection.base_url.clone();
                     inner.crew_api_last_error = connection.error.clone();
+                    if connection.connected {
+                        // Treat the first slots frame on every WebSocket
+                        // connection as a full projection, even when its data
+                        // matches the snapshot cached before reconnecting.
+                        inner.crew_api_slots.clear();
+                    }
                 }
                 let _ = app.emit("crew-api-connection", &connection);
                 if connection.connected {
@@ -1573,14 +1600,10 @@ mod app {
                 }
                 false
             }
-            // Route ASR/macro fill-back through Compose instead: focus the live
-            // composer and append at the caret without sending. K5 submits.
+            // ASR/macro text and K5 use the same live composer path. Fill-back
+            // types without sending; K5 injects Enter so user edits are kept.
             Inbound::Asr { .. } | Inbound::Macro { .. } => false,
-            Inbound::Key { payload, .. }
-                if payload.id == "k5" && payload.action == KeyAction::Down =>
-            {
-                submit_or_continue_crew_slot(app, state)
-            }
+            Inbound::Key { payload, .. } if payload.id == "k5" => false,
             Inbound::Nav { payload, .. } => match (payload.dir, payload.action) {
                 (NavDir::Left, KeyAction::Up) if payload.held_ms < 800 => {
                     edit_crew_draft(app, state, DraftEdit::Backspace)
@@ -1597,6 +1620,9 @@ mod app {
         }
     }
 
+    // Kept for the nav-driven REST draft editor and UI compatibility; ASR and
+    // macro fill-back intentionally bypass this store for the live composer.
+    #[allow(dead_code)]
     fn append_crew_draft(app: &AppHandle, state: &Shared, text: &str) -> bool {
         if text.is_empty() {
             return true;
@@ -1656,53 +1682,6 @@ mod app {
         } else {
             false
         }
-    }
-
-    fn submit_or_continue_crew_slot(app: &AppHandle, state: &Shared) -> bool {
-        let job = state.inner.lock().ok().and_then(|mut inner| {
-            let slot = inner.crew_api_active_slot.clone()?;
-            let client = inner.crew_api.clone()?;
-            let draft = inner.crew_api_drafts.remove(&slot).unwrap_or_default();
-            Some((slot, draft, client))
-        });
-        let Some((slot, draft, client)) = job else {
-            return false;
-        };
-
-        let app_cb = app.clone();
-        let state_cb = state.clone();
-        let _ = thread::Builder::new()
-            .name("ak-crew-api-submit".to_string())
-            .spawn(move || {
-                let result = if draft.trim().is_empty() {
-                    client.continue_slot(&slot)
-                } else {
-                    client.send_message(&slot, &draft).map(|_| ())
-                };
-                match result {
-                    Ok(()) => {
-                        emit_crew_draft(&app_cb, &slot, "");
-                        log_line(
-                            &app_cb,
-                            format!("[CREW-API] K5 accepted for {slot} (content withheld from logs)"),
-                        );
-                    }
-                    Err(error) => {
-                        if !draft.is_empty() {
-                            if let Ok(mut inner) = state_cb.inner.lock() {
-                                inner.crew_api_drafts.insert(slot.clone(), draft.clone());
-                                inner.crew_api_last_error = error.clone();
-                            }
-                            emit_crew_draft(&app_cb, &slot, &draft);
-                        }
-                        log_line(
-                            &app_cb,
-                            format!("[CREW-API] K5 failed for {slot}: {error} · draft preserved"),
-                        );
-                    }
-                }
-            });
-        true
     }
 
     fn handle_frame(app: &AppHandle, state: &Shared, frame: Inbound) {
