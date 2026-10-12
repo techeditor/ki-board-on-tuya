@@ -24,7 +24,11 @@ pub const ALIAS_MAX_CHARS: usize = 7;
 
 /// Default chat number for slot `i` (0-based): K1->1, K2->2, K3->3.
 fn default_chats() -> Vec<u8> {
-    vec![1, 2, 3]
+    // 0 = "not set": pressing the key does NOT jump the Kiro Crew view. A
+    // value in 1..=9 means "also jump to that Alt+N on click" (a bonus on top
+    // of the stable-slot selection). Default is unset so nothing jumps until
+    // the user opts in per slot.
+    vec![0, 0, 0]
 }
 
 /// Empty persisted aliases mean that the AK displays the defaults A, B, and C.
@@ -87,7 +91,9 @@ impl BindStore {
             self.chats.truncate(SLOT_COUNT);
         }
         for (i, n) in self.chats.iter_mut().enumerate() {
-            if !(1..=9).contains(n) {
+            // Valid range is 0..=9: 0 = "not set" (no Alt+N jump), 1..=9 = jump
+            // to that chat. Anything else falls back to the slot default.
+            if *n > 9 {
                 *n = defaults[i];
             }
         }
@@ -112,12 +118,14 @@ impl BindStore {
         idx(n).and_then(|i| self.chats.get(i).copied())
     }
 
-    /// Set slot `n` (1-based) to chat `number`, clamped to `1..=9`. Out-of-range
-    /// slot is a no-op; an out-of-range number is clamped into `1..=9`.
+    /// Set slot `n` (1-based) to chat `number`, clamped to `0..=9`. `0` means
+    /// "not set" (pressing the key does not jump the Kiro Crew view). Values
+    /// 1..=9 jump to that Alt+N on click. Out-of-range slot is a no-op; an
+    /// out-of-range number is clamped into `0..=9`.
     pub fn set(&mut self, n: u8, number: u8) {
         if let Some(i) = idx(n) {
             if let Some(slot) = self.chats.get_mut(i) {
-                *slot = number.clamp(1, 9);
+                *slot = number.min(9);
             }
         }
     }
@@ -166,8 +174,8 @@ impl BindStore {
         Ok(())
     }
 
-    /// Reset slot `n` (1-based) to its default chat number (slot index + 1).
-    /// Out-of-range is a no-op. Its alias and session association are preserved.
+    /// Reset slot `n` (1-based) to its default chat number (`0` = not set, no
+    /// Alt+N jump). Out-of-range is a no-op. Alias and session are preserved.
     pub fn clear(&mut self, n: u8) {
         if let Some(i) = idx(n) {
             if let Some(slot) = self.chats.get_mut(i) {
@@ -248,13 +256,14 @@ mod tests {
     #[test]
     fn new_store_has_default_chat_numbers_and_empty_aliases() {
         let s = BindStore::new();
-        assert_eq!(s.chats, vec![1, 2, 3]);
+        // Default is "not set" (0) for all slots: no Alt+N jump until opted in.
+        assert_eq!(s.chats, vec![0, 0, 0]);
         assert_eq!(s.aliases, vec!["", "", ""]);
         assert_eq!(s.sessions, vec!["", "", ""]);
         assert_eq!(s.pinned_session, "");
-        assert_eq!(s.get(1), Some(1));
-        assert_eq!(s.get(2), Some(2));
-        assert_eq!(s.get(3), Some(3));
+        assert_eq!(s.get(1), Some(0));
+        assert_eq!(s.get(2), Some(0));
+        assert_eq!(s.get(3), Some(0));
     }
 
     #[test]
@@ -262,14 +271,14 @@ mod tests {
         let mut s = BindStore::new();
         s.set(2, 7);
         assert_eq!(s.get(2), Some(7));
-        // Slots A and C keep their defaults.
-        assert_eq!(s.get(1), Some(1));
-        assert_eq!(s.get(3), Some(3));
+        // Slots A and C keep their defaults (unset = 0).
+        assert_eq!(s.get(1), Some(0));
+        assert_eq!(s.get(3), Some(0));
 
-        // Clear resets slot B's chat number but preserves its display alias.
+        // Clear resets slot B's chat number to unset (0) but keeps its alias.
         s.set_alias(2, " Build ").unwrap();
         s.clear(2);
-        assert_eq!(s.get(2), Some(2));
+        assert_eq!(s.get(2), Some(0));
         assert_eq!(s.aliases[1], "Build");
     }
 
@@ -302,10 +311,10 @@ mod tests {
     }
 
     #[test]
-    fn set_clamps_number_into_1_9() {
+    fn set_clamps_number_into_0_9() {
         let mut s = BindStore::new();
         s.set(1, 0);
-        assert_eq!(s.get(1), Some(1)); // 0 -> clamped up to 1
+        assert_eq!(s.get(1), Some(0)); // 0 is valid = not set
         s.set(1, 42);
         assert_eq!(s.get(1), Some(9)); // 42 -> clamped down to 9
         s.set(1, 9);
@@ -322,7 +331,7 @@ mod tests {
         s.set(9, 5);
         s.clear(0);
         assert_eq!(s.chats.len(), SLOT_COUNT);
-        assert_eq!(s.chats, vec![1, 2, 3]);
+        assert_eq!(s.chats, vec![0, 0, 0]);
     }
 
     // ── (de)serialize ───────────────────────────────────────
@@ -338,7 +347,7 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"chats":[4,2,8],"aliases":["Plan","",""],"sessions":["dashboard:chat-4","",""],"pinned_session":"dashboard:chat-4"}"#
+            r#"{"chats":[4,0,8],"aliases":["Plan","",""],"sessions":["dashboard:chat-4","",""],"pinned_session":"dashboard:chat-4"}"#
         );
         let back: BindStore = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
@@ -346,10 +355,10 @@ mod tests {
 
     #[test]
     fn load_normalizes_vectors_and_migrates_old_files() {
-        // Old files have no aliases; serde defaults them to three empty entries.
+        // Short vector is padded with the default (unset = 0).
         let mut old: BindStore = serde_json::from_str(r#"{"chats":[5]}"#).unwrap();
         old.normalize();
-        assert_eq!(old.chats, vec![5, 2, 3]);
+        assert_eq!(old.chats, vec![5, 0, 0]);
         assert_eq!(old.aliases, vec!["", "", ""]);
         assert_eq!(old.sessions, vec!["", "", ""]);
         assert_eq!(old.pinned_session, "");
@@ -362,12 +371,12 @@ mod tests {
         assert_eq!(long.aliases, vec!["One", "Two", "Three"]);
         assert_eq!(long.sessions, vec!["", "", ""]);
 
-        // Invalid chat numbers and aliases both fall back safely.
+        // 0 is now valid (= not set); only >9 falls back to the default (0).
         let mut bad: BindStore =
             serde_json::from_str(r#"{"chats":[0,10,4],"aliases":["12345678","中文","Ok"]}"#)
                 .unwrap();
         bad.normalize();
-        assert_eq!(bad.chats, vec![1, 2, 4]);
+        assert_eq!(bad.chats, vec![0, 0, 4]);
         assert_eq!(bad.aliases, vec!["", "", "Ok"]);
         assert_eq!(bad.sessions, vec!["", "", ""]);
     }
@@ -376,7 +385,7 @@ mod tests {
     fn empty_object_deserializes_to_defaults() {
         let mut s: BindStore = serde_json::from_str("{}").unwrap();
         s.normalize();
-        assert_eq!(s.chats, vec![1, 2, 3]);
+        assert_eq!(s.chats, vec![0, 0, 0]);
         assert_eq!(s.aliases, vec!["", "", ""]);
         assert_eq!(s.sessions, vec!["", "", ""]);
         assert_eq!(s.pinned_session, "");

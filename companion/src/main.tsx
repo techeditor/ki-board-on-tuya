@@ -765,7 +765,8 @@ function App() {
     // what drives the jump while the API is connected; the number is only the
     // offline fallback and must stay a valid 1..=9 for the backend).
     const defaultName = SLOT_DEFAULT_NAMES[slot - 1];
-    const number = bindsRef.current[slot - 1] ?? slot;
+    // Preserve the slot's existing Alt+N jump setting (0 = not set).
+    const number = bindsRef.current[slot - 1] ?? 0;
     const alias = bindAliasesRef.current[slot - 1] || defaultName;
     await runBind(async () => {
       await bindSession(slot, number, sessionId);
@@ -797,12 +798,6 @@ function App() {
   async function bindAliasSave(slot: number, alias: string) {
     const aliases = await invoke<ChatAliases>("kc_bind_alias_set", { slot, alias });
     setBindAliases(aliases);
-  }
-
-  // Reset the chat number only; the A/B/C slot alias remains independent.
-  async function bindClear(slot: number) {
-    await invoke("kc_bind_clear", { slot });
-    await refreshBinds();
   }
 
   // ── FP-4b STATUS sink (the eyes) ──────────────────────────────────────────
@@ -1665,17 +1660,18 @@ function App() {
                 别名在回车或失焦时保存,最多 {ALIAS_MAX_CHARS} 个英文字母、数字、空格或符号。
               </p>
               <p className="hint">
-                末尾的 <strong>Alt+N</strong> 仅作兜底:API/WebSocket 离线或该槽位没有绑定稳定对话时,
-                K1–K3 才回退到按 Kiro Crew 侧栏顺序跳转的 <code>Alt+N</code>。选择
-                <strong>"— 自动"</strong> 表示使用默认兜底号(A→1、B→2、C→3)。由于侧栏顺序会随排序规则变化,
-                绑定了稳定 API 对话时请以 API 对话为准。
+                末尾的 <strong>切换对话窗格</strong> 是可选加成:设置了 <code>Alt+N</code> 号后,
+                按 K1–K3 在选中对话的同时,还会让 Kiro Crew 界面<strong>跳转到第 N 个对话窗格</strong>
+                (注入 Alt+N,需要 Kiro Crew 窗口可被激活)。选 <strong>"未设置"</strong> 则只选中、不跳转。
+                N 对应 Kiro Crew 侧栏里该对话的位置,侧栏顺序变化时可能需要重设。
               </p>
 
               {[1, 2, 3].map((slot) => {
                 const n = binds[slot - 1];
                 const alias = bindAliases[slot - 1] ?? "";
                 const defaultName = SLOT_DEFAULT_NAMES[slot - 1];
-                const isDefaultFallback = (n ?? slot) === slot;
+                // Alt+N number: 0 (or undefined) means "not set" (no jump).
+                const jumpN = n ?? 0;
                 return (
                   <div key={slot} className="binding-row">
                     <strong className="binding-slot-label">
@@ -1706,12 +1702,12 @@ function App() {
                           const sessionId = event.target.value;
                           runBind(() =>
                             sessionId
-                              ? bindSession(slot, n ?? slot, sessionId)
+                              ? bindSession(slot, jumpN, sessionId)
                               : clearBoundSession(slot),
                           );
                         }}
                       >
-                        <option value="">未绑定 · 用 Alt+{n ?? slot} 兜底</option>
+                        <option value="">未绑定</option>
                         {crewSlots.map((crewSlot) => (
                           <option key={crewSlot.key} value={crewSlot.key}>
                             {crewSlot.title || crewSlot.key} · {crewSlot.key}
@@ -1720,27 +1716,22 @@ function App() {
                       </select>
                     </div>
                     <div className="binding-field">
-                      <span className="hint">Alt+N 兜底</span>
+                      <span className="hint">切换对话窗格</span>
                       <select
                         className="binding-chat-select"
-                        // 0 is the UI-only "— 自动" value: it resets this slot to
-                        // its default fallback number (A->1/B->2/C->3). The
-                        // backend always keeps a valid 1..=9, so "自动" means
-                        // "use the default fallback", not "no fallback".
-                        value={isDefaultFallback ? 0 : (n ?? 0)}
+                        // 0 = 未设置 (press selects the slot but does not jump the
+                        // Kiro Crew view). 1..=9 = also inject Alt+N on click.
+                        value={jumpN}
                         disabled={bindBusy}
-                        aria-label={`Chat ${defaultName} Alt+N fallback`}
-                        onChange={(event) => {
-                          const value = Number(event.target.value);
-                          runBind(() =>
-                            value === 0 ? bindClear(slot) : bindSet(slot, value),
-                          );
-                        }}
+                        aria-label={`Chat ${defaultName} 切换对话窗格 Alt+N`}
+                        onChange={(event) =>
+                          runBind(() => bindSet(slot, Number(event.target.value)))
+                        }
                       >
-                        <option value={0}>— 自动 (默认 Alt+{slot})</option>
+                        <option value={0}>未设置 · 不跳转</option>
                         {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
                           <option key={num} value={num}>
-                            Alt+{num}
+                            跳到 Alt+{num}
                           </option>
                         ))}
                       </select>

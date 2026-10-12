@@ -311,7 +311,14 @@ impl CrewEvent {
 pub fn slot_display_status(slot: &CrewSlot) -> crate::status_sink::DisplayState {
     // Board color vocabulary: waiting=orange, running=red, info=blue, idle=green.
     let (state, text) = if slot.pending_approval || slot.needs_input || slot.waiting_for_input {
-        ("waiting", "needs your input".to_string())
+        // The agent is waiting on the user. Surface WHAT it is asking (its last
+        // message) so the keyboard screen shows the actual prompt, not a generic
+        // line. Fall back to the generic text only when there is no message yet.
+        if slot.last_message.trim().is_empty() {
+            ("waiting", "needs your input".to_string())
+        } else {
+            ("waiting", compact_text(&slot.last_message, 80))
+        }
     } else if slot.stopping {
         ("running", "stopping".to_string())
     } else if slot.running || slot.subagents_running {
@@ -524,6 +531,7 @@ mod tests {
 
     #[test]
     fn maps_slot_state_priority() {
+        // Waiting with no message yet -> generic fallback text.
         let waiting = CrewSlot {
             key: "chat-a".into(),
             title: "A".into(),
@@ -533,7 +541,20 @@ mod tests {
         };
         let mapped = slot_display_status(&waiting);
         assert_eq!(mapped.state, "waiting");
+        assert_eq!(mapped.text, "needs your input");
         assert_eq!(mapped.session_id, "chat-a");
+
+        // Waiting WITH a message -> surface the actual prompt on the screen,
+        // not the generic line, so the user knows what is being asked.
+        let waiting_prompt = CrewSlot {
+            key: "chat-a2".into(),
+            needs_input: true,
+            last_message: "Approve deleting 3 files? (y/n)".into(),
+            ..Default::default()
+        };
+        let mapped_prompt = slot_display_status(&waiting_prompt);
+        assert_eq!(mapped_prompt.state, "waiting");
+        assert_eq!(mapped_prompt.text, "Approve deleting 3 files? (y/n)");
 
         let running = CrewSlot {
             key: "chat-b".into(),

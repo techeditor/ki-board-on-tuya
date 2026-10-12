@@ -228,7 +228,10 @@ mod app {
     use tauri::{AppHandle, Emitter, Manager, State};
 
     struct Inner {
-        transport: Option<Box<dyn BoardTransport>>,
+        // NOTE: the board transport is NOT here — it lives in
+        // `AppState.transport` behind its own lock so blocking serial writes
+        // never hold the global `inner` mutex. `kind`/`endpoint` stay here as
+        // cheap metadata describing the current connection.
         kind: TransportKind,
         endpoint: String,
         firmware: String,
@@ -293,6 +296,13 @@ mod app {
 
     struct AppState {
         inner: Mutex<Inner>,
+        /// The board transport lives behind its OWN lock, separate from the
+        /// `inner` state mutex. Serial `write_json` is a blocking IO call that
+        /// can stall for seconds when the link is congested; keeping it out of
+        /// the global `inner` lock means a slow/stuck write no longer freezes
+        /// the UI, the watchdog, or any other command. The two locks are never
+        /// held at the same time (see `write_board_guarded`).
+        transport: Mutex<Option<Box<dyn BoardTransport>>>,
     }
 
     type Shared = Arc<AppState>;
@@ -341,20 +351,32 @@ mod app {
         if !routine {
             diagnostics::record("DEBUG", "board-tx", &format!("begin type={kind}"));
         }
+        // Read the connection kind under a SHORT hold of the inner lock, then
+        // release it immediately — the blocking serial write below must never
+        // run while holding the global state mutex.
+        let kind_enum = {
+            let inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.kind
+        };
+        // Now take the dedicated transport lock for the (possibly slow) write.
+        // A congested serial link stalls only this lock, not `inner`.
         let lock_started = Instant::now();
-        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+        let mut transport_guard = state
+            .transport
+            .lock()
+            .map_err(|_| "transport lock poisoned")?;
         let lock_wait = lock_started.elapsed();
         if lock_wait >= Duration::from_millis(250) {
             diagnostics::record(
                 "WARN",
-                "state-lock",
-                &format!("board write waited {}ms type={kind}", lock_wait.as_millis()),
+                "board-tx",
+                &format!("board write waited {}ms for transport lock type={kind}", lock_wait.as_millis()),
             );
         }
         if require_usb {
-            crate::ensure_usb_provisioning_transport(inner.transport.is_some(), inner.kind)?;
+            crate::ensure_usb_provisioning_transport(transport_guard.is_some(), kind_enum)?;
         }
-        let transport = inner.transport.as_mut().ok_or("device is not connected")?;
+        let transport = transport_guard.as_mut().ok_or("device is not connected")?;
         let result = transport.write_json(payload);
         let elapsed = started.elapsed();
         let slow_or_failed = result.is_err() || elapsed >= Duration::from_millis(250);
@@ -469,9 +491,16 @@ mod app {
 
     #[tauri::command]
     fn get_status(state: State<Shared>) -> Result<Status, String> {
+        // Read connectedness from the transport lock first, then release it
+        // before taking the inner lock (never hold both at once).
+        let device_connected = state
+            .transport
+            .lock()
+            .map(|t| t.is_some())
+            .unwrap_or(false);
         let inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
         Ok(Status {
-            device_connected: inner.transport.is_some(),
+            device_connected,
             transport: inner.kind,
             endpoint: inner.endpoint.clone(),
             firmware_version: inner.firmware.clone(),
@@ -605,8 +634,13 @@ mod app {
         // makes switching USB<->BLE an explicit two-step action and avoids
         // yanking a live link out from under the reader thread.
         {
-            let inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
-            if inner.transport.is_some() {
+            let already = shared
+                .transport
+                .lock()
+                .map(|t| t.is_some())
+                .unwrap_or(false);
+            if already {
+                let inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
                 let current = match inner.kind {
                     TransportKind::Usb => "USB",
                     TransportKind::Ble => "BLE",
@@ -650,11 +684,17 @@ mod app {
         let kind = boxed.kind();
         let endpoint = boxed.endpoint();
 
+        // Install the transport under its own lock first, then update the inner
+        // metadata. The two locks are taken sequentially, never nested.
+        {
+            let mut transport_guard =
+                shared.transport.lock().map_err(|_| "transport lock poisoned")?;
+            *transport_guard = Some(boxed);
+        }
         let connection_id = {
             let mut inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
             inner.kind = kind;
             inner.endpoint = endpoint.clone();
-            inner.transport = Some(boxed);
             inner.last_error.clear();
             inner.device_settings_synced = false;
             inner.connection_id = inner.connection_id.wrapping_add(1);
@@ -690,25 +730,33 @@ mod app {
     #[tauri::command]
     fn disconnect_device(state: State<Shared>) -> Result<(), String> {
         diagnostics::record("INFO", "disconnect", "begin");
-        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        // Best-effort graceful goodbye BEFORE we drop the transport: plain UART
-        // has no hardware disconnect signal, so without this the board's link
-        // header would stay "USB Connected" forever after we close the port.
-        if let Some(transport) = inner.transport.as_mut() {
-            let _ = transport.write_json(&protocol::bye_payload());
+        // Tear the transport down under its OWN lock (bye write + close are
+        // blocking IO and must not hold the inner lock).
+        {
+            let mut transport_guard =
+                state.transport.lock().map_err(|_| "transport lock poisoned")?;
+            // Best-effort graceful goodbye BEFORE we drop the transport: plain
+            // UART has no hardware disconnect signal, so without this the
+            // board's link header would stay "USB Connected" forever.
+            if let Some(transport) = transport_guard.as_mut() {
+                let _ = transport.write_json(&protocol::bye_payload());
+            }
+            if let Some(mut transport) = transport_guard.take() {
+                // Sets the transport stop flag so the low-level serial reader
+                // thread exits and releases the OS port; dropping `transport`
+                // closes the port handle. The app-level board reader then sees
+                // the transport gone on its next liveness check and also exits.
+                transport.disconnect();
+            }
         }
-        if let Some(mut transport) = inner.transport.take() {
-            // Sets the transport stop flag so the low-level serial reader thread
-            // exits and releases the OS port; dropping `transport` here closes
-            // the port handle we held. The app-level board reader then sees
-            // `transport.is_none()` on its next liveness check and also exits.
-            transport.disconnect();
+        // Clear the connection metadata under the inner lock.
+        {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.kind = TransportKind::None;
+            inner.endpoint.clear();
+            inner.device_settings_synced = false;
+            inner.connection_id = inner.connection_id.wrapping_add(1);
         }
-        inner.kind = TransportKind::None;
-        inner.endpoint.clear();
-        inner.device_settings_synced = false;
-        inner.connection_id = inner.connection_id.wrapping_add(1);
-        drop(inner);
         diagnostics::record("INFO", "disconnect", "complete");
         Ok(())
     }
@@ -920,8 +968,9 @@ mod app {
     /// the next board press jumps to the new number without a restart.
     #[tauri::command]
     fn kc_bind_set(state: State<Shared>, slot: u8, number: u8) -> Result<(), String> {
-        if !(1..=9).contains(&number) {
-            return Err(format!("chat number must be 1..=9 (got {number})"));
+        // 0 = not set (no Alt+N jump); 1..=9 = jump to that chat. Reject >9.
+        if number > 9 {
+            return Err(format!("chat number must be 0..=9 (got {number})"));
         }
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
         inner.kc_binds.set(slot, number);
@@ -941,8 +990,9 @@ mod app {
         number: u8,
         session_id: String,
     ) -> Result<(), String> {
-        if !(1..=9).contains(&number) {
-            return Err(format!("chat number must be 1..=9 (got {number})"));
+        // 0 = not set (no Alt+N jump); 1..=9 = jump to that chat. Reject >9.
+        if number > 9 {
+            return Err(format!("chat number must be 0..=9 (got {number})"));
         }
         let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
         inner.kc_binds.set_session(slot, &session_id)?;
@@ -1424,12 +1474,20 @@ mod app {
                 &format!("started connection_id={connection_id}"),
             );
             while let Ok(line) = line_rx.recv() {
-                // Stop if this connection has been superseded.
-                let live = state
+                // Stop if this connection has been superseded. Check the
+                // transport presence and the connection id under their own
+                // locks (taken one at a time, never nested).
+                let transport_present = state
+                    .transport
+                    .lock()
+                    .map(|t| t.is_some())
+                    .unwrap_or(false);
+                let id_matches = state
                     .inner
                     .lock()
-                    .map(|inner| inner.transport.is_some() && inner.connection_id == connection_id)
+                    .map(|inner| inner.connection_id == connection_id)
                     .unwrap_or(false);
+                let live = transport_present && id_matches;
                 if !live {
                     diagnostics::record("INFO", "board-reader", "stopped: connection superseded");
                     break;
@@ -1484,6 +1542,8 @@ mod app {
                 if payload.action != KeyAction::Click {
                     return false;
                 }
+                // Resolve the stable slot and its optional Alt+N number under
+                // one lock, then release before any window injection.
                 let selected = state.inner.lock().ok().and_then(|mut inner| {
                     let key = inner.kc_binds.sessions.get(index)?.trim().to_string();
                     let is_api_slot = !key.is_empty()
@@ -1492,11 +1552,23 @@ mod app {
                         return None;
                     }
                     inner.crew_api_active_slot = Some(key.clone());
-                    Some(key)
+                    // Optional Alt+N jump number for this slot (0 = not set).
+                    let jump = inner.kc_binds.chats.get(index).copied().unwrap_or(0);
+                    Some((key, jump))
                 });
-                if let Some(slot) = selected {
+                if let Some((slot, jump)) = selected {
                     let _ = app.emit("crew-api-active-slot", slot.clone());
                     log_line(app, format!("[CREW-API] selected stable slot {slot}"));
+                    // Bonus: if the user set an Alt+N for this slot, ALSO jump the
+                    // Kiro Crew view there (focus the window + inject Alt+N). When
+                    // unset (0) nothing is injected — selection only.
+                    if (1..=9).contains(&jump) {
+                        let action = ControlAction::Chord(Chord::JumpChat(jump));
+                        match exec_control_action(app, state, &action) {
+                            Ok(()) => log_line(app, format!("[CREW-API] jumped Kiro Crew view to Alt+{jump}")),
+                            Err(e) => log_line(app, format!("[CREW-API] Alt+{jump} jump failed: {e}")),
+                        }
+                    }
                     return true;
                 }
                 false
@@ -1814,8 +1886,8 @@ mod app {
             .map(|client| client.config().base_url())
             .unwrap_or_default();
         let state: Shared = Arc::new(AppState {
+            transport: Mutex::new(None),
             inner: Mutex::new(Inner {
-                transport: None,
                 kind: TransportKind::None,
                 endpoint: String::new(),
                 firmware: String::new(),
