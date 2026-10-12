@@ -659,12 +659,14 @@ mod app {
             let ok = if slot == "kind" {
                 value == "voice" || value == "normal"
             } else {
+                // An action: a base action, or chat/instance followed by EXACTLY
+                // one digit 1-9 (matches the firmware's ak_keymap_action_from_str
+                // grammar, so the companion never emits a value the board drops).
                 ACTIONS.contains(&value.as_str())
                     || value
                         .strip_prefix("chat")
                         .or_else(|| value.strip_prefix("instance"))
-                        .and_then(|n| n.parse::<u8>().ok())
-                        .is_some_and(|n| (1..=9).contains(&n))
+                        .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
             };
             if !ok {
                 return Err(format!("invalid keymap value '{value}' for {field}"));

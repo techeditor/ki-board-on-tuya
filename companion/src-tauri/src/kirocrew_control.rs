@@ -147,27 +147,10 @@ impl ControlCtx {
         Self { jump_chats: vec![1, 2, 3], switch_instances: vec![1, 2, 3] }
     }
 
-    /// Deterministic `Alt+N` jump for slot `idx` (0-based). Returns
-    /// `Chord(JumpChat(n))` when `jump_chats[idx]` is a valid chat number
-    /// (1..=9); `None` when the index is missing or the number is out of range.
-    fn jump(&self, idx: usize) -> ControlAction {
-        match self.jump_chats.get(idx) {
-            Some(&n) if (1..=9).contains(&n) => ControlAction::Chord(Chord::JumpChat(n)),
-            _ => ControlAction::None,
-        }
-    }
-
-    /// Deterministic `Ctrl+N` instance switch for slot `idx` (0-based). Returns
-    /// `Chord(SwitchInstance(n))` when `switch_instances[idx]` is valid
-    /// (1..=9); `None` otherwise.
-    fn switch(&self, idx: usize) -> ControlAction {
-        match self.switch_instances.get(idx) {
-            Some(&n) if (1..=9).contains(&n) => {
-                ControlAction::Chord(Chord::SwitchInstance(n))
-            }
-            _ => ControlAction::None,
-        }
-    }
+    // Note: chat/instance targets now travel on the wire as the resolved action
+    // (KeyAction::Chat(n)/Instance(n)) — route_input reads N from the frame, not
+    // from this ctx. jump_chats/switch_instances remain only as the persisted
+    // default-number store surfaced by the bind UI; they no longer gate routing.
 }
 
 /// Is this a *triggering* key edge? We act on `down` / `long`, never on `up`
@@ -203,7 +186,7 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 /// | `encoder { detents>0 }`         | `ChordRepeat(Down, detents)` — clockwise scrolls down, one step per detent |
 /// | `encoder { detents<0 }`         | `ChordRepeat(Up, |detents|)` — counter-clockwise scrolls up |
 /// | anything else / key `up`        | `None`                                    |
-pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
+pub fn route_input(ev: &Inbound, _ctx: &ControlCtx) -> ControlAction {
     match ev {
         // Recognized speech text -> type into the chat composer (NO send). Both
         // the board-side cloud ASR (`asr` frame) and the PC dictation/macro path
@@ -228,23 +211,21 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
             }
         }
 
-        // K1-K3 = chat/instance keys. The FIRMWARE classifies the gesture and
-        // sends the final `click` / `double` action (scheme X); the Companion
-        // no longer guesses from raw down/up. `click` -> Alt+N jump to the
-        // configured chat; `double` -> Ctrl+N switch to the configured Crew
-        // instance (Local / Remote Crew). Raw down/up/long are no-ops here (the
-        // firmware only emits them for keys in EDGE mode, not for k1-k3).
+        // Any key: a resolved chat/instance action carries its target N on the
+        // wire (stage 乙 — the keymap is the single source of truth, so the
+        // Companion uses the frame's N, not the key id). chatN -> Alt+N jump;
+        // instanceN -> Ctrl+N switch (Local / Remote Crew). Matched for ALL key
+        // ids because the user may bind chat/instance to any key and gesture.
         Inbound::Key { payload, .. }
-            if matches!(payload.id.as_str(), "k1" | "k2" | "k3") =>
+            if matches!(payload.action, KeyAction::Chat(_) | KeyAction::Instance(_)) =>
         {
-            let idx = match payload.id.as_str() {
-                "k1" => 0usize,
-                "k2" => 1usize,
-                _ => 2usize,
-            };
             match payload.action {
-                KeyAction::Click => ctx.jump(idx),
-                KeyAction::Double => ctx.switch(idx),
+                KeyAction::Chat(n) if (1..=9).contains(&n) => {
+                    ControlAction::Chord(Chord::JumpChat(n))
+                }
+                KeyAction::Instance(n) if (1..=9).contains(&n) => {
+                    ControlAction::Chord(Chord::SwitchInstance(n))
+                }
                 _ => ControlAction::None,
             }
         }
@@ -1055,62 +1036,39 @@ mod tests {
     // ── Router: K1–K3 → click = Alt+<chat> jump, double = Ctrl+<instance> ──
 
     #[test]
-    fn k1_k2_k3_click_jumps_to_configured_chat_number() {
-        // Non-default numbers to prove the router reads ctx.jump_chats.
-        let ctx = ControlCtx { jump_chats: vec![5, 2, 9], switch_instances: vec![1, 2, 3] };
+    fn chat_action_frame_jumps_regardless_of_key() {
+        // The resolved target N is on the wire (KeyAction::Chat(n)); the router
+        // uses it directly, so any key carrying chatN jumps to chat N.
+        let ctx = ControlCtx::default();
         assert_eq!(
-            route_input(&key("k1", KeyAction::Click), &ctx),
+            route_input(&key("k1", KeyAction::Chat(5)), &ctx),
             ControlAction::Chord(Chord::JumpChat(5))
         );
+        // Works for a non-k1-k3 key too (stage 乙: bind chat anywhere).
         assert_eq!(
-            route_input(&key("k2", KeyAction::Click), &ctx),
+            route_input(&key("k6", KeyAction::Chat(2)), &ctx),
             ControlAction::Chord(Chord::JumpChat(2))
-        );
-        assert_eq!(
-            route_input(&key("k3", KeyAction::Click), &ctx),
-            ControlAction::Chord(Chord::JumpChat(9))
         );
     }
 
     #[test]
-    fn k1_k2_k3_double_switches_to_configured_instance() {
-        // double-click -> Ctrl+N switch instance (Local / Remote Crew).
-        let ctx = ControlCtx { jump_chats: vec![1, 2, 3], switch_instances: vec![1, 2, 3] };
+    fn instance_action_frame_switches_regardless_of_key() {
+        let ctx = ControlCtx::default();
         assert_eq!(
-            route_input(&key("k1", KeyAction::Double), &ctx),
+            route_input(&key("k1", KeyAction::Instance(1)), &ctx),
             ControlAction::Chord(Chord::SwitchInstance(1))
         );
         assert_eq!(
-            route_input(&key("k2", KeyAction::Double), &ctx),
-            ControlAction::Chord(Chord::SwitchInstance(2))
-        );
-        assert_eq!(
-            route_input(&key("k3", KeyAction::Double), &ctx),
+            route_input(&key("k4", KeyAction::Instance(3)), &ctx),
             ControlAction::Chord(Chord::SwitchInstance(3))
-        );
-    }
-
-    #[test]
-    fn k1_k2_k3_click_uses_defaults() {
-        let ctx = ControlCtx::with_default_jumps();
-        assert_eq!(
-            route_input(&key("k1", KeyAction::Click), &ctx),
-            ControlAction::Chord(Chord::JumpChat(1))
-        );
-        assert_eq!(
-            route_input(&key("k2", KeyAction::Click), &ctx),
-            ControlAction::Chord(Chord::JumpChat(2))
-        );
-        assert_eq!(
-            route_input(&key("k3", KeyAction::Click), &ctx),
-            ControlAction::Chord(Chord::JumpChat(3))
         );
     }
 
     #[test]
     fn k1_k3_raw_edges_are_none() {
         let ctx = ControlCtx::with_default_jumps();
-        // Firmware classifies k1-k3; raw down/up/long are no-ops at the router.
+        // Firmware classifies gestures into chat/instance actions; raw
+        // down/up/long are no-ops at the router.
         for id in ["k1", "k2", "k3"] {
             assert_eq!(
                 route_input(&key(id, KeyAction::Down), &ctx),
@@ -1131,22 +1089,13 @@ mod tests {
     }
 
     #[test]
-    fn k1_k3_click_none_when_number_unset_or_out_of_range() {
-        // Missing index (short jump_chats vector) -> None.
-        let short = ControlCtx { jump_chats: vec![1], switch_instances: vec![1, 2, 3] };
-        assert_eq!(route_input(&key("k2", KeyAction::Click), &short), ControlAction::None);
-        assert_eq!(route_input(&key("k3", KeyAction::Click), &short), ControlAction::None);
-        // Out-of-range number (0 or >9) -> None.
-        let bad = ControlCtx { jump_chats: vec![0, 10, 3], switch_instances: vec![1, 2, 3] };
-        assert_eq!(route_input(&key("k1", KeyAction::Click), &bad), ControlAction::None);
-        assert_eq!(route_input(&key("k2", KeyAction::Click), &bad), ControlAction::None);
-        assert_eq!(
-            route_input(&key("k3", KeyAction::Click), &bad),
-            ControlAction::Chord(Chord::JumpChat(3))
-        );
-        // Empty vector (default ControlCtx) -> None.
-        let empty = ControlCtx::default();
-        assert_eq!(route_input(&key("k1", KeyAction::Click), &empty), ControlAction::None);
+    fn bare_click_double_without_target_are_none() {
+        // A bare click/double (no resolved chat/instance) carries no target, so
+        // the router does nothing — the firmware always sends chatN/instanceN
+        // for a bound chat/instance gesture.
+        let ctx = ControlCtx::default();
+        assert_eq!(route_input(&key("k1", KeyAction::Click), &ctx), ControlAction::None);
+        assert_eq!(route_input(&key("k1", KeyAction::Double), &ctx), ControlAction::None);
     }
 
     #[test]
@@ -1267,14 +1216,14 @@ mod tests {
             router.route(&key("enc", KeyAction::Down)),
             ControlAction::Chord(Chord::Enter)
         );
-        // A K1 click jumps to the configured chat number.
+        // A resolved chat action frame jumps to its target N.
         assert_eq!(
-            router.route(&key("k1", KeyAction::Click)),
+            router.route(&key("k1", KeyAction::Chat(1))),
             ControlAction::Chord(Chord::JumpChat(1))
         );
-        // A K1 double-click switches Crew instance.
+        // A resolved instance action frame switches Crew instance.
         assert_eq!(
-            router.route(&key("k1", KeyAction::Double)),
+            router.route(&key("k1", KeyAction::Instance(1))),
             ControlAction::Chord(Chord::SwitchInstance(1))
         );
     }

@@ -182,32 +182,92 @@ pub fn ack_payload(seq: u64) -> Value {
 
 // ───────────────────────────── Enums ─────────────────────────────
 
-/// `key` / `nav` action. `#[serde(other)]` keeps decode tolerant to values the
-/// firmware may add later.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// `key` action. Decoded tolerantly from the wire string: unknown values map to
+/// `Unknown` rather than failing. `Chat(n)` / `Instance(n)` carry the resolved
+/// target the firmware put on the wire ("chat5" / "instance2"), so the keymap is
+/// the single source of truth and the Companion never infers N from the key id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyAction {
     Down,
     Up,
     Long,
-    /// Firmware-classified final gesture: a confirmed single click (scheme X —
-    /// held back one double-click window to tell single from double apart).
+    /// Firmware-classified final gesture: a confirmed single click.
     Click,
     /// Firmware-classified final gesture: a double click.
     Double,
-    /// Pending-confirm (post-ASR) edit intent: delete one character
-    /// (K4 click). Companion injects Backspace.
-    #[serde(rename = "cancel_char")]
+    /// Resolved chat jump target N (1..=9) — wire "chatN". Companion -> Alt+N.
+    Chat(u8),
+    /// Resolved instance switch target N (1..=9) — wire "instanceN". -> Ctrl+N.
+    Instance(u8),
+    /// Pending-confirm (post-ASR) edit: delete one character. -> Backspace.
     CancelChar,
-    /// Pending-confirm edit intent: delete all / cancel (K4 long). Companion
-    /// injects Ctrl+A then Backspace and the board leaves pending-confirm.
-    #[serde(rename = "cancel_all")]
+    /// Pending-confirm edit: delete all / cancel. -> Ctrl+A, Backspace + exit.
     CancelAll,
-    /// Pending-confirm edit intent: confirm / submit (K6 click). Companion
-    /// injects Enter and the board leaves pending-confirm.
+    /// Pending-confirm edit: confirm / submit. -> Enter + exit.
     Confirm,
-    #[serde(other)]
     Unknown,
+}
+
+impl KeyAction {
+    fn from_wire(s: &str) -> KeyAction {
+        match s {
+            "down" => KeyAction::Down,
+            "up" => KeyAction::Up,
+            "long" => KeyAction::Long,
+            "click" => KeyAction::Click,
+            "double" => KeyAction::Double,
+            "cancel_char" => KeyAction::CancelChar,
+            "cancel_all" => KeyAction::CancelAll,
+            "confirm" => KeyAction::Confirm,
+            _ => {
+                // chatN / instanceN with a single digit 1..=9.
+                if let Some(d) = s.strip_prefix("chat") {
+                    if let Ok(n) = d.parse::<u8>() {
+                        if (1..=9).contains(&n) {
+                            return KeyAction::Chat(n);
+                        }
+                    }
+                }
+                if let Some(d) = s.strip_prefix("instance") {
+                    if let Ok(n) = d.parse::<u8>() {
+                        if (1..=9).contains(&n) {
+                            return KeyAction::Instance(n);
+                        }
+                    }
+                }
+                KeyAction::Unknown
+            }
+        }
+    }
+
+    fn to_wire(self) -> String {
+        match self {
+            KeyAction::Down => "down".into(),
+            KeyAction::Up => "up".into(),
+            KeyAction::Long => "long".into(),
+            KeyAction::Click => "click".into(),
+            KeyAction::Double => "double".into(),
+            KeyAction::Chat(n) => format!("chat{n}"),
+            KeyAction::Instance(n) => format!("instance{n}"),
+            KeyAction::CancelChar => "cancel_char".into(),
+            KeyAction::CancelAll => "cancel_all".into(),
+            KeyAction::Confirm => "confirm".into(),
+            KeyAction::Unknown => "unknown".into(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyAction {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<KeyAction, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(KeyAction::from_wire(&s))
+    }
+}
+
+impl Serialize for KeyAction {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_wire())
+    }
 }
 
 /// Voice trigger state.
@@ -822,6 +882,30 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn key_action_chat_instance_wire_round_trips() {
+        // Firmware puts the resolved target on the wire; the Companion decodes
+        // chatN/instanceN into KeyAction::Chat(n)/Instance(n), N 1..=9.
+        let f = decode_line(r#"{"v":1,"type":"key","payload":{"id":"k1","action":"chat5"}}"#).unwrap();
+        match f {
+            Inbound::Key { payload, .. } => assert_eq!(payload.action, KeyAction::Chat(5)),
+            _ => panic!("expected key"),
+        }
+        let g = decode_line(r#"{"v":1,"type":"key","payload":{"id":"k2","action":"instance3"}}"#).unwrap();
+        match g {
+            Inbound::Key { payload, .. } => assert_eq!(payload.action, KeyAction::Instance(3)),
+            _ => panic!("expected key"),
+        }
+        // Out-of-range / multi-digit decode to Unknown (tolerant), no panic.
+        for bad in ["chat0", "chat10", "instance0", "chat"] {
+            let line = format!(r#"{{"v":1,"type":"key","payload":{{"id":"k1","action":"{bad}"}}}}"#);
+            match decode_line(&line).unwrap() {
+                Inbound::Key { payload, .. } => assert_eq!(payload.action, KeyAction::Unknown, "{bad}"),
+                _ => panic!("expected key"),
+            }
+        }
     }
 
     #[test]

@@ -604,35 +604,36 @@ static void dispatch_action_frame(const char *id, const char *wire_action)
     PR_DEBUG("action %s %s", id, wire_action);
 }
 
-/* Map an encoded action + the gesture slot that triggered it to the wire action
- * string the Companion expects, and run any local side effect. Returns false if
- * the action is NONE / unhandled (nothing emitted). */
+/* Run the ACTION bound to a resolved gesture on a NORMAL key (design §5.5).
+ * The wire frame carries the RESOLVED ACTION NAME ("chat5" / "instance2"), not
+ * the gesture slot, so the keymap is the single source of truth: the Companion
+ * parses the action name and does not infer the target from the key id. This is
+ * what makes an arbitrary (key,gesture)->action binding route correctly, no
+ * matter which slot the user bound it to. cancel/confirm are pending-confirm
+ * edits, handled by the caller. Returns false if nothing was emitted. */
 static bool execute_key_action(const char *id, ak_action_t action, ak_gesture_slot_t slot)
 {
+    char wire[16];
     uint8_t n;
     if ((n = ak_action_chat_n(action)) != 0u) {
-        /* chat N: single click = jump to chat (Companion Alt+N). The gesture
-         * slot that carries chat is reported as click/double so the Companion
-         * router (which maps click->JumpChat, double->SwitchInstance) stays the
-         * contract. A chat action bound to the double slot still reports its own
-         * slot; the Companion maps by the delivered action name below. */
-        (void)n;
+        snprintf(wire, sizeof(wire), "chat%u", (unsigned)n);
 #if AK_ENABLE_DISPLAY
+        /* Local A/B/C highlight when a chat jump fires from a single click. */
         if (slot == AK_GESTURE_SLOT_CLICK) {
-            ak_select_session_key(id); /* local A/B/C highlight on single click */
+            ak_select_session_key(id);
         }
 #endif
-        dispatch_action_frame(id, slot == AK_GESTURE_SLOT_DOUBLE ? "double" : "click");
+        dispatch_action_frame(id, wire);
         return true;
     }
-    if (ak_action_instance_n(action) != 0u) {
-        /* instance N: switch Crew instance (Companion Ctrl+N). Reported as the
-         * triggering slot (normally double). */
-        dispatch_action_frame(id, slot == AK_GESTURE_SLOT_DOUBLE ? "double" : "click");
+    if ((n = ak_action_instance_n(action)) != 0u) {
+        snprintf(wire, sizeof(wire), "instance%u", (unsigned)n);
+        dispatch_action_frame(id, wire);
         return true;
     }
     /* cancel/confirm are pending-confirm edits, handled by the caller only while
      * s_pending_confirm; outside that they do nothing. */
+    (void)slot;
     return false;
 }
 
