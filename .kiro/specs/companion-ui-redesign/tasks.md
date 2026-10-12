@@ -60,8 +60,39 @@
 
 - [ ] **T4.1 ConnectionView.** Transport (USB/BLE), port/BLE, Wi-Fi/License/QR, volume/brightness
   sync — reskinned into `Card`/`Field`/`StateBadge`; soft surfaces, no hard boxes.
-- [ ] **T4.2 InputView.** Live K1–K5 + 5-way visualizer; control on/off segmented.
+- [ ] **T4.2 InputView (v0.3).** Live visualizer for the v0.3 inputs — K1-K6 + the EC11 rotary
+  (rotate + push), NOT the retired v0.2 5-way joystick. Show each key's live edge and, for K1-K3,
+  the classified click/double; control on/off segmented.
 - [ ] **T4.3 LogsView.** Event stream Detailed/Raw, using `--mono`.
+
+## Phase 4.5 — v0.3 interaction config surfaces / v0.3 交互配置面 (design §0; plan A keymap)
+
+> These extend the crew-api-era baseline with the confirmed v0.3 interaction model. The firmware
+> already emits click/double/cancel/confirm and accepts a `keymap` downlink frame (track A, shipped);
+> this phase is the Companion UI that configures and visualizes it. The chosen MOCKUP is the spec —
+> record which option was picked before building.
+
+- [ ] **T4.5.1 Keymap config panel (plan A).** Per-key role editor for K1-K6 + enc: each key picks a
+  role from `none/chat/voice/cancel/confirm`; the panel derives + shows the gesture mode (chat →
+  single/double, else edge) read-only. "Apply" downlinks via the `set_keymap` Tauri command
+  (roles k1..k6, enc). Defaults mirror the firmware v0.3 table (K5 voice / K4 cancel / K6 confirm /
+  K1-K3 chat). Advanced-only.
+  _Accept:_ changing a role + Apply calls `set_keymap` with the 7-slot role vector; the board acks;
+  an empty role leaves that key unchanged.
+- [ ] **T4.5.2 K1-K3 chat/instance binding.** For each CHAT key, two configurable numbers: the chat #
+  it jumps to on single-click (Alt+N, existing `kc_bind_set`) and the Crew instance # it switches to
+  on double-click (Ctrl+N — Local / Remote Crew; `BindStore.instances`). Show the resolved shortcut
+  (e.g. "K1: click → chat 1 (Alt+1) · double → Local (Ctrl+1)"). Advanced-only.
+  _Accept:_ both numbers persist and sync to the live router; the resolved-shortcut line matches.
+- [ ] **T4.5.3 Pending-confirm + LED semantics (read-only visualizer).** When the board is in
+  post-ASR pending-confirm, surface it: show the ASR text awaiting confirmation and the active
+  edit affordances (K4 click = delete char / long = delete all; K6 click = confirm). Render the LED
+  semantics legend (color = state: green idle / red busy / orange waiting / blue info; effect =
+  gesture: single blink / double blink / breathing) so a user can read the board's lights. Present
+  in both modes (Simple = compact "Confirming: <text>"; Advanced = full legend). Driven by the
+  board's `voice`/state frames — no new protocol.
+  _Accept:_ a pending-confirm state on the board shows the awaiting text + the K4/K6 affordances;
+  the LED legend matches design §0.3/§0.5.
 
 ## Phase 5 — Control: API+WS primary + legacy collapsed / 控制重构 (R4)
 
