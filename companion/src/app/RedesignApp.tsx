@@ -14,7 +14,7 @@ import { I18nProvider, LOCALES, isLocale, useI18n, type Locale } from "../i18n";
 import { KeymapPanel, defaultKeymapState, type KeymapState } from "../ui/KeymapPanel";
 import { Card, StateBadge } from "../ui/primitives";
 import { LedDot } from "../ui/LedDot";
-import type { Role } from "../keymap/roleRules";
+import { toBindings } from "../keymap/actions";
 
 import "../theme/components.css";
 
@@ -108,8 +108,8 @@ function Shell({
   // Pending-confirm demo state — in the real app this is driven by board frames.
   const [pending, setPending] = useState<string | null>(null);
 
-  const onApply = (roles: Role[]) => {
-    void invokeCmd("set_keymap", { roles });
+  const onApply = (state: KeymapState) => {
+    void invokeCmd("set_keymap", { bindings: toBindings(state) });
   };
 
   const chooseTheme = (id: ThemeId) => {

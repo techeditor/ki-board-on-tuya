@@ -1,7 +1,7 @@
 /* A single LED dot that mirrors the board's light for one key: color = state,
  * effect = blink pattern (design §0.3/§0.5). Colors are semantic tokens so the
  * dot stays readable in every theme. Honors reduced-motion. */
-import type { LedColor, LedEffect } from "../keymap/roleRules";
+import type { LedColor, LedEffect } from "../keymap/actions";
 
 const COLOR_VAR: Record<LedColor, string> = {
   none: "var(--border-strong)",
