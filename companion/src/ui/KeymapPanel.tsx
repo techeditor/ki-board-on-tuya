@@ -20,7 +20,7 @@ import {
   type KeySlot,
   type KeymapState,
 } from "../keymap/actions";
-import { Card } from "./primitives";
+import { Card, InfoTip } from "./primitives";
 import { LedDot } from "./LedDot";
 
 export { defaultKeymapState };
@@ -44,6 +44,13 @@ export function KeymapPanel({
   const { t } = useI18n();
   const [selected, setSelected] = useState<KeySlot>("k1");
   const [advanced, setAdvanced] = useState(false);
+  const [applied, setApplied] = useState(false);
+
+  const handleApply = () => {
+    onApply(value);
+    setApplied(true);
+    window.setTimeout(() => setApplied(false), 2500);
+  };
 
   const setKind = (key: KeySlot, kind: "normal" | "voice") =>
     onChange({ ...value, [key]: { ...value[key], kind } });
@@ -68,10 +75,11 @@ export function KeymapPanel({
       )}
 
       <div className="kc-keymap-actions">
+        {applied && <span className="kc-applied">{t("keymap.applied")}</span>}
         <button type="button" className="kc-btn ghost" onClick={() => onChange(defaultKeymapState())}>
           {t("common.reset")}
         </button>
-        <button type="button" className="kc-btn" onClick={() => onApply(value)}>
+        <button type="button" className="kc-btn" onClick={handleApply}>
           {t("common.apply")}
         </button>
       </div>
@@ -94,27 +102,47 @@ function ActionRow({
   const { family, n } = parseAction(wire);
   const led = defaultLed(wire, gesture);
   const needsNumber = family === "chat" || family === "instance";
+  const gestureLabel = t(`keymap.gesture.${gesture}`);
+  // Plain-language "what this does" line (H2): resolve the binding to a sentence.
+  const resolvedKey =
+    family === "chat"
+      ? "keymap.resolved.chat"
+      : family === "instance"
+        ? "keymap.resolved.instance"
+        : family === "cancel_char"
+          ? "keymap.resolved.cancelChar"
+          : family === "cancel_all"
+            ? "keymap.resolved.cancelAll"
+            : family === "confirm"
+              ? "keymap.resolved.confirm"
+              : "keymap.resolved.none";
+  const resolved = t(resolvedKey, { gesture: gestureLabel, n: n || 1 });
   return (
     <tr>
-      <td className="kc-mono">{t(`keymap.gesture.${gesture}`)}</td>
+      <td className="kc-mono">{gestureLabel}</td>
       <td>
-        <select value={family} onChange={(e) => onChange(makeAction(e.target.value, n || 1))}>
-          {BASE_ACTIONS.map((a) => (
-            <option key={a.wire} value={a.wire}>
-              {t(a.labelKey)}
-            </option>
-          ))}
-        </select>
-        {needsNumber && (
-          <input
-            type="number"
-            min={1}
-            max={9}
-            value={n || 1}
-            onChange={(e) => onChange(makeAction(family, Number(e.target.value)))}
-            style={{ marginLeft: 6 }}
-          />
-        )}
+        <div className="kc-actionpick">
+          <select value={family} onChange={(e) => onChange(makeAction(e.target.value, n || 1))}>
+            {BASE_ACTIONS.map((a) => (
+              <option key={a.wire} value={a.wire}>
+                {t(a.labelKey)}
+              </option>
+            ))}
+          </select>
+          {needsNumber && (
+            <label className="kc-numlabel">
+              {t(family === "chat" ? "keymap.chatNum" : "keymap.instanceNum")}
+              <input
+                type="number"
+                min={1}
+                max={9}
+                value={n || 1}
+                onChange={(e) => onChange(makeAction(family, Number(e.target.value)))}
+              />
+            </label>
+          )}
+        </div>
+        <div className="kc-resolved">{resolved}</div>
       </td>
       <td>
         <LedDot color={led.color} effect={led.effect} />
@@ -139,12 +167,13 @@ function BoardMap({
   const { t } = useI18n();
   const b = value[selected];
 
-  const keyLabel = (k: KeySlot) => (k === "enc" ? "EC11" : k.toUpperCase());
+  const keyLabel = (k: KeySlot) => (k === "enc" ? t("keymap.knob") : k.toUpperCase());
   const kindDot = (k: KeySlot) =>
     value[k].kind === "voice" ? { color: "blue" as const, effect: "none" as const } : { color: "green" as const, effect: "single" as const };
 
   return (
     <>
+      <p className="kc-muted" style={{ fontSize: 12, margin: "0 0 10px" }}>{t("keymap.tapHint")}</p>
       <div className="kc-board">
         {BOARD_ROWS.map((row, ri) => (
           <div key={ri} className={`kc-board-row ${row[0] === "enc" ? "enc" : ""}`}>
@@ -251,6 +280,7 @@ function LedLegend() {
   const { t } = useI18n();
   return (
     <div className="kc-legend">
+      <span className="kc-legend-title">{t("led.legend")}<InfoTip k="help.led" /></span>
       <span><LedDot color="green" effect="none" /> {t("led.color.green")}</span>
       <span><LedDot color="red" effect="none" /> {t("led.color.red")}</span>
       <span><LedDot color="orange" effect="none" /> {t("led.color.orange")}</span>
