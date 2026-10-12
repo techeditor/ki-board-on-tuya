@@ -575,72 +575,77 @@ static void test_keymap(void)
           "slot ids map k1..k6/enc to 0..6");
     CHECK(ak_keymap_slot_for_id("k7") == -1 && ak_keymap_slot_for_id(NULL) == -1,
           "unknown id has no slot");
+    CHECK(ak_keymap_slot_for_gesture("click") == AK_GESTURE_SLOT_CLICK &&
+              ak_keymap_slot_for_gesture("double") == AK_GESTURE_SLOT_DOUBLE &&
+              ak_keymap_slot_for_gesture("long") == AK_GESTURE_SLOT_LONG,
+          "gesture names map to slots");
+    CHECK(ak_keymap_slot_for_gesture("triple") == -1, "unknown gesture has no slot");
 
-    /* v0.3 defaults: K5=voice, K4=cancel, K6=confirm, K1-K3=chat. */
-    CHECK(ak_keymap_role(&map, "k5") == AK_KEY_ROLE_VOICE, "k5 is voice");
-    CHECK(ak_keymap_role(&map, "k4") == AK_KEY_ROLE_CANCEL, "k4 is cancel");
-    CHECK(ak_keymap_role(&map, "k6") == AK_KEY_ROLE_CONFIRM, "k6 is confirm");
-    CHECK(ak_keymap_role(&map, "k1") == AK_KEY_ROLE_CHAT, "k1 is chat");
+    /* v0.3 defaults: K5=voice; K1-K3 click=chatN double=instanceN;
+     * K4 click=cancel_char long=cancel_all; K6 click=confirm. */
+    CHECK(ak_keymap_is_voice(&map, "k5"), "k5 is the voice key");
+    CHECK(!ak_keymap_is_voice(&map, "k1"), "k1 is a normal key");
+    CHECK(ak_keymap_action(&map, "k1", AK_GESTURE_SLOT_CLICK) == ak_action_chat(1), "k1 click=chat1");
+    CHECK(ak_keymap_action(&map, "k2", AK_GESTURE_SLOT_DOUBLE) == ak_action_instance(2), "k2 double=instance2");
+    CHECK(ak_keymap_action(&map, "k4", AK_GESTURE_SLOT_CLICK) == AK_ACTION_CANCEL_CHAR, "k4 click=cancel_char");
+    CHECK(ak_keymap_action(&map, "k4", AK_GESTURE_SLOT_LONG) == AK_ACTION_CANCEL_ALL, "k4 long=cancel_all");
+    CHECK(ak_keymap_action(&map, "k6", AK_GESTURE_SLOT_CLICK) == AK_ACTION_CONFIRM, "k6 click=confirm");
+    CHECK(ak_keymap_action(&map, "k1", AK_GESTURE_SLOT_LONG) == AK_ACTION_NONE, "k1 long unbound");
+    CHECK(ak_keymap_action(&map, "zzz", AK_GESTURE_SLOT_CLICK) == AK_ACTION_NONE, "unknown id -> none");
 
-    /* K1-K3 use deferred single/double; voice uses immediate edges. */
-    CHECK(ak_keymap_gesture(&map, "k1") == AK_KEY_GESTURE_SINGLE_DOUBLE,
-          "k1 uses single/double detection");
-    CHECK(ak_keymap_gesture(&map, "k5") == AK_KEY_GESTURE_EDGE,
-          "k5 voice uses immediate edges");
-    CHECK(ak_keymap_role(&map, "zzz") == AK_KEY_ROLE_NONE,
-          "unknown id defaults to no role");
+    /* action encode/decode. */
+    CHECK(ak_action_chat_n(ak_action_chat(3)) == 3, "chat round-trips N");
+    CHECK(ak_action_instance_n(ak_action_instance(9)) == 9, "instance round-trips N");
+    CHECK(ak_action_chat(0) == AK_ACTION_NONE && ak_action_chat(10) == AK_ACTION_NONE, "chat N out of range -> none");
+    CHECK(ak_action_chat_n(AK_ACTION_CONFIRM) == 0, "confirm is not a chat");
+    CHECK(ak_action_valid(AK_ACTION_CANCEL_ALL) && ak_action_valid(ak_action_instance(1)), "valid encodings");
+    CHECK(!ak_action_valid(0x42), "garbage byte is not a valid action");
 
-    /* role_from_str: known strings parse, unknown is rejected (keeps current). */
-    ak_key_role_t r = AK_KEY_ROLE_NONE;
-    CHECK(ak_keymap_role_from_str("chat", &r) && r == AK_KEY_ROLE_CHAT, "parse chat");
-    CHECK(ak_keymap_role_from_str("voice", &r) && r == AK_KEY_ROLE_VOICE, "parse voice");
-    CHECK(ak_keymap_role_from_str("cancel", &r) && r == AK_KEY_ROLE_CANCEL, "parse cancel");
-    CHECK(ak_keymap_role_from_str("confirm", &r) && r == AK_KEY_ROLE_CONFIRM, "parse confirm");
-    CHECK(ak_keymap_role_from_str("none", &r) && r == AK_KEY_ROLE_NONE, "parse none");
-    r = AK_KEY_ROLE_CHAT;
-    CHECK(!ak_keymap_role_from_str("bogus", &r) && r == AK_KEY_ROLE_CHAT,
-          "unknown role string rejected, out untouched");
+    /* action_from_str: wire names parse; unknown rejected (out untouched). */
+    ak_action_t a = AK_ACTION_NONE;
+    CHECK(ak_keymap_action_from_str("cancel_char", &a) && a == AK_ACTION_CANCEL_CHAR, "parse cancel_char");
+    CHECK(ak_keymap_action_from_str("confirm", &a) && a == AK_ACTION_CONFIRM, "parse confirm");
+    CHECK(ak_keymap_action_from_str("chat5", &a) && a == ak_action_chat(5), "parse chat5");
+    CHECK(ak_keymap_action_from_str("instance2", &a) && a == ak_action_instance(2), "parse instance2");
+    CHECK(ak_keymap_action_from_str("none", &a) && a == AK_ACTION_NONE, "parse none");
+    a = AK_ACTION_CONFIRM;
+    CHECK(!ak_keymap_action_from_str("chat0", &a) && a == AK_ACTION_CONFIRM, "chat0 rejected, out untouched");
+    CHECK(!ak_keymap_action_from_str("bogus", &a) && a == AK_ACTION_CONFIRM, "unknown action rejected");
 
-    /* gesture_for_role: chat -> single/double, others -> edge. */
-    CHECK(ak_keymap_gesture_for_role(AK_KEY_ROLE_CHAT) == AK_KEY_GESTURE_SINGLE_DOUBLE,
-          "chat role implies single/double");
-    CHECK(ak_keymap_gesture_for_role(AK_KEY_ROLE_VOICE) == AK_KEY_GESTURE_EDGE,
-          "voice role implies edge");
-
-    /* apply_role: changing k5 to chat flips its gesture to single/double. */
+    /* bind / set_voice. */
     ak_keymap_t m2;
     ak_keymap_init_defaults(&m2);
-    CHECK(ak_keymap_apply_role(&m2, "k5", AK_KEY_ROLE_CHAT), "apply role to k5");
-    CHECK(ak_keymap_role(&m2, "k5") == AK_KEY_ROLE_CHAT, "k5 role now chat");
-    CHECK(ak_keymap_gesture(&m2, "k5") == AK_KEY_GESTURE_SINGLE_DOUBLE,
-          "k5 gesture now single/double after role change");
-    CHECK(!ak_keymap_apply_role(&m2, "k9", AK_KEY_ROLE_CHAT), "apply to unknown id fails");
+    CHECK(ak_keymap_bind(&m2, "k1", AK_GESTURE_SLOT_LONG, AK_ACTION_CONFIRM), "bind k1 long=confirm");
+    CHECK(ak_keymap_action(&m2, "k1", AK_GESTURE_SLOT_LONG) == AK_ACTION_CONFIRM, "k1 long now confirm");
+    CHECK(ak_keymap_set_voice(&m2, "k2") && ak_keymap_is_voice(&m2, "k2"), "k2 set to voice");
+    CHECK(!ak_keymap_bind(&m2, "k9", AK_GESTURE_SLOT_CLICK, AK_ACTION_CONFIRM), "bind unknown id fails");
 
-    /* KV blob round-trip: serialize m2, load into a fresh map, compare. */
+    /* KV blob round-trip (v2: version + 7*(kind + 3 actions) = 29 bytes). */
     uint8_t blob[AK_KEYMAP_BLOB_SIZE];
-    CHECK(ak_keymap_to_blob(&m2, blob, sizeof(blob)) == AK_KEYMAP_BLOB_SIZE,
-          "blob serializes to fixed size");
+    CHECK(AK_KEYMAP_BLOB_SIZE == 29u, "blob is 29 bytes");
+    CHECK(ak_keymap_to_blob(&m2, blob, sizeof(blob)) == AK_KEYMAP_BLOB_SIZE, "blob serializes");
     CHECK(blob[0] == AK_KEYMAP_BLOB_VERSION, "blob carries version byte");
     ak_keymap_t m3;
     ak_keymap_init_defaults(&m3);
     CHECK(ak_keymap_from_blob(&m3, blob, AK_KEYMAP_BLOB_SIZE), "blob loads");
-    CHECK(ak_keymap_role(&m3, "k5") == AK_KEY_ROLE_CHAT &&
-              ak_keymap_gesture(&m3, "k5") == AK_KEY_GESTURE_SINGLE_DOUBLE,
-          "round-trip preserves k5 chat + derived gesture");
+    CHECK(ak_keymap_is_voice(&m3, "k2") && ak_keymap_action(&m3, "k1", AK_GESTURE_SLOT_LONG) == AK_ACTION_CONFIRM,
+          "round-trip preserves voice + binding");
 
-    /* Corrupt/wrong-version/size blobs are rejected, leaving map untouched. */
+    /* Corrupt/wrong-version/size/action blobs are rejected, map untouched. */
     ak_keymap_t m4;
     ak_keymap_init_defaults(&m4);
-    uint8_t bad_ver[AK_KEYMAP_BLOB_SIZE];
-    memcpy(bad_ver, blob, sizeof(bad_ver));
-    bad_ver[0] = 99;
-    CHECK(!ak_keymap_from_blob(&m4, bad_ver, AK_KEYMAP_BLOB_SIZE), "wrong version rejected");
+    uint8_t bad[AK_KEYMAP_BLOB_SIZE];
+    memcpy(bad, blob, sizeof(bad));
+    bad[0] = 99;
+    CHECK(!ak_keymap_from_blob(&m4, bad, AK_KEYMAP_BLOB_SIZE), "wrong version rejected");
     CHECK(!ak_keymap_from_blob(&m4, blob, AK_KEYMAP_BLOB_SIZE - 1), "wrong size rejected");
-    uint8_t bad_role[AK_KEYMAP_BLOB_SIZE];
-    memcpy(bad_role, blob, sizeof(bad_role));
-    bad_role[1] = 42; /* out-of-range role */
-    CHECK(!ak_keymap_from_blob(&m4, bad_role, AK_KEYMAP_BLOB_SIZE), "out-of-range role rejected");
-    CHECK(ak_keymap_role(&m4, "k1") == AK_KEY_ROLE_CHAT, "rejected blob left map at defaults");
+    memcpy(bad, blob, sizeof(bad));
+    bad[2] = 0x42; /* first action byte -> garbage */
+    CHECK(!ak_keymap_from_blob(&m4, bad, AK_KEYMAP_BLOB_SIZE), "invalid action rejected");
+    memcpy(bad, blob, sizeof(bad));
+    bad[1] = 7; /* kind byte -> invalid */
+    CHECK(!ak_keymap_from_blob(&m4, bad, AK_KEYMAP_BLOB_SIZE), "invalid kind rejected");
+    CHECK(ak_keymap_action(&m4, "k1", AK_GESTURE_SLOT_CLICK) == ak_action_chat(1), "rejected blob left defaults");
 }
 
 int main(void)

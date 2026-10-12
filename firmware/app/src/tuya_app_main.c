@@ -537,7 +537,7 @@ static void ak_pending_confirm_enter(uint32_t now_ms);
 static void ak_pending_confirm_exit(void);
 static void ak_pending_confirm_tick(uint32_t now_ms);
 static void ak_status_bar_set(const char *text, uint16_t color);
-static void dispatch_edit_action(const char *id, const char *action);
+static void dispatch_gesture_for_slot(const char *id, ak_gesture_t g);
 static void ak_select_session_key(const char *id);
 static void ak_render_status(void);
 static void ak_settings_draw(void);
@@ -586,50 +586,60 @@ static void ak_emit_encoder_frame(int32_t detents)
  * frame, and give CHAT keys their local session highlight on a single click.
  * Called from on_input_event (DOUBLE) and the main loop's gesture tick (SINGLE
  * timeout). role lets the CHAT keys drive the on-screen A/B/C selection. */
-static void dispatch_key_gesture(const char *id, ak_key_role_t role, ak_gesture_t g)
+/* Execute the ACTION bound to a resolved gesture on a NORMAL key (design §5.5).
+ * chat/instance actions are reported to the Companion as a click/double key
+ * frame carrying the resolved target (chatN / instanceN); cancel/confirm are
+ * post-ASR edit intents handled only while pending-confirm. `slot` names which
+ * gesture fired, so the wire action string is right. Returns true if the event
+ * was consumed (so the raw edge is not also forwarded). */
+static void dispatch_action_frame(const char *id, const char *wire_action)
 {
-    const char *action;
-    switch (g) {
-    case AK_GESTURE_SINGLE: action = "click";  break;
-    case AK_GESTURE_DOUBLE: action = "double"; break;
-    default:                return; /* NONE / LONG not produced for these keys */
+    char     frame[FRAME_BUFFER_SIZE];
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
     }
+    transport_end_sequenced(
+        frame, ak_proto_key(frame, sizeof(frame), sequence, id, wire_action, 0U));
+    PR_DEBUG("action %s %s", id, wire_action);
+}
 
+/* Map an encoded action + the gesture slot that triggered it to the wire action
+ * string the Companion expects, and run any local side effect. Returns false if
+ * the action is NONE / unhandled (nothing emitted). */
+static bool execute_key_action(const char *id, ak_action_t action, ak_gesture_slot_t slot)
+{
+    uint8_t n;
+    if ((n = ak_action_chat_n(action)) != 0u) {
+        /* chat N: single click = jump to chat (Companion Alt+N). The gesture
+         * slot that carries chat is reported as click/double so the Companion
+         * router (which maps click->JumpChat, double->SwitchInstance) stays the
+         * contract. A chat action bound to the double slot still reports its own
+         * slot; the Companion maps by the delivered action name below. */
+        (void)n;
 #if AK_ENABLE_DISPLAY
-    /* A single click on a CHAT key focuses its A/B/C session locally (double =
-     * switch instance, which is a Companion-side Ctrl+N; nothing local). */
-    if (role == AK_KEY_ROLE_CHAT && g == AK_GESTURE_SINGLE) {
-        ak_select_session_key(id);
-    }
-#else
-    (void)role;
+        if (slot == AK_GESTURE_SLOT_CLICK) {
+            ak_select_session_key(id); /* local A/B/C highlight on single click */
+        }
 #endif
-
-    char     frame[FRAME_BUFFER_SIZE];
-    uint32_t sequence;
-    if (!transport_begin_sequenced(&sequence)) {
-        return;
+        dispatch_action_frame(id, slot == AK_GESTURE_SLOT_DOUBLE ? "double" : "click");
+        return true;
     }
-    transport_end_sequenced(
-        frame, ak_proto_key(frame, sizeof(frame), sequence, id, action, 0U));
-    PR_DEBUG("gesture %s %s", id, action);
+    if (ak_action_instance_n(action) != 0u) {
+        /* instance N: switch Crew instance (Companion Ctrl+N). Reported as the
+         * triggering slot (normally double). */
+        dispatch_action_frame(id, slot == AK_GESTURE_SLOT_DOUBLE ? "double" : "click");
+        return true;
+    }
+    /* cancel/confirm are pending-confirm edits, handled by the caller only while
+     * s_pending_confirm; outside that they do nothing. */
+    return false;
 }
 
-/* Emit a post-ASR edit intent (cancel_char / cancel_all / confirm) as a key
- * frame; the Companion injects the matching PC edit key. */
-static void dispatch_edit_action(const char *id, const char *action)
-{
-    char     frame[FRAME_BUFFER_SIZE];
-    uint32_t sequence;
-    if (!transport_begin_sequenced(&sequence)) {
-        return;
-    }
-    transport_end_sequenced(
-        frame, ak_proto_key(frame, sizeof(frame), sequence, id, action, 0U));
-    PR_DEBUG("edit %s %s", id, action);
-}
-
-/* Input event -> local settings UI or JSONL frame on the active transport. */
+/* Input event -> local settings UI or JSONL frame on the active transport.
+ * v0.3 stage 乙: VOICE keys run the hold-to-talk edge path; every other key is
+ * NORMAL and runs the single/double/long classifier, whose resolved gesture
+ * selects the bound action from the keymap. */
 static void on_input_event(ak_input_kind_t kind, const char *id,
                            ak_input_event_t event, uint32_t held_ms)
 {
@@ -643,88 +653,77 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
         return;
     }
 
-    ak_key_role_t         role    = ak_keymap_role(&s_keymap, id);
-    ak_key_gesture_mode_t gesture = ak_keymap_gesture(&s_keymap, id);
-
-    /* CHAT keys (K1-K3): deferred single/double. Feed the classifier here;
-     * ak_gesture_tick() in the main loop resolves a lone single. The resolved
-     * gesture becomes a key.action "click"/"double" frame (see dispatch_key_
-     * gesture); raw down/up are NOT forwarded for these keys. */
-    if (gesture == AK_KEY_GESTURE_SINGLE_DOUBLE) {
-        int slot = ak_keymap_slot_for_id(id);
-        if (slot >= 0) {
-            ak_gesture_t g = ak_gesture_feed(&s_key_gesture[slot], event,
-                                             tal_system_get_millisecond(), held_ms);
-            dispatch_key_gesture(id, role, g);
+    /* VOICE key (hold-to-talk; K5 by default): immediate-edge PTT. Cloud
+     * consumes DOWN/LONG/UP as one latched HOLD; system emits DOWN/UP dictation.
+     * No gesture classification. */
+    if (ak_keymap_is_voice(&s_keymap, id)) {
+        ak_emit_input_frame(kind, id, event, held_ms);
+        if (event == AK_INPUT_EVENT_DOWN || event == AK_INPUT_EVENT_LONG ||
+            event == AK_INPUT_EVENT_UP) {
+            if (ak_dclick_feed(&s_ptt_dclick, event, tal_system_get_millisecond(), held_ms) &&
+                s_voice_route.effective == AK_VOICE_CLOUD && ak_asr_available()) {
+                ak_asr_play_prompt();
+            }
+            on_ptt_event(event);
         }
         return;
     }
 
-    /* Pending-confirm (post-ASR): K4/K6 become edit keys. Intercept BEFORE the
-     * raw edge is forwarded so no stray down/up leaks while confirming.
-     * K4 (cancel): long = cancel_all (+exit), click = cancel_char.
-     * K6 (confirm): click = confirm (+exit). A LONG sets a per-event flag so the
-     * following UP is not also treated as a click.
-     *
-     * Display-gated because the pending-confirm state machine, its enter point
-     * (in ak_voice_ui_tick, which renders ASR text to the LCD) and its hint
-     * LEDs all live behind AK_ENABLE_DISPLAY. All four v0.3 profiles set
-     * CONFIG_ENABLE_DISPLAY=y, so this always compiles in practice; the
-     * compile-time guard in ak_keymap.h (AK_KEYMAP_CANCEL_CONFIRM_NEED_DISPLAY)
-     * fails the build loudly if a future non-display profile ships cancel/
-     * confirm roles, rather than letting them silently become dead edges. */
+    /* NORMAL key: feed the single/double/long classifier. The resolved gesture
+     * picks the bound action; raw down/up are NOT forwarded. */
+    int slot = ak_keymap_slot_for_id(id);
+    if (slot < 0) {
+        return;
+    }
+    ak_gesture_t g = ak_gesture_feed(&s_key_gesture[slot], event,
+                                     tal_system_get_millisecond(), held_ms);
+    dispatch_gesture_for_slot(id, g);
+}
+
+/* Resolve a classified gesture (SINGLE/DOUBLE/LONG) on a NORMAL key to its bound
+ * action and run it. Pending-confirm edits (cancel/confirm) are intercepted here
+ * while the board awaits confirmation; otherwise the chat/instance frame is
+ * emitted. Called from on_input_event and the main-loop gesture tick (which
+ * resolves a lone SINGLE after the double-click window). */
+static void dispatch_gesture_for_slot(const char *id, ak_gesture_t g)
+{
+    ak_gesture_slot_t gslot;
+    switch (g) {
+    case AK_GESTURE_SINGLE: gslot = AK_GESTURE_SLOT_CLICK;  break;
+    case AK_GESTURE_DOUBLE: gslot = AK_GESTURE_SLOT_DOUBLE; break;
+    case AK_GESTURE_LONG:   gslot = AK_GESTURE_SLOT_LONG;   break;
+    default:                return; /* NONE: nothing resolved yet */
+    }
+    ak_action_t action = ak_keymap_action(&s_keymap, id, gslot);
+    if (action == AK_ACTION_NONE) {
+        return;
+    }
+
 #if AK_ENABLE_DISPLAY
+    /* Pending-confirm (post-ASR): a cancel/confirm action edits the PC composer.
+     * The firmware owns this state (design §0.2); the LCD status bar is the only
+     * display-gated part. */
     if (s_pending_confirm &&
-        (role == AK_KEY_ROLE_CANCEL || role == AK_KEY_ROLE_CONFIRM)) {
-        /* Per-key long-press guard (K4 and K6 tracked separately) so one key's
-         * long press cannot suppress the other's click, and a long press is
-         * never mistaken for a click on release. */
-        static bool s_pc_long_fired[AK_KEYMAP_SLOTS];
-        int slot = ak_keymap_slot_for_id(id);
-        bool *long_fired = (slot >= 0) ? &s_pc_long_fired[slot] : &s_pc_long_fired[0];
-        if (event == AK_INPUT_EVENT_DOWN) {
-            *long_fired = false;
-        } else if (event == AK_INPUT_EVENT_LONG) {
-            /* Any long press marks this press so the following UP is NOT a click.
-             * K4 long = cancel_all (+exit); K6 long has no action but must still
-             * block the release from being read as a confirm. */
-            *long_fired = true;
-            if (role == AK_KEY_ROLE_CANCEL) {
-                dispatch_edit_action(id, "cancel_all");
-                ak_pending_confirm_exit();
-                ak_status_bar_set("Input cancelled", AK_COL_ORANGE);
-            }
-        } else if (event == AK_INPUT_EVENT_UP) {
-            if (!*long_fired) {
-                if (role == AK_KEY_ROLE_CANCEL) {
-                    dispatch_edit_action(id, "cancel_char"); /* delete one char */
-                } else { /* CONFIRM */
-                    dispatch_edit_action(id, "confirm");
-                    ak_pending_confirm_exit();
-                    ak_status_bar_set("Input confirmed", AK_COL_GREEN);
-                }
-            }
-            *long_fired = false;
+        (action == AK_ACTION_CANCEL_CHAR || action == AK_ACTION_CANCEL_ALL ||
+         action == AK_ACTION_CONFIRM)) {
+        if (action == AK_ACTION_CANCEL_CHAR) {
+            dispatch_action_frame(id, "cancel_char");
+        } else if (action == AK_ACTION_CANCEL_ALL) {
+            dispatch_action_frame(id, "cancel_all");
+            ak_pending_confirm_exit();
+            ak_status_bar_set("Input cancelled", AK_COL_ORANGE);
+        } else { /* CONFIRM */
+            dispatch_action_frame(id, "confirm");
+            ak_pending_confirm_exit();
+            ak_status_bar_set("Input confirmed", AK_COL_GREEN);
         }
         ak_render_status();
-        return; /* swallow: no raw edge while in pending-confirm */
+        return;
     }
 #endif
 
-    /* EDGE keys: forward the raw edge as before. */
-    ak_emit_input_frame(kind, id, event, held_ms);
-
-    /* VOICE role (push-to-talk; K5 by default). Cloud consumes DOWN/LONG/UP as
-     * one latched HOLD; system emits immediate DOWN/UP dictation. */
-    if (role == AK_KEY_ROLE_VOICE &&
-        (event == AK_INPUT_EVENT_DOWN || event == AK_INPUT_EVENT_LONG ||
-         event == AK_INPUT_EVENT_UP)) {
-        if (ak_dclick_feed(&s_ptt_dclick, event, tal_system_get_millisecond(), held_ms) &&
-            s_voice_route.effective == AK_VOICE_CLOUD && ak_asr_available()) {
-            ak_asr_play_prompt();
-        }
-        on_ptt_event(event);
-    }
+    /* chat/instance (or any non-pending action outside pending-confirm). */
+    (void)execute_key_action(id, action, gslot);
 }
 
 /* EC11 rotation -> test page / settings UI when modal, else an encoder frame. */
@@ -2207,32 +2206,59 @@ static void on_rx_line(const char *line)
         }
         send_ack(seq);
     } else if (strcmp(type, "keymap") == 0) {
-        /* Plan A: Companion downlinks per-key roles; apply to the live table,
-         * cache the result in TAL KV, and ack. Omitted keys keep their current
-         * role (partial update); unknown role strings are ignored. */
+        /* Plan A (stage 乙): Companion downlinks per-gesture bindings via flat
+         * dotted fields — "<key>.kind"="voice" makes a key hold-to-talk;
+         * "<key>.click"/".double"/".long"=<action wire> binds a gesture slot.
+         * Omitted fields keep the board's current binding (partial update);
+         * unknown action strings are ignored. The resolved table is cached in
+         * TAL KV and acked. */
         uint32_t seq = 0;
         ak_json_uint(line, "seq", &seq);
         static const char *const slot_ids[AK_KEYMAP_SLOTS] = {
             "k1", "k2", "k3", "k4", "k5", "k6", "enc",
         };
+        static const char *const gesture_fields[AK_GESTURE_SLOT_COUNT] = {
+            "click", "double", "long",
+        };
         bool changed = false;
+        char field[16];
+        char value[16];
         for (int i = 0; i < AK_KEYMAP_SLOTS; i++) {
-            char role_str[16] = "";
-            if (ak_json_str(line, slot_ids[i], role_str, sizeof(role_str))) {
-                ak_key_role_t role;
-                if (ak_keymap_role_from_str(role_str, &role)) {
-                    if (ak_keymap_apply_role(&s_keymap, slot_ids[i], role)) {
+            /* <key>.kind = voice|normal */
+            snprintf(field, sizeof(field), "%s.kind", slot_ids[i]);
+            if (ak_json_str(line, field, value, sizeof(value))) {
+                if (strcmp(value, "voice") == 0) {
+                    if (ak_keymap_set_voice(&s_keymap, slot_ids[i])) {
                         changed = true;
                     }
-                } else {
-                    PR_WARN("keymap: ignoring unknown role '%s' for %s",
-                            role_str, slot_ids[i]);
+                } else if (strcmp(value, "normal") == 0) {
+                    /* Binding any gesture below also forces NORMAL; an explicit
+                     * normal with no gesture fields just clears the voice flag. */
+                    (void)ak_keymap_bind(&s_keymap, slot_ids[i], AK_GESTURE_SLOT_CLICK,
+                                         ak_keymap_action(&s_keymap, slot_ids[i], AK_GESTURE_SLOT_CLICK));
+                    changed = true;
+                }
+            }
+            /* <key>.click/.double/.long = <action wire> */
+            for (int gslot = 0; gslot < AK_GESTURE_SLOT_COUNT; gslot++) {
+                snprintf(field, sizeof(field), "%s.%s", slot_ids[i], gesture_fields[gslot]);
+                if (ak_json_str(line, field, value, sizeof(value))) {
+                    ak_action_t action;
+                    if (ak_keymap_action_from_str(value, &action)) {
+                        if (ak_keymap_bind(&s_keymap, slot_ids[i], (ak_gesture_slot_t)gslot, action)) {
+                            changed = true;
+                        }
+                    } else {
+                        PR_WARN("keymap: ignoring unknown action '%s' for %s.%s",
+                                value, slot_ids[i], gesture_fields[gslot]);
+                    }
                 }
             }
         }
         if (changed) {
-            /* Re-init the CHAT keys' gesture classifiers: a role change can
-             * switch a slot between edge and single/double detection. */
+            /* A kind/binding change can move a slot between the voice-edge path
+             * and the gesture classifier; re-init all classifiers so none keeps
+             * stale half-state. */
             for (int gi = 0; gi < AK_KEYMAP_SLOTS; gi++) {
                 ak_gesture_init(&s_key_gesture[gi]);
             }
@@ -2748,16 +2774,17 @@ static void user_main(void)
 
         ak_input_poll(now, on_input_event, on_encoder_event);
 
-        /* Resolve a pending single-click on the CHAT keys once its double-click
-         * window lapses with no second press (scheme X). */
+        /* Resolve a pending single-click once its double-click window lapses with
+         * no second press (scheme X). Every NORMAL key runs the classifier; the
+         * VOICE key does not. */
         for (int gi = 0; gi < AK_KEYMAP_SLOTS; gi++) {
-            if (s_keymap.entries[gi].gesture != AK_KEY_GESTURE_SINGLE_DOUBLE) {
+            if (s_keymap.entries[gi].kind != AK_KEY_KIND_NORMAL) {
                 continue;
             }
             ak_gesture_t g = ak_gesture_tick(&s_key_gesture[gi], now);
             if (g != AK_GESTURE_NONE) {
                 const char *id = ak_keymap_id_for_slot(gi);
-                dispatch_key_gesture(id, s_keymap.entries[gi].role, g);
+                dispatch_gesture_for_slot(id, g);
             }
         }
 

@@ -131,59 +131,78 @@ through SendInput again. Its own steps keep their gating and `(i)` help.
 
 Switching calls the Tauri window-resize API and flips a `mode` flag; no data refetch.
 
-## 5.5 Keymap config — role-driven, board-map default + table advanced / 按键配置
+## 5.5 Keymap config — per-gesture action binding (stage 乙, simplified) / 按键配置
 
-The v0.3 keymap panel (Phase 4.5) presents each key's behaviour as a
-**(state × gesture) → (action, LED)** matrix, but that matrix is **derived from a
-single per-key ROLE**, not edited row by row. This is stage 甲 (A); fully
-per-rule editing is stage 乙 (B), deferred.
+The v0.3 keymap panel (Phase 4.5) lets the user **bind an action to each gesture
+of each key, one gesture per row**. This supersedes stage 甲 (role-only, read-only
+rules). The simplification that makes it tractable: **only the voice key needs the
+immediate-edge path; every other key is an ordinary key** that runs the standard
+single/double/long gesture classifier. So the UI never exposes the word "edge" —
+there is just the voice key (special, hold-to-talk, no gesture rows) and ordinary
+keys (click/double/long rows, each freely bound to an action).
 
-### 5.5.1 Two entry points
-- **Board map (default, option C).** A physical-layout grid of K1-K6 + the EC11
-  push. Each key cell shows its role label and a live LED dot that **mirrors the
-  board's real-time light** (idle green, busy red, waiting orange, info blue;
-  effect = single/double/breathing). Clicking a key opens an **inspector** below
-  the grid showing that key's read-only (state × gesture) rule rows for its
-  current role, plus the one editable control: the **role picker**. This is the
-  default surface — "what is each key, and what is it doing right now".
-- **Table (advanced, option A).** A disclosure ("Advanced — table view") flips to
-  a dense one-row-per-key table: role picker + K1-K3 chat#/instance# inline,
-  all 7 keys on one screen for a power user to set everything at once. Same data,
-  same `set_keymap` downlink; purely a denser editor.
+### 5.5.1 Per-key model
+Each of K1-K6 + EC11 is one of two KINDS:
+- **`voice`** — hold-to-talk. Internally an immediate-edge PTT key (down starts
+  recording, up stops). It has NO gesture rows; the UI shows it as a single
+  "Voice" tile. Default: K5.
+- **`normal`** — the standard key. Runs the single/double/long classifier and
+  carries three gesture SLOTS: `click`, `double`, `long`, each bound to one
+  ACTION (or unbound). Default on the others.
 
-### 5.5.2 Role → rule-matrix map (the inspector's read-only rows)
-A role fully determines a key's behaviour across states; the inspector renders
-these rows (NOT editable in 甲 — change behaviour by changing the role):
+`long` fires immediately when the hold threshold (~800ms) is crossed (desktop
+long-press feel); that press's `click`/`double` then does not also fire.
 
-| role | state | gesture | action | LED (color · effect) |
-|---|---|---|---|---|
-| `chat` | any | click | jump to chat N (Alt+N) | follow-press · single blink |
-| `chat` | any | double | switch instance N (Ctrl+N, Local/Remote) | follow-press · double blink |
-| `voice` | idle | hold | push-to-talk record | — (voice UI drives it) |
-| `cancel` | pending-confirm | click | delete one char | red · single blink |
-| `cancel` | pending-confirm | long | delete all (+ exit pending) | red · breathing |
-| `confirm` | pending-confirm | click | confirm / submit (+ exit) | green · single blink |
-| `none` | any | — | report only / local nav (enc) | — |
+### 5.5.2 Action library (what a gesture slot can bind)
+| action | wire | meaning | default LED (color · effect) |
+|---|---|---|---|
+| `none` | `none` | unbound | — |
+| `chat:N` | `chat1`…`chat9` | jump to chat N (Alt+N) | follow-press · single |
+| `instance:N` | `instance1`…`instance9` | switch Crew instance N (Ctrl+N) | follow-press · double |
+| `cancel_char` | `cancel_char` | delete one char (pending-confirm) | red · single |
+| `cancel_all` | `cancel_all` | delete all + exit pending | red · breathing |
+| `confirm` | `confirm` | confirm / submit + exit pending | green · single |
 
-`chat` keys additionally expose two numbers (chat# for click→Alt+N,
-instance# for double→Ctrl+N). The gesture-detection mode shown is derived:
-`chat` → single/double, else edge. The whole table above is static UI data in
-`src/keymap/roleRules.ts` keyed by role; it is NOT fetched and NOT editable in 甲.
+The action library is extensible (command bar, new chat, macros) without a model
+change — add a row here. LED color/effect is DERIVED from the action for now (a
+default map); per-row custom LED is a later increment (乙-全), out of scope.
 
-### 5.5.3 LED legend + live mirror
-The board map renders the §0.3/§0.5 LED legend once (color = state, effect =
-gesture) and each key dot reflects the board's current light, so the panel
-doubles as the LED status view (T4.5.3's pending-confirm visualizer lights K4
-red-breathing / K6 green-blink exactly as the board does).
+### 5.5.3 Two entry points (unchanged from the board-map decision)
+- **Board map (default, option C).** Physical K1-K6 + EC11 grid, live LED dot per
+  key mirroring the board. Click a key → inspector showing its KIND and, for a
+  normal key, the three gesture rows (click/double/long), each with an action
+  picker. The voice key's inspector just says hold-to-talk.
+- **Table (advanced, option A).** Dense editor: one block per key, its gesture
+  rows inline. Same data, same downlink.
 
-### 5.5.4 Stage 甲 vs 乙
-- **甲 (this spec):** role is the unit of configuration; the (state×gesture→
-  action,LED) matrix is role-defined and read-only. `set_keymap` downlinks the
-  7 roles. Matches the shipped firmware exactly.
-- **乙 (future):** per-rule editing — a user redefines what K1 double does and
-  which LED it drives. Requires extending the firmware keymap from "one role per
-  key" to "a (state×gesture)→(action,LED) rule table per key" + a richer downlink
-  frame. Out of scope here; the roleRules.ts table is the seed for its defaults.
+### 5.5.4 Protocol / firmware contract (the big change vs 甲)
+The firmware keymap moves from "one role per key" to "a per-gesture action map
+per key", and the `keymap` downlink frame carries the bindings. To stay within
+the flat `ak_json_str` extractor (no cJSON), the wire uses flat dotted keys —
+one field per (key, gesture):
+
+```
+{"v":1,"type":"keymap","payload":{
+  "k1.click":"chat1","k1.double":"instance1","k1.long":"none",
+  "k4.click":"cancel_char","k4.long":"cancel_all",
+  "k5.kind":"voice",
+  "k6.click":"confirm", ...}}
+```
+
+- `<key>.kind` = `voice` makes that key the PTT key (no gesture fields read).
+- `<key>.click` / `.double` / `.long` = an action wire name from §5.5.2.
+- Omitted fields keep the board's current binding (partial update).
+- Firmware stores the resolved table in TAL KV (versioned blob, as before).
+- The companion route maps each delivered gesture action to its injection
+  (chatN→Alt+N, instanceN→Ctrl+N, cancel_*/confirm→the composer edits).
+
+This replaces the 7-role `set_keymap` of 甲. `src/keymap/roleRules.ts` is retired
+in favour of `src/keymap/actions.ts` (the action library + default-LED map) and a
+`KeymapState` of per-key gesture bindings.
+
+### 5.5.5 LED legend + live mirror (unchanged)
+The board map renders the §0.3/§0.5 LED legend and each key dot reflects the
+board's current light, doubling as the LED status view.
 
 ## 6. Tooltip component / 浮层组件
 

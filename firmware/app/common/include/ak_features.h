@@ -58,11 +58,11 @@
  * enter point sits in the ASR-text LCD renderer. All shipping v0.3 profiles set
  * CONFIG_ENABLE_DISPLAY=y, so this is always satisfied. The #warning below fires
  * if a future non-display profile is built: it is a LOUD reminder that cancel/
- * confirm keymap roles would be dead on such a build (the edges would fall
- * through to no-op raw frames) and the pending-confirm state machine must be
+ * confirm keymap actions would be dead on such a build (the gestures would
+ * resolve to no-op) and the pending-confirm state machine must be
  * lifted out of AK_ENABLE_DISPLAY before shipping a display-less target. */
 #if !AK_ENABLE_DISPLAY
-#warning "AK_ENABLE_DISPLAY=0: v0.3 pending-confirm (K4 cancel / K6 confirm) is compiled out; cancel/confirm keymap roles will be inert on this build."
+#warning "AK_ENABLE_DISPLAY=0: v0.3 pending-confirm (cancel / confirm actions) is compiled out; those keymap actions will be inert on this build."
 #endif
 
 /* Development-only USB/UART0 command that reports the full UUID, the last
