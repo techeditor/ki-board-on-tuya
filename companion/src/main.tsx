@@ -4,6 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create as createQrCode } from "qrcode";
 import "./styles.css";
+import "./theme/components.css";
+import { ThemeProvider, THEMES, type ThemeId } from "./theme";
+import { I18nProvider, LOCALES, useI18n, type Locale } from "./i18n";
+import { Card } from "./ui/primitives";
 
 // ─── Types mirroring the Rust backend (src-tauri/src/lib.rs) ────────────────
 
@@ -191,7 +195,8 @@ const NAV_LAYOUT: (string | null)[] = [
   null, "down", null,
 ];
 
-function App() {
+function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => void }) {
+  const { t, locale, setLocale } = useI18n();
   const [status, setStatus] = useState<Status>(defaultStatus);
   const [ports, setPorts] = useState<SerialPortInfo[]>([]);
   const [selectedPort, setSelectedPort] = useState("");
@@ -890,8 +895,28 @@ function App() {
             <div className="eyebrow">UART / USB-CDC · 5 keys + 5-way nav · voice</div>
             <h2>{viewTitle(activeView)}</h2>
           </div>
-          <div className={status.device_connected ? "status online" : "status"}>
-            {status.device_connected ? "BOARD ONLINE" : "BOARD OFFLINE"}
+          <div className="kc-topbar-ctrls">
+            <div className={status.device_connected ? "status online" : "status"}>
+              {status.device_connected ? "BOARD ONLINE" : "BOARD OFFLINE"}
+            </div>
+            <select
+              aria-label={t("common.theme")}
+              value={theme}
+              onChange={(e) => setTheme(e.target.value as ThemeId)}
+            >
+              {THEMES.map((th) => (
+                <option key={th.id} value={th.id}>{th.label}</option>
+              ))}
+            </select>
+            <select
+              aria-label={t("common.language")}
+              value={locale}
+              onChange={(e) => setLocale(e.target.value as Locale)}
+            >
+              {LOCALES.map((l) => (
+                <option key={l.id} value={l.id}>{l.label}</option>
+              ))}
+            </select>
           </div>
         </header>
 
@@ -1747,50 +1772,48 @@ function App() {
         )}
 
         {activeView === "logs" && (
-          <Panel title="Event Stream">
-            <div className="actions" style={{ marginTop: 0 }}>
+          <Card title={t("nav.logs")}>
+            <div className="kc-keymap-head" style={{ marginBottom: 10 }}>
               <button
-                className={logsShowRaw ? "secondary" : ""}
+                type="button"
+                className={`kc-seg ${!logsShowRaw ? "on" : ""}`}
                 onClick={() => setLogsShowRaw(false)}
               >
                 Detailed
               </button>
               <button
-                className={logsShowRaw ? "" : "secondary"}
+                type="button"
+                className={`kc-seg ${logsShowRaw ? "on" : ""}`}
                 onClick={() => setLogsShowRaw(true)}
               >
                 Raw JSON
               </button>
+            </div>
+            <div className="kc-keymap-actions" style={{ marginTop: 0, justifyContent: "flex-start", gap: 8 }}>
               <button
-                className={logsPaused ? "" : "secondary"}
+                type="button"
+                className={`kc-btn ${logsPaused ? "" : "ghost"}`}
                 onClick={toggleLogsPause}
                 title={logsPaused ? "继续滚动并补回暂停期间的日志" : "冻结日志便于观察/复制"}
               >
                 {logsPaused ? `▶ 继续${pausedCount ? ` (+${pausedCount})` : ""}` : "⏸ 暂停"}
               </button>
-              <button className="secondary" onClick={() => runAction(clearLogs)}>Clear</button>
+              <button type="button" className="kc-btn ghost" onClick={() => runAction(clearLogs)}>
+                Clear
+              </button>
             </div>
-            <p className="hint">
-              {logsPaused
-                ? `已暂停 — 显示已冻结，可安心选择/复制${
-                    pausedCount ? `；暂停期间缓冲了 ${pausedCount} 条新日志，点"继续"补回` : ""
-                  }。`
-                : logsShowRaw
-                ? "Raw board-frame JSON, one object per line (as received over the transport)."
-                : "Human-readable event log ([RX] key/nav/voice, [KC-CTL], [INFO]/[ERROR])."}
-            </p>
-            <div className="log">
+            <div className="kc-log">
               {logsShowRaw ? (
                 logsRaw.length === 0
                   ? "No frames yet. Connect the board to see raw JSON frames."
                   : logsRaw.map((line, index) => <div key={`raw-${index}`}>{line}</div>)
               ) : logs.length === 0 ? (
-                "No events yet. Connect the board to see key / nav / voice frames."
+                "No events yet. Connect the board to see key / voice frames."
               ) : (
                 logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)
               )}
             </div>
-          </Panel>
+          </Card>
         )}
       </section>
     </main>
@@ -1819,4 +1842,38 @@ function viewTitle(view: string): string {
   }
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+function Root() {
+  const prefs = (() => {
+    try {
+      const raw = localStorage.getItem("ak-ui-prefs");
+      if (raw) {
+        const p = JSON.parse(raw) as { theme?: string; locale?: string };
+        return {
+          theme: p.theme === "kc-light" ? "kc-light" : "kc-dark",
+          locale: p.locale === "en" ? "en" : "zh",
+        } as const;
+      }
+    } catch {
+      /* ignore */
+    }
+    return { theme: "kc-dark", locale: "zh" } as const;
+  })();
+  const [theme, setTheme] = useState<ThemeId>(prefs.theme as ThemeId);
+  const [locale, setLocale] = useState<Locale>(prefs.locale as Locale);
+  useEffect(() => {
+    try {
+      localStorage.setItem("ak-ui-prefs", JSON.stringify({ theme, locale }));
+    } catch {
+      /* ignore */
+    }
+  }, [theme, locale]);
+  return (
+    <ThemeProvider initial={theme} onChange={setTheme}>
+      <I18nProvider locale={locale} setLocale={setLocale}>
+        <App theme={theme} setTheme={setTheme} />
+      </I18nProvider>
+    </ThemeProvider>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<Root />);

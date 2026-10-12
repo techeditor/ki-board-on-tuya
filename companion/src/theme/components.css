@@ -75,6 +75,9 @@
 .kc-resolved { font-size: 11px; color: var(--accent-text); margin-top: 4px; }
 .kc-legend-title { font-weight: 600; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
 .kc-applied { font-size: 12px; color: var(--success); align-self: center; margin-right: auto; }
+.kc-log { margin-top: 12px; background: var(--field); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 10px 12px; font-family: var(--mono); font-size: 11px; line-height: 1.6; color: var(--muted); max-height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.kc-topbar-ctrls { display: inline-flex; gap: 8px; align-items: center; }
+.kc-topbar-ctrls select { background: var(--field); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 8px; font: inherit; font-size: 12px; }
 
 /* App shell + header + modes */
 .kc-shell { max-width: 980px; margin: 0 auto; padding: 16px; }
