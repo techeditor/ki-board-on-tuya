@@ -112,20 +112,18 @@ pub fn device_settings_payload(volume: u8, brightness: u8) -> Value {
     })
 }
 
-/// PC -> board: downlink the per-key role table (plan A, keymap config
-/// authority). `roles` are the roles for k1..k6 then enc (index 0..=6);
-/// each is one of "none"/"chat"/"voice"/"cancel"/"confirm". The firmware
-/// derives each key's gesture mode from its role and caches the table in
-/// TAL KV. Entries beyond the first 7 are ignored; missing ones are omitted
-/// (the board keeps that key's current role).
-pub fn keymap_payload(roles: &[String]) -> Value {
-    const SLOT_IDS: [&str; 7] = ["k1", "k2", "k3", "k4", "k5", "k6", "enc"];
+/// PC -> board: downlink per-gesture keymap bindings (plan A, stage 乙). Each
+/// binding is a flat dotted field "<key>.<slot>" -> action wire name, where
+/// slot is "kind" (value "voice"/"normal") or a gesture "click"/"double"/
+/// "long" (value an action: none/cancel_char/cancel_all/confirm/chatN/
+/// instanceN). Only non-empty bindings are emitted; omitted fields leave the
+/// board's current binding (partial update). The firmware caches the resolved
+/// table in TAL KV.
+pub fn keymap_payload(bindings: &[(String, String)]) -> Value {
     let mut payload = serde_json::Map::new();
-    for (i, id) in SLOT_IDS.iter().enumerate() {
-        if let Some(role) = roles.get(i) {
-            if !role.is_empty() {
-                payload.insert((*id).to_string(), Value::String(role.clone()));
-            }
+    for (field, value) in bindings {
+        if !field.is_empty() && !value.is_empty() {
+            payload.insert(field.clone(), Value::String(value.clone()));
         }
     }
     serde_json::json!({
@@ -827,29 +825,23 @@ mod tests {
     }
 
     #[test]
-    fn keymap_payload_emits_named_roles_and_omits_empty() {
-        let roles = vec![
-            "chat".to_string(),
-            "chat".to_string(),
-            "chat".to_string(),
-            "cancel".to_string(),
-            "voice".to_string(),
-            "confirm".to_string(),
-            "none".to_string(),
+    fn keymap_payload_emits_dotted_bindings_and_omits_empty() {
+        let bindings = vec![
+            ("k1.click".to_string(), "chat1".to_string()),
+            ("k1.double".to_string(), "instance1".to_string()),
+            ("k5.kind".to_string(), "voice".to_string()),
+            ("k4.click".to_string(), "cancel_char".to_string()),
+            ("k6.click".to_string(), "confirm".to_string()),
+            ("k1.long".to_string(), "".to_string()), // empty -> omitted
         ];
-        let v = keymap_payload(&roles);
+        let v = keymap_payload(&bindings);
         assert_eq!(v["type"], "keymap");
-        assert_eq!(v["payload"]["k1"], "chat");
-        assert_eq!(v["payload"]["k4"], "cancel");
-        assert_eq!(v["payload"]["k5"], "voice");
-        assert_eq!(v["payload"]["k6"], "confirm");
-        assert_eq!(v["payload"]["enc"], "none");
-        // An empty role is omitted (partial update: keep the board's current).
-        let partial = vec!["".to_string(), "voice".to_string()];
-        let p = keymap_payload(&partial);
-        assert!(p["payload"].get("k1").is_none(), "empty role omitted");
-        assert_eq!(p["payload"]["k2"], "voice");
-        assert!(p["payload"].get("k3").is_none(), "missing role omitted");
+        assert_eq!(v["payload"]["k1.click"], "chat1");
+        assert_eq!(v["payload"]["k1.double"], "instance1");
+        assert_eq!(v["payload"]["k5.kind"], "voice");
+        assert_eq!(v["payload"]["k4.click"], "cancel_char");
+        assert_eq!(v["payload"]["k6.click"], "confirm");
+        assert!(v["payload"].get("k1.long").is_none(), "empty binding omitted");
     }
 
     #[test]

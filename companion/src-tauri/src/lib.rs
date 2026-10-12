@@ -630,22 +630,47 @@ mod app {
         )
     }
 
-    /// Downlink the per-key role table to the board (plan A: the Companion is
-    /// the keymap config authority). `roles` are k1..k6 then enc; each must be
-    /// one of "none"/"chat"/"voice"/"cancel"/"confirm" (empty = leave that
-    /// key's current role unchanged). The board derives each key's gesture
-    /// mode from its role, caches the table in TAL KV, and acks.
+    /// Downlink per-gesture keymap bindings to the board (plan A, stage 乙).
+    /// `bindings` is a list of (field, value) where field is "<key>.kind"
+    /// (value "voice"/"normal") or "<key>.<gesture>" (gesture click/double/long,
+    /// value an action: none/cancel_char/cancel_all/confirm/chatN/instanceN).
+    /// An empty value leaves that binding unchanged. The board caches the
+    /// resolved table in TAL KV and acks.
     #[tauri::command]
-    fn set_keymap(state: State<Shared>, roles: Vec<String>) -> Result<(), String> {
-        const VALID: [&str; 5] = ["none", "chat", "voice", "cancel", "confirm"];
-        for role in &roles {
-            if !role.is_empty() && !VALID.contains(&role.as_str()) {
-                return Err(format!(
-                    "invalid role '{role}' (expected one of {VALID:?} or empty)"
-                ));
+    fn set_keymap(state: State<Shared>, bindings: Vec<(String, String)>) -> Result<(), String> {
+        const KEYS: [&str; 7] = ["k1", "k2", "k3", "k4", "k5", "k6", "enc"];
+        const GESTURES: [&str; 4] = ["kind", "click", "double", "long"];
+        const ACTIONS: [&str; 4] = ["none", "cancel_char", "cancel_all", "confirm"];
+        for (field, value) in &bindings {
+            // field must be "<key>.<slot>" with a known key and slot.
+            let (key, slot) = field
+                .split_once('.')
+                .ok_or_else(|| format!("invalid keymap field '{field}' (expected <key>.<slot>)"))?;
+            if !KEYS.contains(&key) {
+                return Err(format!("invalid keymap key '{key}'"));
+            }
+            if !GESTURES.contains(&slot) {
+                return Err(format!("invalid keymap slot '{slot}'"));
+            }
+            if value.is_empty() {
+                continue;
+            }
+            // Validate the value per slot.
+            let ok = if slot == "kind" {
+                value == "voice" || value == "normal"
+            } else {
+                ACTIONS.contains(&value.as_str())
+                    || value
+                        .strip_prefix("chat")
+                        .or_else(|| value.strip_prefix("instance"))
+                        .and_then(|n| n.parse::<u8>().ok())
+                        .is_some_and(|n| (1..=9).contains(&n))
+            };
+            if !ok {
+                return Err(format!("invalid keymap value '{value}' for {field}"));
             }
         }
-        write_board(state.inner(), &protocol::keymap_payload(&roles))
+        write_board(state.inner(), &protocol::keymap_payload(&bindings))
     }
 
     /// Provision Wi-Fi on the board: send SSID + password over the JSONL
