@@ -26,6 +26,7 @@
 #include "ak_cloud.h"
 #include "ak_wifi.h"
 #include "ak_input.h"
+#include "ak_keymap.h"
 #include "ak_icons16.h"
 #include "ak_session_icons.h"
 #include "ak_protocol.h"
@@ -196,6 +197,14 @@ static bool s_ptt_cloud_started = false;
  * capture path. */
 static ak_dclick_t s_ptt_dclick;
 
+/* Runtime key-role table (v0.3 defaults; overridable by a Companion keymap
+ * frame + cached in TAL KV). Replaces the old hard-coded AK_PTT_KEY_ID. */
+static ak_keymap_t s_keymap;
+/* Deferred single/double classifiers for the CHAT keys (K1-K3). Index by the
+ * keymap slot (0..2); other slots are unused. Scheme X: single is delayed to
+ * tell it apart from a double, then reported as key.action "click"/"double". */
+static ak_gesture_state_t s_key_gesture[AK_KEYMAP_SLOTS];
+
 #if AK_ENABLE_DISPLAY
 typedef enum {
     AK_VOICE_UI_IDLE = 0,
@@ -229,9 +238,6 @@ static uint8_t  s_test_key_mask;      /* bit i set while K(i+1) is held; bit 6 =
 static int32_t  s_test_enc_count;     /* net EC11 detents since entering */
 static uint32_t s_test_ws_phase;      /* WS2812 chase animation phase */
 #endif
-
-/* K4 is the push-to-talk key on the expansion board (see hardware pinmap). */
-#define AK_PTT_KEY_ID "k4"
 
 static void transport_write_frame_unlocked(const char *frame, size_t capacity, int length)
 {
@@ -551,6 +557,39 @@ static void ak_emit_encoder_frame(int32_t detents)
     PR_DEBUG("encoder detents=%d", (int)detents);
 }
 
+/* Emit a classified gesture (click/double) for a deferred key as a key.action
+ * frame, and give CHAT keys their local session highlight on a single click.
+ * Called from on_input_event (DOUBLE) and the main loop's gesture tick (SINGLE
+ * timeout). role lets the CHAT keys drive the on-screen A/B/C selection. */
+static void dispatch_key_gesture(const char *id, ak_key_role_t role, ak_gesture_t g)
+{
+    const char *action;
+    switch (g) {
+    case AK_GESTURE_SINGLE: action = "click";  break;
+    case AK_GESTURE_DOUBLE: action = "double"; break;
+    default:                return; /* NONE / LONG not produced for these keys */
+    }
+
+#if AK_ENABLE_DISPLAY
+    /* A single click on a CHAT key focuses its A/B/C session locally (double =
+     * switch instance, which is a Companion-side Ctrl+N; nothing local). */
+    if (role == AK_KEY_ROLE_CHAT && g == AK_GESTURE_SINGLE) {
+        ak_select_session_key(id);
+    }
+#else
+    (void)role;
+#endif
+
+    char     frame[FRAME_BUFFER_SIZE];
+    uint32_t sequence;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced(
+        frame, ak_proto_key(frame, sizeof(frame), sequence, id, action, 0U));
+    PR_DEBUG("gesture %s %s", id, action);
+}
+
 /* Input event -> local settings UI or JSONL frame on the active transport. */
 static void on_input_event(ak_input_kind_t kind, const char *id,
                            ak_input_event_t event, uint32_t held_ms)
@@ -559,21 +598,37 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
     if (ak_settings_consume_input(kind, id, event, held_ms)) {
         return;
     }
-    if (kind == AK_INPUT_KIND_KEY && event == AK_INPUT_EVENT_DOWN) {
-        ak_select_session_key(id);
-    }
 #endif
 
+    if (kind != AK_INPUT_KIND_KEY) {
+        return;
+    }
+
+    ak_key_role_t         role    = ak_keymap_role(&s_keymap, id);
+    ak_key_gesture_mode_t gesture = ak_keymap_gesture(&s_keymap, id);
+
+    /* CHAT keys (K1-K3): deferred single/double. Feed the classifier here;
+     * ak_gesture_tick() in the main loop resolves a lone single. The resolved
+     * gesture becomes a key.action "click"/"double" frame (see dispatch_key_
+     * gesture); raw down/up are NOT forwarded for these keys. */
+    if (gesture == AK_KEY_GESTURE_SINGLE_DOUBLE) {
+        int slot = ak_keymap_slot_for_id(id);
+        if (slot >= 0) {
+            ak_gesture_t g = ak_gesture_feed(&s_key_gesture[slot], event,
+                                             tal_system_get_millisecond(), held_ms);
+            dispatch_key_gesture(id, role, g);
+        }
+        return;
+    }
+
+    /* EDGE keys: forward the raw edge as before. */
     ak_emit_input_frame(kind, id, event, held_ms);
 
-    /* K4 = push-to-talk. Cloud consumes DOWN/LONG/UP as one latched HOLD
-     * interaction; system still uses immediate DOWN/UP Windows dictation. */
-    if (kind == AK_INPUT_KIND_KEY && strcmp(id, AK_PTT_KEY_ID) == 0 &&
+    /* VOICE role (push-to-talk; K5 by default). Cloud consumes DOWN/LONG/UP as
+     * one latched HOLD; system emits immediate DOWN/UP dictation. */
+    if (role == AK_KEY_ROLE_VOICE &&
         (event == AK_INPUT_EVENT_DOWN || event == AK_INPUT_EVENT_LONG ||
          event == AK_INPUT_EVENT_UP)) {
-        /* Double-click on K4 (cloud route) sounds the "long-press to talk"
-         * prompt, mirroring FP-3. Feeding runs on every edge; a hold fires LONG
-         * which the detector excludes, so hold-to-talk never trips it. */
         if (ak_dclick_feed(&s_ptt_dclick, event, tal_system_get_millisecond(), held_ms) &&
             s_voice_route.effective == AK_VOICE_CLOUD && ak_asr_available()) {
             ak_asr_play_prompt();
@@ -2112,6 +2167,10 @@ static void user_main(void)
     }
     ak_cloud_set_activation_callback(on_cloud_activation);
     ak_dclick_init(&s_ptt_dclick);
+    ak_keymap_init_defaults(&s_keymap);
+    for (int gi = 0; gi < AK_KEYMAP_SLOTS; gi++) {
+        ak_gesture_init(&s_key_gesture[gi]);
+    }
     ak_voice_route_init(&s_voice_route);
 #if AK_ENABLE_DISPLAY
     ak_settings_init(&s_settings);
@@ -2381,6 +2440,19 @@ static void user_main(void)
 #endif
 
         ak_input_poll(now, on_input_event, on_encoder_event);
+
+        /* Resolve a pending single-click on the CHAT keys once its double-click
+         * window lapses with no second press (scheme X). */
+        for (int gi = 0; gi < AK_KEYMAP_SLOTS; gi++) {
+            if (s_keymap.entries[gi].gesture != AK_KEY_GESTURE_SINGLE_DOUBLE) {
+                continue;
+            }
+            ak_gesture_t g = ak_gesture_tick(&s_key_gesture[gi], now);
+            if (g != AK_GESTURE_NONE) {
+                const char *id = ak_keymap_id_for_slot(gi);
+                dispatch_key_gesture(id, s_keymap.entries[gi].role, g);
+            }
+        }
 
         uint8_t rx[64];
         int     got = ak_transport_read(rx, sizeof(rx));

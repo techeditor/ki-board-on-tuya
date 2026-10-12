@@ -26,6 +26,14 @@ int ak_keymap_slot_for_id(const char *id)
     return -1;
 }
 
+const char *ak_keymap_id_for_slot(int slot)
+{
+    if (slot < 0 || slot >= AK_KEYMAP_SLOTS) {
+        return NULL;
+    }
+    return s_slot_ids[slot];
+}
+
 void ak_keymap_init_defaults(ak_keymap_t *map)
 {
     if (map == NULL) {

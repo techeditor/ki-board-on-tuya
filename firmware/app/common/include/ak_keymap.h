@@ -56,6 +56,9 @@ typedef struct {
 /** Map a key id ("k1".."k6" / "enc") to its 0-based slot, or -1 if unknown. */
 int ak_keymap_slot_for_id(const char *id);
 
+/** Map a 0-based slot (0..AK_KEYMAP_SLOTS-1) back to its id string, or NULL. */
+const char *ak_keymap_id_for_slot(int slot);
+
 /** Fill `map` with the confirmed v0.3 defaults (K5=voice, K4=cancel, K6=confirm,
  *  K1-K3=chat with single/double detection, enc=none/edge). */
 void ak_keymap_init_defaults(ak_keymap_t *map);
