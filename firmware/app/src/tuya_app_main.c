@@ -664,7 +664,15 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
      * raw edge is forwarded so no stray down/up leaks while confirming.
      * K4 (cancel): long = cancel_all (+exit), click = cancel_char.
      * K6 (confirm): click = confirm (+exit). A LONG sets a per-event flag so the
-     * following UP is not also treated as a click. */
+     * following UP is not also treated as a click.
+     *
+     * Display-gated because the pending-confirm state machine, its enter point
+     * (in ak_voice_ui_tick, which renders ASR text to the LCD) and its hint
+     * LEDs all live behind AK_ENABLE_DISPLAY. All four v0.3 profiles set
+     * CONFIG_ENABLE_DISPLAY=y, so this always compiles in practice; the
+     * compile-time guard in ak_keymap.h (AK_KEYMAP_CANCEL_CONFIRM_NEED_DISPLAY)
+     * fails the build loudly if a future non-display profile ships cancel/
+     * confirm roles, rather than letting them silently become dead edges. */
 #if AK_ENABLE_DISPLAY
     if (s_pending_confirm &&
         (role == AK_KEY_ROLE_CANCEL || role == AK_KEY_ROLE_CONFIRM)) {

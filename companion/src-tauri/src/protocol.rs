@@ -202,7 +202,7 @@ pub enum KeyAction {
     #[serde(rename = "cancel_char")]
     CancelChar,
     /// Pending-confirm edit intent: delete all / cancel (K4 long). Companion
-    /// injects Ctrl+A then Delete and the board leaves pending-confirm.
+    /// injects Ctrl+A then Backspace and the board leaves pending-confirm.
     #[serde(rename = "cancel_all")]
     CancelAll,
     /// Pending-confirm edit intent: confirm / submit (K6 click). Companion

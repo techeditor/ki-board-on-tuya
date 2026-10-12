@@ -21,7 +21,13 @@
 #include <stdint.h>
 
 /* Logical role a key plays in the base (idle) state. The firmware only ACTS on
- * the roles it owns locally; CHAT/NONE are reported to the Companion. */
+ * the roles it owns locally; CHAT/NONE are reported to the Companion.
+ *
+ * CONTRACT: these MUST stay contiguous and 0-based (NONE=0 .. CONFIRM=last).
+ * ak_keymap_from_blob validates a persisted role byte with `role > CONFIRM`,
+ * which only holds if the range is contiguous; reordering or inserting a gap
+ * would let a stale KV blob decode to the wrong role. Append new roles at the
+ * end and bump AK_KEYMAP_BLOB_VERSION. */
 typedef enum {
     AK_KEY_ROLE_NONE = 0,  /* report events only; no local behavior */
     AK_KEY_ROLE_CHAT,      /* K1-K3: single=focus chat, double=switch instance (Companion maps) */

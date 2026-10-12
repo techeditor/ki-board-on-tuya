@@ -195,7 +195,7 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 /// | `key k1..k3` `double`           | `Chord(SwitchInstance(n))` — n = `switch_instances[idx]` (Ctrl+N, switch Local/Remote Crew); `None` if unset / out of 1..=9 |
 /// | `key k1..k3` raw down/up/long   | `None` — firmware classifies these into click/double |
 /// | `key k4` `cancel_char`          | `Chord(Backspace)` — pending-confirm: delete one char |
-/// | `key k4` `cancel_all`           | `Chord(ClearInput)` — pending-confirm: Ctrl+A, Delete (board exits pending) |
+/// | `key k4` `cancel_all`           | `Chord(ClearInput)` — pending-confirm: Ctrl+A, Backspace (board exits pending) |
 /// | `key k6` `confirm`              | `Chord(Enter)` — pending-confirm: submit (board exits pending) |
 /// | `key k5` (down/long)            | `None` — K5 is voice PTT; text arrives later as `asr`/`macro` |
 /// | `key k4`/`k6` raw down/long     | `None` — only actionable while the firmware is in pending-confirm |
@@ -254,7 +254,7 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
         // down/up) when K4/K6 are pressed while awaiting confirmation. The
         // Companion just injects the matching composer edit:
         //   cancel_char -> Backspace (delete one char)
-        //   cancel_all  -> Ctrl+A, Delete (clear the composer) + board exits
+        //   cancel_all  -> Ctrl+A, Backspace (clear the composer) + board exits
         //   confirm     -> Enter (submit) + board exits
         // These are matched BEFORE the generic edge arm because they are not
         // trigger edges (is_trigger only sees Down/Long).
