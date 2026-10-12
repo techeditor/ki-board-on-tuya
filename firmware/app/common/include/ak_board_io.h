@@ -2,16 +2,22 @@
  * @file ak_board_io.h
  * @brief Authoritative IO mapping for the Agentic Keyboard product firmware.
  *
- * Target board: expansion baseboard v1.2 (in fabrication as of 2026-08-31).
+ * Target board: expansion baseboard v0.3 (major refactor; see
+ * hardware/eda/expansion-baseboard-v0.3-change-scope.md).
  *
- * v1.2 changes vs v1.0 (see hardware/eda/expansion-baseboard-v1.2-change-scope.md):
- *   - WS2812 data pin  P13 -> P4 (J2.20, SPI1_MOSI); driven by the official
- *     TuyaOpen SPI WS2812 driver over SPI1 instead of GPIO bit-banging.
- *   - LCD backlight     P5 -> P8 (J2.16, PWM2); high-active.
- *   - FPC1 pad order mirror fixed; the panel is inserted the normal way and the
- *     ST7789 init sequence uses INVOFF (no inversion).
+ * v0.3 changes vs v0.2 (baseboard silk v1.2):
+ *   - Inputs: 5 keys + WS-1002 5-way joystick  ->  6 keys (K1..K6) + EC11
+ *     rotary encoder. K6 reuses the former NAV_UP pin (P32). The joystick pins
+ *     become the EC11: P20=A, P21=B (quadrature), P22=SW (push). P30 is freed.
+ *   - RGB: 3 -> 7 WS2812 (data pin P4=SPI1_MOSI unchanged).
+ *   - LCD: 18P (CL28CK230, with RTP touch) -> 12P (T280C7-C12-26 / ST7789P3,
+ *     no touch). Panel driver + 320x240 orientation unchanged. P7 is no longer
+ *     an LCD power enable: on the 12P panel VDD is tied to 3V3 and FPC pin7/TE
+ *     reaches P7 through a 10k series resistor, so P7 must be configured as a
+ *     high-impedance INPUT (never driven).
  *
- * Values mirror hardware/pinmap/pinmap.json (kept in sync). Do not copy pin
+ * Values mirror hardware/eda/expansion-baseboard-v0.3-change-scope.md and the
+ * v0.3 draft in hardware/pinmap/pinmap.md (section 0). Do not copy pin
  * definitions from reference projects.
  */
 
@@ -27,22 +33,32 @@
 #define AK_UART_BAUDRATE       115200U
 #define AK_UART_RX_BUFFER_SIZE 256U
 
-/* Five mechanical switches: internal pull-up, pressed level is low. */
+/* Six mechanical switches (K1..K6): internal pull-up, pressed level is low.
+ * v0.3: K6 reuses the former NAV_UP pin P32. */
 #define AK_KEY1_PIN           TUYA_GPIO_NUM_24
 #define AK_KEY2_PIN           TUYA_GPIO_NUM_25
 #define AK_KEY3_PIN           TUYA_GPIO_NUM_26
 #define AK_KEY4_PIN           TUYA_GPIO_NUM_27
 #define AK_KEY5_PIN           TUYA_GPIO_NUM_23
+#define AK_KEY6_PIN           TUYA_GPIO_NUM_32
 #define AK_KEY_ACTIVE_LEVEL   TUYA_GPIO_LEVEL_LOW
 #define AK_KEY_INACTIVE_LEVEL TUYA_GPIO_LEVEL_HIGH
 
-/* Five-way navigation switch: internal pull-up, pressed level is low. */
-#define AK_NAV_UP_PIN       TUYA_GPIO_NUM_32
-#define AK_NAV_DOWN_PIN     TUYA_GPIO_NUM_20
-#define AK_NAV_LEFT_PIN     TUYA_GPIO_NUM_21
-#define AK_NAV_RIGHT_PIN    TUYA_GPIO_NUM_22
-#define AK_NAV_CENTER_PIN   TUYA_GPIO_NUM_30
-#define AK_NAV_ACTIVE_LEVEL TUYA_GPIO_LEVEL_LOW
+/*
+ * EC11 rotary encoder (replaces the v0.2 WS-1002 5-way joystick).
+ *
+ *   A  = P20 (quadrature phase A)   -- external 10k pull-up + RC on the board
+ *   B  = P21 (quadrature phase B)   -- external 10k pull-up + RC on the board
+ *   SW = P22 (push switch)          -- internal pull-up, pressed level is low
+ *
+ * A/B carry external pull-ups per the EC11I-152 datasheet; configure them as
+ * plain inputs with the internal pull DISABLED. SW is a normal active-low key
+ * (internal pull-up) and is reported as a `key` event with id "enc".
+ */
+#define AK_ENC_A_PIN        TUYA_GPIO_NUM_20
+#define AK_ENC_B_PIN        TUYA_GPIO_NUM_21
+#define AK_ENC_SW_PIN       TUYA_GPIO_NUM_22
+#define AK_ENC_SW_ID        "enc"
 
 /* ST7789 SPI0 LCD. Native panel orientation is 240x320; INVOFF on v1.2. */
 #define AK_LCD_SPI_PORT     TUYA_SPI_NUM_0
@@ -55,20 +71,27 @@
  * hardware-verified GPIO path; UI dimming is applied in the framebuffer. */
 #define AK_LCD_BACKLIGHT_PIN TUYA_GPIO_NUM_8
 /*
- * P7 is defined as an LCD power enable, but on the v1.0 schematic LCD VCC is
- * wired directly to 3.3V and P7 forms no actual switch (v1.2 change-scope open
- * item). Treat this as possibly a no-op; do not depend on it to gate panel power.
+ * v0.3: P7 is NO LONGER an LCD power enable. The 12P panel (T280C7-C12-26)
+ * ties VDD directly to 3V3, and FPC pin7/TE reaches P7 through a 10k series
+ * resistor. P7 must be configured as a high-impedance INPUT and never driven;
+ * see ak_statuslcd / ak_display, which explicitly init it as an input.
+ *
+ * The panel driver's power-enable slot is therefore disabled by pointing it at
+ * TUYA_GPIO_NUM_MAX (the SDK sentinel for "no power pin"), matching the official
+ * boards whose LCD VDD is hard-wired.
  */
-#define AK_LCD_POWER_PIN      TUYA_GPIO_NUM_7
+#define AK_LCD_TE_PIN         TUYA_GPIO_NUM_7
+#define AK_LCD_POWER_PIN      TUYA_GPIO_NUM_MAX
 #define AK_LCD_NATIVE_WIDTH   240U
 #define AK_LCD_NATIVE_HEIGHT  320U
 #define AK_LCD_SPI_CLOCK_HZ   48000000U
 #define AK_LCD_CONTROL_ACTIVE TUYA_GPIO_LEVEL_HIGH
 
 /*
- * Three WS2812 LEDs through the SN74LV1T34 level shifter.
+ * Seven WS2812 LEDs through the SN74LV1T34 level shifter (v0.3: 3 -> 7;
+ * LED1..LED6 under K1..K6, LED7 at the EC11).
  *
- * v1.2: data pin is P4 = SPI1_MOSI. Use the official SPI WS2812 driver
+ * Data pin is P4 = SPI1_MOSI (unchanged). Use the official SPI WS2812 driver
  * (tdd_pixel_ws2812) so the waveform is generated by the SPI peripheral,
  * not CPU bit-banging. TKL initialises the WHOLE SPI1 pin group
  * (SCK=P2 / CS=P3 / MOSI=P4 / MISO=P5); all four are reserved for SPI1 and
@@ -77,6 +100,6 @@
  */
 #define AK_WS2812_SPI_PORT TUYA_SPI_NUM_1
 #define AK_WS2812_DATA_PIN TUYA_GPIO_NUM_4 /* SPI1_MOSI, J2.20 */
-#define AK_WS2812_COUNT    3U
+#define AK_WS2812_COUNT    7U
 
 #endif /* AK_BOARD_IO_H */

@@ -15,6 +15,7 @@
 #include "tdd_display_spi.h"
 #include "tdl_display_draw.h"
 #include "tdl_display_manage.h"
+#include "tkl_gpio.h"
 
 #define STATUSLCD_NAME   "ak_statuslcd"
 #define FRAME_BYTES      (AK_STATUSLCD_W * AK_STATUSLCD_H * 2U)
@@ -191,8 +192,21 @@ OPERATE_RET ak_statuslcd_init(void)
     config.bl.type              = TUYA_DISP_BL_TP_GPIO;
     config.bl.gpio.pin          = AK_LCD_BACKLIGHT_PIN;
     config.bl.gpio.active_level = AK_LCD_CONTROL_ACTIVE;
-    config.power.pin            = AK_LCD_POWER_PIN;
+    /* v0.3: no LCD power-enable pin (panel VDD tied to 3V3). */
+    config.power.pin            = AK_LCD_POWER_PIN; /* TUYA_GPIO_NUM_MAX */
     config.power.active_level   = AK_LCD_CONTROL_ACTIVE;
+
+    /* v0.3: FPC pin7/TE is wired to P7 through a 10k series resistor. The panel
+     * drives it; the firmware must keep P7 a high-impedance INPUT so it never
+     * fights the panel's TE output. Configure it before registering the panel. */
+    {
+        TUYA_GPIO_BASE_CFG_T te_cfg = {
+            .mode   = TUYA_GPIO_FLOATING,
+            .direct = TUYA_GPIO_INPUT,
+            .level  = TUYA_GPIO_LEVEL_HIGH,
+        };
+        (void)tkl_gpio_init(AK_LCD_TE_PIN, &te_cfg);
+    }
 
     memset(&s_spi_cfg, 0, sizeof(s_spi_cfg));
     s_spi_cfg.width     = config.width;

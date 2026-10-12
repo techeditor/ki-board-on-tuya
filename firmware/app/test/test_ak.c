@@ -132,11 +132,15 @@ static void test_protocol(void)
               "\"held_ms\":0}}\n",
               "key frame");
 
-    ak_proto_nav(buf, sizeof(buf), 8, "center", "long", 900);
+    ak_proto_encoder(buf, sizeof(buf), 8, 1);
     CHECK_STR(buf,
-              "{\"v\":1,\"seq\":8,\"type\":\"nav\",\"payload\":{\"dir\":\"center\",\"action\":"
-              "\"long\",\"held_ms\":900}}\n",
-              "nav frame");
+              "{\"v\":1,\"seq\":8,\"type\":\"encoder\",\"payload\":{\"detents\":1}}\n",
+              "encoder frame (cw)");
+
+    ak_proto_encoder(buf, sizeof(buf), 9, -3);
+    CHECK_STR(buf,
+              "{\"v\":1,\"seq\":9,\"type\":\"encoder\",\"payload\":{\"detents\":-3}}\n",
+              "encoder frame (ccw multi-step)");
 
     ak_proto_ping(buf, sizeof(buf), 3, 6000);
     CHECK_STR(buf, "{\"v\":1,\"seq\":3,\"type\":\"ping\",\"payload\":{\"uptime_ms\":6000}}\n", "ping frame");

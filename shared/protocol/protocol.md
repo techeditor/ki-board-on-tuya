@@ -3,7 +3,7 @@
 > 本文件是**跨固件/上位机共享**的协议权威定义（源）。
 > `docs/protocol.md` 是面向阅读的说明版，内容以本文件为准。
 > 设计参照 ki-board 的 `shared/protocol/serial-protocol.md`，并针对本项目
-> （T5AI-Core + 5 键 + 5 向摇杆 + Windows 上位机）做了裁剪与调整。
+> （T5AI-Core + 6 键 + EC11 编码器 + Windows 上位机，v0.3）做了裁剪与调整。
 
 ## 载体（Transports）
 
@@ -34,7 +34,7 @@ flowchart LR
 职责划分：
 
 - **BLE HID**：仅负责像键盘一样输出（阶段 3）。
-- **UART/USB-CDC / BLE GATT**：双向 JSONL，负责配置、按键/摇杆事件、Agent 状态、
+- **UART/USB-CDC / BLE GATT**：双向 JSONL，负责配置、按键/编码器事件、Agent 状态、
   语音状态、配对/鉴权。
 - **Companion**：拥有 Windows 系统 ASR、按键映射、SendInput 注入 / 剪贴板粘贴。
 - **固件**：拥有输入状态机、LCD 渲染。
@@ -85,18 +85,23 @@ Companion 发：
 {"v":1,"seq":1,"type":"key","payload":{"id":"k1","action":"down","held_ms":0}}
 ```
 
-- `id`：`k1`..`k5`（5 个茶轴按键）
+- `id`：`k1`..`k6`（6 个热插拔茶轴按键，v0.3）或 `enc`（EC11 旋钮按下，v0.3）
 - `action`：`down` / `up` / `long`
 - `held_ms`：按下时长（`up`/`long` 时有意义）
+- v0.2 为 `k1`..`k5`；v0.3 扩到 6 键，并把 EC11 旋钮按下作为 `id:"enc"` 的 `key` 事件上报
+  （复用 key 通道，不新增帧）。
 
-### nav（5 向摇杆）
+### encoder（EC11 旋转编码器，v0.3）
 
 ```json
-{"v":1,"seq":2,"type":"nav","payload":{"dir":"up","action":"down","held_ms":0}}
+{"v":1,"seq":2,"type":"encoder","payload":{"detents":1}}
 ```
 
-- `dir`：`up` / `down` / `left` / `right` / `center`
-- `action`：`down` / `up` / `long`
+- `detents`：有符号整数步进计数（一个物理卡点 = ±1）。**正 = 顺时针**，**负 = 逆时针**。
+  固件按正交解码累计净步进，可在一帧内上报多步（如快速连转上报 `2` / `-3`），接收方按步进滚动。
+- 该帧**替代 v0.2 的 `nav`（5 向摇杆）**。v0.3 硬件用 EC11 旋钮替换摇杆：旋转 → `encoder`，
+  旋钮**按下** → `key`（`id:"enc"`）。接收方按协议忽略未识别 `type`，故旧 Companion 收到 `encoder`
+  会安全忽略；新 Companion 仍容忍（但不会再收到）历史 `nav` 帧。
 
 ### voice（语音触发）
 
@@ -288,8 +293,8 @@ Companion 不可用时，回退直连 UART/USB-CDC 写入板子。
 
 | 维度 | ki-board | 本项目 |
 |------|----------|--------|
-| 输入 | 3 屏幕按键 | 5 茶轴按键 + 5 向摇杆 |
-| 事件类型 | `button_event` | 拆为 `key` / `nav` / `voice` / `macro` |
+| 输入 | 3 屏幕按键 | 6 茶轴按键 + EC11 编码器（v0.3） |
+| 事件类型 | `button_event` | 拆为 `key` / `encoder` / `voice` / `macro` |
 | 语音 | macOS 系统听写 / 3P ASR | 阶段1 Windows 系统 ASR |
 | 直连 | USB HID | BLE HID（T5 无 USB HID Device） |
 | 帧字段 | `type` 顶层 | `v`/`seq`/`type`/`payload` 规范化 |

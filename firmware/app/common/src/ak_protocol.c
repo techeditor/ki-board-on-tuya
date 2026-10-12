@@ -52,6 +52,13 @@ static void writer_u32(ak_json_writer_t *writer, uint32_t value)
     writer_raw(writer, number);
 }
 
+static void writer_i32(ak_json_writer_t *writer, int32_t value)
+{
+    char number[12];
+    (void)snprintf(number, sizeof(number), "%d", (int)value);
+    writer_raw(writer, number);
+}
+
 static void writer_json_string(ak_json_writer_t *writer, const char *value)
 {
     static const char hex[] = "0123456789abcdef";
@@ -123,18 +130,14 @@ int ak_proto_key(char *buf, size_t size, uint32_t seq, const char *id, const cha
     return writer_finish(&writer);
 }
 
-int ak_proto_nav(char *buf, size_t size, uint32_t seq, const char *dir, const char *action, uint32_t held_ms)
+int ak_proto_encoder(char *buf, size_t size, uint32_t seq, int32_t detents)
 {
     ak_json_writer_t writer;
     writer_init(&writer, buf, size);
     writer_raw(&writer, "{\"v\":1,\"seq\":");
     writer_u32(&writer, seq);
-    writer_raw(&writer, ",\"type\":\"nav\",\"payload\":{\"dir\":");
-    writer_json_string(&writer, dir);
-    writer_raw(&writer, ",\"action\":");
-    writer_json_string(&writer, action);
-    writer_raw(&writer, ",\"held_ms\":");
-    writer_u32(&writer, held_ms);
+    writer_raw(&writer, ",\"type\":\"encoder\",\"payload\":{\"detents\":");
+    writer_i32(&writer, detents);
     writer_raw(&writer, "}}\n");
     return writer_finish(&writer);
 }

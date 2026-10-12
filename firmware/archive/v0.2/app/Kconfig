@@ -1,0 +1,36 @@
+menu "configure app (Agentic Keyboard) "
+
+# Transport backend selection (mechanism A). A build profile under config/
+# sets exactly one of these = y; CMakeLists.txt translates the chosen symbol
+# into the app-level -DAK_TRANSPORT_* macro that ak_features.h switches on.
+# Default (none set) -> ak_features.h falls back to the UART transport.
+config AK_TRANSPORT_BLE_GATT
+    bool "Use the BLE GATT transport backend (JSONL over service 0x1910)"
+    default n
+    select ENABLE_BLUETOOTH
+
+config AK_TRANSPORT_DUAL
+    bool "Use UART0 AND BLE GATT together (send/read on whichever link is up)"
+    default n
+    select ENABLE_BLUETOOTH
+
+config AK_TRANSPORT_BLE_HID
+    bool "Use the BLE HID transport backend (standard keyboard, no JSONL)"
+    default n
+    select ENABLE_BLUETOOTH
+
+config AK_ASR_BOARD_CLOUD
+    bool "Enable board-side Tuya cloud ASR (ai_chat HOLD; needs Wi-Fi + PID+AI agent)"
+    default n
+    select ENABLE_AI_COMPONENTS
+
+config AK_LICENSE_DEBUG_READ
+    bool "Enable UART0 License diagnostics (full UUID + AuthKey last 4)"
+    default n
+    depends on AK_ASR_BOARD_CLOUD
+
+config TUYA_PRODUCT_ID
+    string "product ID (bound to an AI agent) for cloud ASR"
+    default ""
+
+endmenu

@@ -5,7 +5,7 @@
  * Phase-1 (wired) flow so far:
  *   - open the selected transport (UART0),
  *   - announce capabilities (hello_ack),
- *   - scan 5 keys + 5-way nav and emit key/nav events (JSONL protocol v1),
+ *   - scan 6 keys + the EC11 encoder and emit key/encoder events (JSONL v1),
  *   - emit a periodic ping heartbeat.
  *
  * The debounce/long-press logic lives in the pure, host-tested ak_input_fsm;
@@ -502,6 +502,9 @@ static void ak_render_status(void);
 static void ak_settings_draw(void);
 static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
                                       ak_input_event_t event, uint32_t held_ms);
+/* Returns true when the encoder rotation was consumed by the modal settings UI
+ * (so it must not be forwarded to the companion as an encoder frame). */
+static bool ak_settings_consume_encoder(int32_t detents);
 #endif
 
 static void ak_emit_input_frame(ak_input_kind_t kind, const char *id,
@@ -511,18 +514,29 @@ static void ak_emit_input_frame(ak_input_kind_t kind, const char *id,
     int      length;
     uint32_t sequence;
 
+    (void)kind; /* only AK_INPUT_KIND_KEY remains in v0.3 */
     if (!transport_begin_sequenced(&sequence)) {
         return;
     }
-    if (kind == AK_INPUT_KIND_KEY) {
-        length = ak_proto_key(frame, sizeof(frame), sequence, id,
-                              ak_input_event_str(event), held_ms);
-    } else {
-        length = ak_proto_nav(frame, sizeof(frame), sequence, id,
-                              ak_input_event_str(event), held_ms);
-    }
+    length = ak_proto_key(frame, sizeof(frame), sequence, id,
+                          ak_input_event_str(event), held_ms);
     transport_end_sequenced(frame, length);
     PR_DEBUG("input %s %s held=%ums", id, ak_input_event_str(event), held_ms);
+}
+
+/* EC11 rotation -> encoder frame (signed detent count) on the active transport. */
+static void ak_emit_encoder_frame(int32_t detents)
+{
+    char     frame[FRAME_BUFFER_SIZE];
+    int      length;
+    uint32_t sequence;
+
+    if (detents == 0 || !transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    length = ak_proto_encoder(frame, sizeof(frame), sequence, detents);
+    transport_end_sequenced(frame, length);
+    PR_DEBUG("encoder detents=%d", (int)detents);
 }
 
 /* Input event -> local settings UI or JSONL frame on the active transport. */
@@ -554,6 +568,17 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
         }
         on_ptt_event(event);
     }
+}
+
+/* EC11 rotation -> settings UI when modal, else an encoder frame to the PC. */
+static void on_encoder_event(int32_t detents)
+{
+#if AK_ENABLE_DISPLAY
+    if (ak_settings_consume_encoder(detents)) {
+        return;
+    }
+#endif
+    ak_emit_encoder_frame(detents);
 }
 
 static void send_hello_ack(void)
@@ -1123,8 +1148,15 @@ static OPERATE_RET ak_settings_apply_selected(void)
 static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
                                       ak_input_event_t event, uint32_t held_ms)
 {
+    /* v0.3: the modal settings UI is driven by the EC11 encoder only.
+     *   - enter    : long-press the encoder push ("enc")
+     *   - navigate : rotate (handled in ak_settings_consume_encoder -> UP/DOWN)
+     *   - adjust    : short-press "enc" advances to the next item; the value is
+     *                 applied live as you rotate, so there is no separate commit
+     *   - exit      : short-press "enc" on the EXIT item, or long-press anywhere
+     */
     if (!s_settings_active) {
-        if (kind != AK_INPUT_KIND_NAV || strcmp(id, "center") != 0) {
+        if (kind != AK_INPUT_KIND_KEY || strcmp(id, AK_ENC_SW_ID) != 0) {
             return false;
         }
         if (event == AK_INPUT_EVENT_DOWN) {
@@ -1143,71 +1175,77 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
                 s_center_long_consumed = false;
                 return true;
             }
-            ak_emit_input_frame(AK_INPUT_KIND_NAV, "center",
+            /* A plain short press of the encoder push is forwarded as a normal
+             * "enc" key event (id "enc") so the companion can bind it. */
+            ak_emit_input_frame(AK_INPUT_KIND_KEY, AK_ENC_SW_ID,
                                 AK_INPUT_EVENT_DOWN, 0U);
             return false;
         }
         return true;
     }
 
-    /* Settings is modal: prevent K1-K5/PTT and nav events from reaching the
-     * companion or changing the hidden work screen. */
-    if (kind != AK_INPUT_KIND_NAV) {
+    /* Settings is modal: swallow every key so K1-K6 / PTT never reach the
+     * companion or change the hidden work screen. */
+    if (kind != AK_INPUT_KIND_KEY) {
         return true;
     }
-    if (strcmp(id, "center") == 0) {
+    if (strcmp(id, AK_ENC_SW_ID) == 0) {
         if (event == AK_INPUT_EVENT_DOWN) {
             s_center_long_consumed = false;
         } else if (event == AK_INPUT_EVENT_LONG) {
+            /* Long-press exits settings from anywhere. */
             s_center_long_consumed = true;
+            s_settings_active = false;
+            s_settings_confirmed = false;
+            ak_render_status();
         } else if (event == AK_INPUT_EVENT_UP) {
             if (s_center_long_consumed) {
                 s_center_long_consumed = false;
                 return true;
             }
-            ak_settings_result_t result =
-                ak_settings_handle(&s_settings, AK_SETTINGS_ACTION_CONFIRM);
-            if (result == AK_SETTINGS_RESULT_EXIT) {
+            /* Short press: EXIT item leaves settings; any other item advances
+             * selection to the next item (single-knob navigation). */
+            if (s_settings.selected == AK_SETTINGS_ITEM_EXIT) {
                 s_settings_active = false;
                 s_settings_confirmed = false;
                 ak_render_status();
                 return true;
             }
-            s_settings_confirmed = ak_settings_apply_selected() == OPRT_OK;
+            ak_settings_handle(&s_settings, AK_SETTINGS_ACTION_DOWN);
+            s_settings_confirmed = false;
             ak_settings_draw();
         }
         return true;
     }
-    if (event != AK_INPUT_EVENT_DOWN) {
-        return true;
-    }
+    (void)held_ms;
+    return true;
+}
 
-    ak_settings_action_t action;
-    if (strcmp(id, "up") == 0) {
-        action = AK_SETTINGS_ACTION_UP;
-    } else if (strcmp(id, "down") == 0) {
-        action = AK_SETTINGS_ACTION_DOWN;
-    } else if (strcmp(id, "left") == 0) {
-        action = AK_SETTINGS_ACTION_LEFT;
-    } else if (strcmp(id, "right") == 0) {
-        action = AK_SETTINGS_ACTION_RIGHT;
-    } else {
-        return true;
+/* EC11 rotation inside the modal settings UI: adjust the selected value live.
+ * Negative detents decrease (LEFT), positive increase (RIGHT); applied one step
+ * per detent. Returns true iff settings is active (so the frame is not sent). */
+static bool ak_settings_consume_encoder(int32_t detents)
+{
+    if (!s_settings_active || detents == 0) {
+        return s_settings_active;
     }
-
-    ak_settings_result_t result = ak_settings_handle(&s_settings, action);
-    s_settings_confirmed = false;
-    if (result == AK_SETTINGS_RESULT_CHANGED) {
-        OPERATE_RET rt = ak_settings_apply_selected();
-        if (rt != OPRT_OK) {
-            PR_WARN("settings apply failed: item=%d rt=%d",
-                    (int)s_settings.selected, rt);
-        } else {
-            send_device_settings();
+    ak_settings_action_t action =
+        detents > 0 ? AK_SETTINGS_ACTION_RIGHT : AK_SETTINGS_ACTION_LEFT;
+    int32_t steps = detents > 0 ? detents : -detents;
+    for (int32_t i = 0; i < steps; i++) {
+        ak_settings_result_t result = ak_settings_handle(&s_settings, action);
+        s_settings_confirmed = false;
+        if (result == AK_SETTINGS_RESULT_CHANGED) {
+            OPERATE_RET rt = ak_settings_apply_selected();
+            if (rt != OPRT_OK) {
+                PR_WARN("settings apply failed: item=%d rt=%d",
+                        (int)s_settings.selected, rt);
+            } else {
+                send_device_settings();
+            }
         }
     }
     ak_settings_draw();
-    (void)held_ms;
     return true;
 }
 
@@ -1735,7 +1773,8 @@ static void user_main(void)
     tal_log_init(TAL_LOG_LEVEL_DEBUG, 2048, (TAL_LOG_OUTPUT_CB)tkl_log_output);
 
     PR_NOTICE("======== Agentic Keyboard for Kiro: product fw %s ========", APP_FW_VERSION);
-    PR_NOTICE("Board: expansion baseboard v1.2 (WS2812=P%u/SPI1, LCD_BL=P%u)", (unsigned)AK_WS2812_DATA_PIN,
+    PR_NOTICE("Board: expansion baseboard v0.3 (WS2812=P%u/SPI1 x%u, LCD_BL=P%u)",
+              (unsigned)AK_WS2812_DATA_PIN, (unsigned)AK_WS2812_COUNT,
               (unsigned)AK_LCD_BACKLIGHT_PIN);
 #if AK_TRANSPORT_UART
     PR_NOTICE("Transport: %s (UART%u RX=P%u TX=P%u @%u 8N1)", AK_TRANSPORT_NAME, (unsigned)AK_UART_PORT,
@@ -1744,7 +1783,7 @@ static void user_main(void)
     PR_NOTICE("Transport: %s (BLE GATT peripheral, service 0x%04X)",
               AK_TRANSPORT_NAME, (unsigned)AK_BLE_GATT_SERVICE_UUID);
 #endif
-    PR_NOTICE("Inputs: 5 keys + 5-way nav, debounce=%ums long=%ums", (unsigned)AK_FSM_DEBOUNCE_MS,
+    PR_NOTICE("Inputs: 6 keys + EC11 encoder, debounce=%ums long=%ums", (unsigned)AK_FSM_DEBOUNCE_MS,
               (unsigned)AK_FSM_LONG_PRESS_MS);
 
     rt = core_init_with_retry("transport", ak_transport_init);
@@ -2031,7 +2070,7 @@ static void user_main(void)
         }
 #endif
 
-        ak_input_poll(now, on_input_event);
+        ak_input_poll(now, on_input_event, on_encoder_event);
 
         uint8_t rx[64];
         int     got = ak_transport_read(rx, sizeof(rx));

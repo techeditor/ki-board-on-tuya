@@ -17,7 +17,7 @@
 //!
 //! Design ref: `.kiro/specs/feature-probes-kirocrew-local-control/design.md`.
 
-use crate::protocol::{Inbound, KeyAction, NavDir};
+use crate::protocol::{Inbound, KeyAction};
 
 // ───────────────────────────── Chord ─────────────────────────────
 
@@ -143,7 +143,9 @@ fn is_trigger(action: KeyAction) -> bool {
     matches!(action, KeyAction::Down | KeyAction::Long)
 }
 
-/// Must match firmware/app/common/include/ak_input_fsm.h.
+/// Must match firmware/app/common/include/ak_input_fsm.h. Retained for future
+/// long-press bindings (K6 / the EC11 push); not referenced by the v0.3 router.
+#[allow(dead_code)]
 const BOARD_LONG_PRESS_MS: u32 = 800;
 
 /// Pure mapping: board event + context → control action. No IO.
@@ -157,15 +159,11 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 /// | `key k1..k3` `Long`/`Up`       | `None` — jump fired on `Down`; the rest of the press is a no-op |
 /// | `key k4` (down/long)           | `None` — K4 is push-to-talk; text arrives later as `macro` |
 /// | `key k5` (down/long)           | `Chord(Enter)` — submit / continue  |
-/// | `nav left` `Up` (< 800 ms)  | `Chord(Backspace)` — delete one character |
-/// | `nav left` `Long`           | `StartDeleteWords` — repeat Ctrl+Backspace |
-/// | `nav left` `Up` (>= 800 ms) | `StopDeleteWords` — stop repeat            |
-/// | `nav up` `Up` (< 800 ms)    | `Chord(Up)` — move to previous line      |
-/// | `nav up` `Long`             | `Chord(ClearInput)` — Ctrl+A, Backspace  |
-/// | `nav right` `Down`          | `Chord(NextChat)` — Alt+Right            |
-/// | `nav down` `Down`           | `Chord(Down)` — arrow key                |
-/// | `nav center` `Down`         | `Chord(Enter)`                            |
-/// | anything else / key `up`    | `None`                                    |
+/// | `key k6` (down/long)           | `None` — reserved; bind in the UI later (v0.3) |
+/// | `key enc` `Down`               | `Chord(Enter)` — EC11 push confirms (was nav center) |
+/// | `encoder { detents>0 }`        | `Chord(Down)` ×detents — clockwise scrolls down / next item |
+/// | `encoder { detents<0 }`        | `Chord(Up)` ×|detents| — counter-clockwise scrolls up |
+/// | anything else / key `up`       | `None`                                    |
 pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
     match ev {
         // Recognized speech text -> type into the chat composer (NO send). Both
@@ -219,28 +217,25 @@ pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
                 "k4" => ControlAction::None,
                 // K5 = submit / continue.
                 "k5" => ControlAction::Chord(Chord::Enter),
+                // EC11 push = confirm (replaces the v0.2 nav-center Enter).
+                "enc" => ControlAction::Chord(Chord::Enter),
+                // K6 is reserved in v0.3 — bind it in the UI later.
                 _ => ControlAction::None,
             }
         }
 
-        // Composer editing after ASR insertion. A short Left action is delayed
-        // until Up so a future Long event can replace it rather than deleting
-        // one character first. The long-tail Up is ignored via held_ms.
-        Inbound::Nav { payload, .. } => match (payload.dir, payload.action) {
-            (NavDir::Left, KeyAction::Up) if payload.held_ms < BOARD_LONG_PRESS_MS => {
-                ControlAction::Chord(Chord::Backspace)
-            }
-            (NavDir::Left, KeyAction::Long) => ControlAction::StartDeleteWords,
-            (NavDir::Left, KeyAction::Up) => ControlAction::StopDeleteWords,
-            (NavDir::Up, KeyAction::Up) if payload.held_ms < BOARD_LONG_PRESS_MS => {
+        // EC11 rotation: scroll by one arrow key per detent. Clockwise
+        // (positive) moves down / to the next item; counter-clockwise (negative)
+        // moves up. The caller applies the returned chord `detents` times.
+        Inbound::Encoder { payload, .. } => {
+            if payload.detents > 0 {
+                ControlAction::Chord(Chord::Down)
+            } else if payload.detents < 0 {
                 ControlAction::Chord(Chord::Up)
+            } else {
+                ControlAction::None
             }
-            (NavDir::Up, KeyAction::Long) => ControlAction::Chord(Chord::ClearInput),
-            (NavDir::Right, KeyAction::Down) => ControlAction::Chord(Chord::NextChat),
-            (NavDir::Down, KeyAction::Down) => ControlAction::Chord(Chord::Down),
-            (NavDir::Center, KeyAction::Down) => ControlAction::Chord(Chord::Enter),
-            _ => ControlAction::None,
-        },
+        }
 
         // Key/nav `up` edges, voice edges, ping/pong/ack, hello_ack, unknown.
         _ => ControlAction::None,
@@ -880,7 +875,8 @@ impl KiroCrewController {
 mod tests {
     use super::*;
     use crate::protocol::{
-        HelloAckPayload, KeyAction, KeyPayload, MacroPayload, NavPayload, VoicePayload, VoiceState,
+        EncoderPayload, HelloAckPayload, KeyAction, KeyPayload, MacroPayload, VoicePayload,
+        VoiceState,
     };
 
     fn key(id: &str, action: KeyAction) -> Inbound {
@@ -897,18 +893,10 @@ mod tests {
         }
     }
 
-    fn nav(dir: NavDir, action: KeyAction) -> Inbound {
-        nav_held(dir, action, 0)
-    }
-
-    fn nav_held(dir: NavDir, action: KeyAction, held_ms: u32) -> Inbound {
-        Inbound::Nav {
+    fn encoder(detents: i32) -> Inbound {
+        Inbound::Encoder {
             seq: Some(1),
-            payload: NavPayload {
-                dir,
-                action,
-                held_ms,
-            },
+            payload: EncoderPayload { detents },
         }
     }
 
@@ -1077,76 +1065,52 @@ mod tests {
     // ── Router: nav → composer editing / navigation / submit ───
 
     #[test]
-    fn nav_left_short_release_deletes_one_character() {
+    fn encoder_clockwise_scrolls_down() {
         let ctx = ControlCtx::default();
         assert_eq!(
-            route_input(&nav(NavDir::Left, KeyAction::Down), &ctx),
-            ControlAction::None
+            route_input(&encoder(1), &ctx),
+            ControlAction::Chord(Chord::Down)
         );
+        // Multi-step clockwise still yields Down; the caller repeats it.
         assert_eq!(
-            route_input(&nav_held(NavDir::Left, KeyAction::Up, 120), &ctx),
-            ControlAction::Chord(Chord::Backspace)
-        );
-    }
-
-    #[test]
-    fn nav_left_long_starts_repeat_and_release_stops_it() {
-        let ctx = ControlCtx::default();
-        assert_eq!(
-            route_input(
-                &nav_held(NavDir::Left, KeyAction::Long, BOARD_LONG_PRESS_MS),
-                &ctx
-            ),
-            ControlAction::StartDeleteWords
-        );
-        assert_eq!(
-            route_input(&nav_held(NavDir::Left, KeyAction::Up, 1200), &ctx),
-            ControlAction::StopDeleteWords
-        );
-    }
-
-    #[test]
-    fn nav_up_short_moves_to_previous_line_and_long_clears_input() {
-        let ctx = ControlCtx::default();
-        assert_eq!(route_input(&nav(NavDir::Up, KeyAction::Down), &ctx), ControlAction::None);
-        assert_eq!(
-            route_input(&nav_held(NavDir::Up, KeyAction::Up, 120), &ctx),
-            ControlAction::Chord(Chord::Up)
-        );
-        assert_eq!(
-            route_input(&nav_held(NavDir::Up, KeyAction::Long, BOARD_LONG_PRESS_MS), &ctx),
-            ControlAction::Chord(Chord::ClearInput)
-        );
-        assert_eq!(
-            route_input(&nav_held(NavDir::Up, KeyAction::Up, 1200), &ctx),
-            ControlAction::None
-        );
-    }
-
-    #[test]
-    fn nav_right_down_moves_to_next_chat_and_down_moves_caret() {
-        let ctx = ControlCtx::default();
-        assert_eq!(
-            route_input(&nav(NavDir::Right, KeyAction::Down), &ctx),
-            ControlAction::Chord(Chord::NextChat)
-        );
-        assert_eq!(
-            route_input(&nav(NavDir::Down, KeyAction::Down), &ctx),
+            route_input(&encoder(3), &ctx),
             ControlAction::Chord(Chord::Down)
         );
     }
 
     #[test]
-    fn nav_center_routes_to_enter_on_down_only() {
+    fn encoder_counter_clockwise_scrolls_up() {
         let ctx = ControlCtx::default();
         assert_eq!(
-            route_input(&nav(NavDir::Center, KeyAction::Down), &ctx),
-            ControlAction::Chord(Chord::Enter)
+            route_input(&encoder(-1), &ctx),
+            ControlAction::Chord(Chord::Up)
         );
         assert_eq!(
-            route_input(&nav(NavDir::Center, KeyAction::Long), &ctx),
-            ControlAction::None
+            route_input(&encoder(-2), &ctx),
+            ControlAction::Chord(Chord::Up)
         );
+    }
+
+    #[test]
+    fn encoder_zero_detents_is_none() {
+        let ctx = ControlCtx::default();
+        assert_eq!(route_input(&encoder(0), &ctx), ControlAction::None);
+    }
+
+    #[test]
+    fn enc_push_down_confirms_with_enter() {
+        let ctx = ControlCtx::default();
+        assert_eq!(
+            route_input(&key("enc", KeyAction::Down), &ctx),
+            ControlAction::Chord(Chord::Enter)
+        );
+    }
+
+    #[test]
+    fn k6_is_reserved_none() {
+        let ctx = ControlCtx::with_default_jumps();
+        assert_eq!(route_input(&key("k6", KeyAction::Down), &ctx), ControlAction::None);
+        assert_eq!(route_input(&key("k6", KeyAction::Long), &ctx), ControlAction::None);
     }
 
     // ── Router: non-triggering / ignored events → None ─────────
@@ -1160,10 +1124,10 @@ mod tests {
     }
 
     #[test]
-    fn nav_right_up_edge_does_not_trigger() {
+    fn enc_push_up_edge_does_not_trigger() {
         let ctx = ControlCtx::default();
         assert_eq!(
-            route_input(&nav(NavDir::Right, KeyAction::Up), &ctx),
+            route_input(&key("enc", KeyAction::Up), &ctx),
             ControlAction::None
         );
     }

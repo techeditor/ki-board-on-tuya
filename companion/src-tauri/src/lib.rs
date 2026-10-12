@@ -38,11 +38,9 @@ pub fn describe_inbound(frame: &Inbound) -> String {
             payload.held_ms,
             seq_suffix(*seq)
         ),
-        Inbound::Nav { seq, payload } => format!(
-            "nav {:?} {:?} ({}ms){}",
-            payload.dir,
-            payload.action,
-            payload.held_ms,
+        Inbound::Encoder { seq, payload } => format!(
+            "encoder {:+}{}",
+            payload.detents,
             seq_suffix(*seq)
         ),
         Inbound::Voice { seq, payload } => {
@@ -133,9 +131,8 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
             "kind": "key", "seq": seq, "id": payload.id,
             "action": payload.action, "held_ms": payload.held_ms
         }),
-        Inbound::Nav { seq, payload } => json!({
-            "kind": "nav", "seq": seq, "dir": payload.dir,
-            "action": payload.action, "held_ms": payload.held_ms
+        Inbound::Encoder { seq, payload } => json!({
+            "kind": "encoder", "seq": seq, "detents": payload.detents
         }),
         Inbound::Voice { seq, payload } => json!({
             "kind": "voice", "seq": seq, "state": payload.state
@@ -1231,7 +1228,7 @@ mod app {
         }
         // Acknowledge sequenced board events.
         if let Inbound::Key { seq: Some(seq), .. }
-        | Inbound::Nav { seq: Some(seq), .. }
+        | Inbound::Encoder { seq: Some(seq), .. }
         | Inbound::Voice { seq: Some(seq), .. }
         | Inbound::Macro { seq: Some(seq), .. }
         | Inbound::Asr { seq: Some(seq), .. }
@@ -1459,10 +1456,10 @@ mod app {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{KeyAction, KeyPayload, NavDir, NavPayload, VoicePayload, VoiceState};
+    use protocol::{EncoderPayload, KeyAction, KeyPayload, VoicePayload, VoiceState};
 
     #[test]
-    fn describe_key_and_nav() {
+    fn describe_key_and_encoder() {
         let key = Inbound::Key {
             seq: Some(7),
             payload: KeyPayload {
@@ -1473,15 +1470,17 @@ mod tests {
         };
         assert_eq!(describe_inbound(&key), "key k2 Long (820ms) seq=7");
 
-        let nav = Inbound::Nav {
+        let enc = Inbound::Encoder {
             seq: None,
-            payload: NavPayload {
-                dir: NavDir::Center,
-                action: KeyAction::Down,
-                held_ms: 0,
-            },
+            payload: EncoderPayload { detents: -2 },
         };
-        assert_eq!(describe_inbound(&nav), "nav Center Down (0ms)");
+        assert_eq!(describe_inbound(&enc), "encoder -2");
+
+        let enc_cw = Inbound::Encoder {
+            seq: Some(4),
+            payload: EncoderPayload { detents: 1 },
+        };
+        assert_eq!(describe_inbound(&enc_cw), "encoder +1 seq=4");
     }
 
     #[test]

@@ -15,7 +15,9 @@
 
 /* Board -> PC events. */
 int ak_proto_key(char *buf, size_t size, uint32_t seq, const char *id, const char *action, uint32_t held_ms);
-int ak_proto_nav(char *buf, size_t size, uint32_t seq, const char *dir, const char *action, uint32_t held_ms);
+/* Board -> PC: EC11 rotary encoder step. `detents` is a signed step count
+   (positive = clockwise, negative = counter-clockwise). Replaces ak_proto_nav. */
+int ak_proto_encoder(char *buf, size_t size, uint32_t seq, int32_t detents);
 int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state);
 /* Board -> PC: recognized speech text from the board-side (Tuya cloud) ASR.
    The builder JSON-escapes arbitrary text, including quotes and newlines. */

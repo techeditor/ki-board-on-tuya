@@ -173,19 +173,6 @@ pub enum KeyAction {
     Unknown,
 }
 
-/// 5-way navigation direction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NavDir {
-    Up,
-    Down,
-    Left,
-    Right,
-    Center,
-    #[serde(other)]
-    Unknown,
-}
-
 /// Voice trigger state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -219,7 +206,8 @@ pub enum VoiceEngine {
 
 // ─────────────────────── Payload structs (board -> PC) ───────────────────────
 
-/// `key` payload: one of the five mechanical switches (`k1`..`k5`).
+/// `key` payload: one of the six mechanical switches (`k1`..`k6`) or the EC11
+/// push switch (`enc`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPayload {
     pub id: String,
@@ -228,13 +216,12 @@ pub struct KeyPayload {
     pub held_ms: u32,
 }
 
-/// `nav` payload: the 5-way joystick.
+/// `encoder` payload: EC11 rotary step. `detents` is a signed step count
+/// (positive = clockwise, negative = counter-clockwise). Replaces the v0.2
+/// `nav` payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NavPayload {
-    pub dir: NavDir,
-    pub action: KeyAction,
-    #[serde(default)]
-    pub held_ms: u32,
+pub struct EncoderPayload {
+    pub detents: i32,
 }
 
 /// `voice` payload.
@@ -381,7 +368,7 @@ pub struct HelloAckPayload {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inbound {
     Key { seq: Option<u64>, payload: KeyPayload },
-    Nav { seq: Option<u64>, payload: NavPayload },
+    Encoder { seq: Option<u64>, payload: EncoderPayload },
     Voice { seq: Option<u64>, payload: VoicePayload },
     Macro { seq: Option<u64>, payload: MacroPayload },
     /// Recognized speech text from the board-side (Tuya cloud) ASR.
@@ -433,9 +420,9 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "key" => serde_json::from_value::<KeyPayload>(payload)
             .ok()
             .map(|p| Inbound::Key { seq, payload: p }),
-        "nav" => serde_json::from_value::<NavPayload>(payload)
+        "encoder" => serde_json::from_value::<EncoderPayload>(payload)
             .ok()
-            .map(|p| Inbound::Nav { seq, payload: p }),
+            .map(|p| Inbound::Encoder { seq, payload: p }),
         "voice" => serde_json::from_value::<VoicePayload>(payload)
             .ok()
             .map(|p| Inbound::Voice { seq, payload: p }),
@@ -592,20 +579,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_nav_and_voice_and_macro() {
-        let nav = decode_line(
-            r#"{"v":1,"seq":2,"type":"nav","payload":{"dir":"up","action":"long","held_ms":900}}"#,
+    fn decode_encoder_and_voice_and_macro() {
+        let enc = decode_line(
+            r#"{"v":1,"seq":2,"type":"encoder","payload":{"detents":-2}}"#,
         )
         .unwrap();
         assert_eq!(
-            nav,
-            Inbound::Nav {
+            enc,
+            Inbound::Encoder {
                 seq: Some(2),
-                payload: NavPayload {
-                    dir: NavDir::Up,
-                    action: KeyAction::Long,
-                    held_ms: 900,
-                },
+                payload: EncoderPayload { detents: -2 },
             }
         );
 
@@ -843,7 +826,7 @@ mod tests {
             None
         );
         // Known type, wrong payload shape entirely.
-        assert_eq!(decode_line(r#"{"v":1,"type":"nav","payload":42}"#), None);
+        assert_eq!(decode_line(r#"{"v":1,"type":"encoder","payload":42}"#), None);
     }
 
     // ── Byte-stream reassembly ───────────────────────────────

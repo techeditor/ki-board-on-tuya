@@ -74,7 +74,8 @@ static OPERATE_RET register_panel(void)
     cfg.bl.type              = TUYA_DISP_BL_TP_GPIO;
     cfg.bl.gpio.pin          = AK_LCD_BACKLIGHT_PIN; /* v1.2: P8 */
     cfg.bl.gpio.active_level = AK_LCD_CONTROL_ACTIVE;
-    cfg.power.pin            = AK_LCD_POWER_PIN;
+    /* v0.3: no LCD power-enable pin (panel VDD tied to 3V3); P7 is TE input. */
+    cfg.power.pin            = AK_LCD_POWER_PIN; /* TUYA_GPIO_NUM_MAX */
     cfg.power.active_level   = AK_LCD_CONTROL_ACTIVE;
 
     tdd_disp_spi_st7789_set_init_seq(s_st7789_init_seq_noinv);
