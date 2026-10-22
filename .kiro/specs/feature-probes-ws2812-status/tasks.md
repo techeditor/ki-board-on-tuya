@@ -61,7 +61,7 @@
 
 - [ ] **B3 — 真机端到端 + 文档**
   - companion 发 `display` 帧,三灯随对应槽位 chat 状态实时变化;拔线/断连三灯紫慢闪
-  - 更新 `docs/dev-implementation-steps.md` 路线图、`firmware/app/README.md`
+  - 更新 `docs/internal/dev-implementation-steps.md` 路线图、`firmware/app/README.md`
   - (若阶段 A/B 发现协议需扩 `display.state` 枚举 → 记入 D2 决策并同步 `shared/protocol/protocol.md`)
   - **DoD**:端到端演示通过;文档更新
 

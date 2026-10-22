@@ -118,4 +118,4 @@ tos.py clean -f && tos.py build
 ## Kiro 主题吉祥物（换肤）
 
 当前角落吉祥物仍是 CodeTank 浣熊精灵。换成 Kiro 幽灵的资产管线脚手架在
-`tools/kiro_mascot/`，逐步手工出图操作手册见 `docs/kiro-mascot-authoring.md`。
+`tools/kiro_mascot/`，逐步手工出图操作手册见 `docs/internal/kiro-mascot-authoring.md`。

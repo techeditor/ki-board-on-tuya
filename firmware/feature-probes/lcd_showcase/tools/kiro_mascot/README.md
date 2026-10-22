@@ -1,7 +1,7 @@
 # Kiro Ghost Mascot 资产管线（脚手架）
 
 把角落吉祥物从 CodeTank 浣熊换成 **Kiro 幽灵**的资产管线。**这是脚手架**：源精灵表由你
-手工出图（详见 [`docs/kiro-mascot-authoring.md`](../../../../docs/kiro-mascot-authoring.md)），
+手工出图（详见 [`docs/kiro-mascot-authoring.md`](../../../../docs/internal/kiro-mascot-authoring.md)），
 本目录只提供 manifest / 调色板 / 提示词 / 打包脚本。
 
 ## 内容

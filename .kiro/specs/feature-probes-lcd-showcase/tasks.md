@@ -56,6 +56,6 @@
   - 验收：`python3 mascot_pipeline.py --help` 跑通；无源图时报缺图而非崩溃。
 
 - [ ] **K2 手工出图 SOP 文档**
-  - `docs/kiro-mascot-authoring.md`：从提示词 → 出精灵表 → 抠色/切帧 → 跑 pipeline →
+  - `docs/internal/kiro-mascot-authoring.md`：从提示词 → 出精灵表 → 抠色/切帧 → 跑 pipeline →
     换进 probe → 编译 → 烧录 的**逐步操作手册**（供用户晚上手工执行）。
   - 验收：步骤可照做，命令可复制粘贴。
