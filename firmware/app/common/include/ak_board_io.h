@@ -3,7 +3,7 @@
  * @brief Authoritative IO mapping for the Agentic Keyboard product firmware.
  *
  * Target board: expansion baseboard v0.3 (major refactor; see
- * hardware/eda/expansion-baseboard-v0.3-change-scope.md).
+ * hardware/expansion-baseboard-v0.3-change-scope.md).
  *
  * v0.3 changes vs v0.2 (baseboard silk v1.2):
  *   - Inputs: 5 keys + WS-1002 5-way joystick  ->  6 keys (K1..K6) + EC11
@@ -16,7 +16,7 @@
  *     reaches P7 through a 10k series resistor, so P7 must be configured as a
  *     high-impedance INPUT (never driven).
  *
- * Values mirror hardware/eda/expansion-baseboard-v0.3-change-scope.md and the
+ * Values mirror hardware/expansion-baseboard-v0.3-change-scope.md and the
  * v0.3 draft in hardware/pinmap/pinmap.md (section 0). Do not copy pin
  * definitions from reference projects.
  */

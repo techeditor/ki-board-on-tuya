@@ -105,7 +105,7 @@
 
 - 编码侧一排 3 脚顺序 **A–C–B**（C 居中公共）；按键侧 2 脚 **D/E**。合计 **3 个 GPIO**。
 - **辅助电路按 datasheet 图 1 官方推荐**：A/B 各「10k 上拉 + 10k 串联 + 0.01µF 对地」RC 去抖
-  （上拉接 3V3，非 5V）。详见 `hardware/eda/v0.3-circuit-modification-guide.md` C 节。
+  （上拉接 3V3，非 5V）。详见内部电路修改指引（内部文档）。
   具体阻容值待 datasheet 与实测确定。
 
 ### 布局
@@ -256,7 +256,7 @@
 ## 9. 参考
 
 - `docs/versioning.md`（版本规范）
-- `hardware/eda/expansion-baseboard-v1.2-change-scope.md`（v0.2/上一版基线与网表核实记录）
+- 上一版基线与网表核实记录（内部文档）
 - `hardware/pinmap/pinmap.md`（引脚映射，待同步到 v0.3）
 - `datasheets/TFT-IPS_2.8_12Pin/单屏-插接12P-T280C7-C12-26/`（12P LCD 资料）
 - `datasheets/C2803348_按键轴座_Kailh(凯华).pdf`（热插拔轴座）

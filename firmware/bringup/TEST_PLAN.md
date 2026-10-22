@@ -8,7 +8,7 @@
 > indicator LEDs and battery switch were all removed** — flash via the dev-board
 > Type-C. Acceptance steps 6 (LED4/LED5) and 7 (battery/switch) therefore no
 > longer apply and have been dropped; step 3 now covers 6 keys + the encoder and
-> step 5 covers 7 LEDs. See `hardware/eda/expansion-baseboard-v0.3-change-scope.md`.
+> step 5 covers 7 LEDs. See `hardware/expansion-baseboard-v0.3-change-scope.md`.
 
 > **v1.2 follow-up (2026-09):** This plan was written for the v1.0 board. On
 > v1.2 the WS2812 data pin moved P13 -> P4 (SPI1_MOSI) and is now driven by the

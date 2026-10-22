@@ -28,7 +28,7 @@
 |---|---|---|
 | **v0.1** | Joe Shi 的 Ki-Board 方案 | 基于 **ESP32**、多块 SPI 屏的原始参考方案（见 `ref_projects/ki-board/`）。本项目的灵感来源。 |
 | **v0.2** | 上一版（作者自研，基于 T5AI-Core） | 首个基于 **Tuya T5AI-Core** 的自研版本：5 机械键 + 5 向摇杆 + 18P LCD + 扩展板 USB(CH340C)。硬件实物 PCB 丝印曾标 `v1.2.0`（旧号，等价于本规范 **v0.2**）。 |
-| **v0.3** | 当前迭代 | 最简化重构：去扩展板 USB/CH340C/电源开关；6 键（K1–K6）热插拔轴座；EC11 编码器替代 5 向摇杆；7× WS2812（K1–K6各1颗，LED7用于EC11）；12P LCD（ST7789P3）替代18P。详见 `hardware/eda/expansion-baseboard-v0.3-change-scope.md`。 |
+| **v0.3** | 当前迭代 | 最简化重构：去扩展板 USB/CH340C/电源开关；6 键（K1–K6）热插拔轴座；EC11 编码器替代 5 向摇杆；7× WS2812（K1–K6各1颗，LED7用于EC11）；12P LCD（ST7789P3）替代18P。详见 `hardware/expansion-baseboard-v0.3-change-scope.md`。 |
 
 > 历史号对照：**旧硬件丝印 `v1.2.0` = 项目 `v0.2`（的硬件）**。v0.3 起硬件丝印改用新规范号。
 

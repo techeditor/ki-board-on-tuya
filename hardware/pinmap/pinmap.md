@@ -4,7 +4,7 @@
 > 本文件**下方正文仍是 v0.2 基线**（5 键 + WS-1002 摇杆 + 18P LCD + 扩展板 USB），
 > 且 `pinmap.json` / `check_pins.py` / 固件头 `ak_board_io.h` 均为**已网表核实的 v0.2 权威基线**，
 > 在 v0.3 进入 EDA 实施前**暂不改动**（与 v1.2 当初“先文档、后实施”的流程一致）。
-> v0.3 的引脚分配见下方 **§0**，完整变更见 `hardware/eda/expansion-baseboard-v0.3-change-scope.md`。
+> v0.3 的引脚分配见下方 **§0**，完整变更见 `hardware/expansion-baseboard-v0.3-change-scope.md`。
 
 ## 0. v0.3 引脚分配（草案，随 EDA 实施后再落地到 json/固件）
 
