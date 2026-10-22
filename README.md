@@ -44,7 +44,6 @@ improve the Kiro CLI / IDE development experience. Its differentiators are
 3. **Phase 2** — Wireless: BLE GATT + on-board wake word + online ASR.
 4. **Phase 3** — BLE HID direct connect + optional on-board local ASR.
 
-Full task breakdown: [docs/implementation-plan.md](docs/implementation-plan.md).
 
 ## Repository layout
 
@@ -78,7 +77,6 @@ cd src-tauri && cargo test   # run protocol/transport unit tests
 | Doc | Content |
 |-----|---------|
 | [prd.md](docs/prd.md) | **Product requirements (for circuit review & code dev)** |
-| [implementation-plan.md](docs/implementation-plan.md) | Requirements, decisions, 16-task plan |
 | [protocol.md](docs/protocol.md) | Protocol reader's guide (points to the source) |
 | [shared/protocol/protocol.md](shared/protocol/protocol.md) | Authoritative protocol spec |
 | [hardware/pinmap/](hardware/pinmap/) | Pin map, netlist, BOM, conflict checker |

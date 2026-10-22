@@ -16,7 +16,7 @@
 >   `package-lock.json` 已生成；Rust 4 个单测、TypeScript typecheck、Vite build 均通过。
 > - `shared/protocol/protocol.md`：协议 v1 已定稿。
 > - **无 CI**（无 `.gitlab-ci.yml`）。仓库托管于 GitLab（`gitlab.aws.dev`）。
-> 任务编号沿用 `docs/implementation-plan.md` 的 16 任务（Task 3–16）。
+> 任务编号沿用 `docs/internal/implementation-plan.md` 的 16 任务（Task 3–16）。
 
 ---
 
@@ -320,6 +320,6 @@ companion-package:
 5. 硬件验证 OK 后进正式 **固件 Task3-5**，并行 **Companion Task6-8**（本机编译）。
 6. CI/Release 待流程顺后再启用（§4，Runner 选 D2-a）。
 
-> 参考：`docs/implementation-plan.md`(16 任务)、`docs/prd.md`(§7 软件规格/风险)、
+> 参考：`docs/internal/implementation-plan.md`(16 任务)、`docs/prd.md`(§7 软件规格/风险)、
 > `shared/protocol/protocol.md`(协议 v1)、`tuya-kb/03-toolchain-setup/01-cloud-build-local-flash-windows.md`(云编译本地烧录)、
 > `ref_projects/ki-board/`(transport/protocol/ASR 可对照复用)。

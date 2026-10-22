@@ -59,7 +59,7 @@
 | 交付物 | 文件 | 内容 |
 |--------|------|------|
 | 产品需求 | `docs/prd.md`（v1.4） | 产品定义、系统架构、硬件规格、功能需求、协议、风险 |
-| 实施计划 | `docs/implementation-plan.md` | 16 任务 / 4 阶段分解 |
+| 实施计划 | `docs/internal/implementation-plan.md` | 16 任务 / 4 阶段分解 |
 | 引脚映射 | `hardware/pinmap/pinmap.md` | 44P 排针逐脚、18P FPC 逐脚、摇杆脚序（均逐脚核实） |
 | 功能网表 | `hardware/pinmap/netlist.md` | 器件清单 + 网络连接（含 EDA 实际位号对照） |
 | BOM | `hardware/pinmap/bom.md` | 物料 + 库存/采购标记 + 立创实时比价 |
@@ -211,7 +211,7 @@
 
 ### 7.1 文档
 - `docs/prd.md` — 产品需求（v1.4，电路审核 + 代码开发基线）
-- `docs/implementation-plan.md` — 16 任务 4 阶段计划
+- `docs/internal/implementation-plan.md` — 16 任务 4 阶段计划
 - `docs/hardware-design-retrospective.md` — 本回顾文档
 - `shared/protocol/protocol.md` — 通信协议权威定义
 

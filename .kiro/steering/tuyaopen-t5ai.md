@@ -17,7 +17,7 @@ TuyaOpen SDK 位于 `/data/projects/TuyaOpen/`，同样独立于本仓库。
 - 本机是 **Windows**，不走 Linux 的 `apt-get` / `/dev/ttyACM` 那套。
 - 工具链路线：**云编译 + 本地烧录**，见 `tuya-kb/03-toolchain-setup/01-cloud-build-local-flash-windows.md`。
 - 板载串口芯片 **CH342F**（装 CH343SER 驱动）；烧录/日志用 TyuTool 或 `tos.py flash/monitor`。
-- 本机 C 盘路径含 `@`/中文/空格已实测可用（见 `docs/implementation-plan.md`），但 TuyaOpen 源码树
+- 本机 C 盘路径含 `@`/中文/空格已实测可用（见 `docs/internal/implementation-plan.md`），但 TuyaOpen 源码树
   建议仍放纯英文无空格路径以规避个别工具链问题。
 
 ## 关键事实（避免踩坑）

@@ -22,7 +22,6 @@
 | `hardware/pinmap/netlist.md` | 功能级网表 |
 | `hardware/pinmap/bom.md` | BOM 与采购标记 |
 | `shared/protocol/protocol.md` | 通信协议权威定义 |
-| `docs/implementation-plan.md` | 16 任务 4 阶段实施计划 |
 | `tuya-kb/` | TuyaOpen/T5 知识库（参考，不入库） |
 | `ref_projects/ki-board/` | 参考项目（ESP32-S3 版，不入库） |
 
@@ -602,7 +601,6 @@ Windows 走**云编译 + 本地烧录**（见 `tuya-kb/03-toolchain-setup/01-clo
 | **阶段 2** 无线化 | BLE GATT 固件+Companion、板端唤醒词+在线 ASR | 拔掉 USB，BLE 下功能等价；对板说话文本进 Kiro |
 | **阶段 3** 直连与本地化 | BLE HID、（可选）板端本地 ASR | 不装 PC 软件即可作蓝牙键盘；断网可识别固定指令 |
 
-任务级分解见 `docs/implementation-plan.md`（16 个 Task）。
 
 ---
 

@@ -40,7 +40,6 @@
 3. **阶段 2** — 无线化：BLE GATT + 板端唤醒词 + 在线 ASR。
 4. **阶段 3** — BLE HID 直连 + 可选板端本地 ASR。
 
-完整任务分解见 [docs/implementation-plan.md](docs/implementation-plan.md)。
 
 ## 仓库结构
 
@@ -74,7 +73,6 @@ cd src-tauri && cargo test   # 运行协议/传输层单元测试
 | 文档 | 内容 |
 |------|------|
 | [prd.md](docs/prd.md) | **产品需求文档（供电路审核与代码开发）** |
-| [implementation-plan.md](docs/implementation-plan.md) | 需求、决策、16 任务计划 |
 | [protocol.md](docs/protocol.md) | 协议导读（指向权威源） |
 | [shared/protocol/protocol.md](shared/protocol/protocol.md) | 权威协议规范 |
 | [hardware/pinmap/](hardware/pinmap/) | 引脚映射、网表、BOM、冲突校验 |
