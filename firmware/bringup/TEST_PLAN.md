@@ -36,7 +36,7 @@ cd firmware/bringup
 
 Current automated result: all seven T5AI QIO firmware images build successfully.
 The steps below require the expansion baseboard, a Windows flash host, and
-visual/RF observation; they cannot be closed by the EC2 build alone.
+visual/RF observation; they cannot be closed by the cloud build alone.
 
 ## Windows flashing pattern
 

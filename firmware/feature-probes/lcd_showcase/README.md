@@ -95,7 +95,7 @@ tos.py clean -f && tos.py build
 - **BUILD SUCCESS**（AP 分区 **2.28MB / 3.5MB**，余 ~1.4MB）。
 - host 单测 **ALL PASSED**（按键映射 + 6 场景环回 + 状态循环 + confirm one-shot + anim 映射）。
 - `clang-format` clean（用 TuyaOpen 根 `.clang-format`）。
-- **真机观感待用户在扩展板（COM6）验收**——EC2 只保证编译通过 + 逻辑正确。
+- **真机观感待用户在扩展板（COM6）验收**——云端主机只保证编译通过 + 逻辑正确。
 
 ## 复用 vs 新增
 

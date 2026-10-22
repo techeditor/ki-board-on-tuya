@@ -70,7 +70,7 @@ Enable the tracked hook once per clone (this checkout is configured already):
 git config core.hooksPath .githooks
 ```
 
-## Build (EC2)
+## Build (cloud host)
 
 ```bash
 source /data/projects/TuyaOpen/export.sh
@@ -80,7 +80,7 @@ tos.py clean -f && tos.py build      # clean needed after any .config change
 ```
 
 Artifacts: `dist/<version>/*_QIO_*.bin` (flashed on the board) / `*_UG_*.bin`
-(OTA). Build on EC2; flash from Windows with `scripts/flash.ps1`.
+(OTA). Build on the cloud host; flash from your local machine with a serial flash tool (tyutool).
 
 > `app_default.config` and `config/TUYA_T5AI_CORE.config` are kept identical for
 > the current single profile (same convention as `firmware/bringup/`). When more
@@ -101,21 +101,21 @@ rejection, and exact JSONL frame strings.
 ## Status
 
 - **Task 3 (M1)** — skeleton: v1.2 board config + UART0 `hello_ack` + 2 s `ping`
-  heartbeat (JSONL protocol v1). EC2 build ✅ / clang-format ✅ / check_pins ✅.
+  heartbeat (JSONL protocol v1). cloud build ✅ / clang-format ✅ / check_pins ✅.
 - **Task 4** — input scan: 5 keys + 5-way nav with 20 ms debounce + 800 ms
   long-press; logic in the pure host-tested `ak_input_fsm`; emits `key`/`nav`
-  events. EC2 build ✅ / host tests ✅.
+  events. cloud build ✅ / host tests ✅.
 - **Task 5** — protocol v1 complete: pure `ak_protocol` frame builders
   (key/nav/voice/hello_ack/ping/pong/ack) + pure `ak_rx` line assembler & field
   extractors. App RX loop replies `hello`→`hello_ack`, `ping`→`pong`,
   `config`→`ack`, logs `display` (LCD render pending Task 9), ignores unknown
-  types. EC2 build ✅ / host tests ✅ / clang-format ✅.
+  types. cloud build ✅ / host tests ✅ / clang-format ✅.
 
 - **Task 9 (partial)** — LCD bring-up: `ak_display` registers the ST7789 on the
   v1.2 wiring (SPI0 + DC/RST, backlight P8) with the CL28CK230 INVOFF init
   sequence validated in bring-up, opens via TDL, sets backlight and draws a
   colour-bar test pattern. `CONFIG_ENABLE_SPI`/`ENABLE_DISPLAY` on; LVGL not yet
-  needed. EC2 build ✅. The LVGL 3-zone product UI is deferred until the
+  needed. cloud build ✅. The LVGL 3-zone product UI is deferred until the
   interaction design is finalised and the v1.2 board is in hand.
 
 Awaiting the v1.2 board to smoke-test on hardware (keys/nav/UART RX/TX on the

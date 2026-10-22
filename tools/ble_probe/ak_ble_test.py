@@ -15,7 +15,7 @@ Bluetooth adapter (no extra hardware). It:
 UUIDs are Tuya's, defined in the SDK (src/tal_bluetooth/include/tal_bluetooth_def.h):
     service 0x1910, notify 0x2B10, write 0x2B11.
 
-Usage (on your Windows/macOS/Linux machine, NOT the EC2 build host):
+Usage (on your Windows/macOS/Linux machine, NOT the cloud build host):
     pip install bleak
     python ak_ble_test.py                 # scan for AK-KB, connect, interactive
     python ak_ble_test.py --name AK-KB     # explicit advertised name

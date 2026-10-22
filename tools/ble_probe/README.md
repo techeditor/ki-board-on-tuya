@@ -14,7 +14,7 @@ no extra hardware) and exercises Tuya's fixed command service:
 > `src/tal_bluetooth/include/tal_bluetooth_def.h`. This client just talks to them;
 > it is the minimal rehearsal of the companion's future BLE backend.
 
-## Run (on your Windows / macOS / Linux machine — not the EC2 build host)
+## Run (on your Windows / macOS / Linux machine — not the cloud build host)
 
 ```bash
 pip install -r requirements.txt      # or: pip install bleak

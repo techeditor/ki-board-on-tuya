@@ -21,8 +21,8 @@ Status legend: PASS / FAIL / PARTIAL / TODO.
 ## v0.3 acceptance (expansion baseboard, 2026-10-01 rev)
 
 Re-test on the v0.3 board (6 keys + EC11 encoder, 7x WS2812, 12P ST7789P3 with
-P7=TE, expansion USB/battery removed). Firmware built on the EC2 devbox and
-flashed from Windows via `scripts/flash.ps1`. The v1.0 log below is retained for
+P7=TE, expansion USB/battery removed). Firmware built on the cloud build host and
+flashed from the local machine via a serial flash tool. The v1.0 log below is retained for
 traceability; the acceptance steps were renumbered in `TEST_PLAN.md` (old steps
 6/7 battery/VBUS dropped).
 
@@ -271,7 +271,7 @@ but the CL28CK230-18A does not, so it displayed everything inverted.
 Fix (firmware, `lcd_st7789/src/tuya_app_main.c`): added a local copy of the init
 sequence `s_st7789_init_seq_noinv` with the final `INVON` replaced by `INVOFF`
 (0x20), injected via `tdd_disp_spi_st7789_set_init_seq()` before register. Built
-clean on EC2 (`lcd_st7789_QIO_0.1.0.bin`). After flashing, all colors correct:
+clean on the cloud host (`lcd_st7789_QIO_0.1.0.bin`). After flashing, all colors correct:
 bars in order, and solid red/green/blue/white/black display correctly.
 
 Panel adaptation note (reuse later): the CL28CK230-18A needs INVOFF, not the
