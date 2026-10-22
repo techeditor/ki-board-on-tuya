@@ -48,7 +48,7 @@
 
 - 版本号 = `v0.x.y`，随项目主线。进入 v0.3 硬件后，固件基线号升到 **v0.3.y**。
 - `firmware/app/VERSION` 存**裸版本串**（不带 `v` 前缀），即 `0.3.y`。
-- `y` = 构建 / 发布流水号（与 `releases/firmware/` 目录、烧录脚本 `-Version` 参数一致）。
+- `y` = 构建 / 发布流水号（与固件发布流水一致）。
 - 说明：v0.2 期间固件曾独立走 `0.1.x`（如 `0.1.12`）；进入 v0.3 后对齐到 `0.3.y`。
 
 ### 3.3 Companion（Tauri：`companion/package.json` + `src-tauri/Cargo.toml`）

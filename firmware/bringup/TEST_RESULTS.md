@@ -242,7 +242,7 @@ Workaround on this v1.0 board: insert the flex REVERSED, so the two mirrorings
 cancel and every pin lands correctly - which is why the color bars now display.
 
 Cross-referenced/updated:
-- `hardware/eda/pcb_review_report_2026-08-24.md`: H4 changed from "pending
+- PCB 评审记录（内部）: H4 changed from "pending
   visual check" to "confirmed defect"; the original review only checked the
   bottom/top window orientation and missed that bottom-layer placement mirrors
   the pin order, so H4 was never closed until now.
