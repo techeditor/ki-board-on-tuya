@@ -1,0 +1,71 @@
+[package]
+name = "agentic-keyboard-companion"
+version = "0.3.4"
+description = "Companion app for the T5AI-Core agentic keyboard"
+authors = ["Kiro"]
+edition = "2021"
+
+[lib]
+name = "agentic_keyboard_companion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Serial I/O is cross-platform. `default-features = false` drops the `libudev`
+# feature so the crate builds on the Linux CI host without libudev-dev; real
+# port enumeration only runs on the Windows target.
+serialport = { version = "4", default-features = false }
+# FP-4: session-control HTTP client. Pinned to the version already resolved in
+# Cargo.lock (pulled transitively by tauri) so adding it as a direct dep does
+# not churn the lockfile. The Crew gateway is loopback HTTP only, so no TLS
+# backend is enabled (avoids OpenSSL/aws-lc native build dependencies).
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json"] }
+# Kiro Crew realtime status stream (`ws://127.0.0.1:<port>/api/ws`). The
+# gateway is loopback-only, so only the WebSocket handshake feature is needed;
+# no native-TLS/OpenSSL backend is pulled in. Exact pin for reproducible builds.
+tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+# Phase 2 BLE GATT backend. btleplug is cross-platform (BlueZ/DBus on Linux,
+# WinRT on Windows) and async, so it pulls a minimal tokio (current-thread
+# runtime + channels + timers, no full app async). Pinned exactly so adding it
+# does not churn resolution; 0.11.8 is the latest 0.11.x. NB: on the Linux CI
+# host btleplug's BlueZ backend links against system libdbus (libdbus-1-dev) —
+# absent hosts fail at the LINK step only; the code still type-checks.
+btleplug = "=0.11.8"
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "macros"] }
+uuid = "1"
+futures = "0.3"
+# FP-4b status sink (T6): a tiny synchronous localhost HTTP listener for the
+# Kiro-Crew agent-hook ingress. Cross-platform, no async runtime — mirrors the
+# transport reader-thread + stop-flag pattern. Pinned to the current 0.12 line.
+tiny_http = "=0.12.0"
+# Handoff-file location (`%LOCALAPPDATA%`/`~/.config`) for the `--hook` mode to
+# find the sink. Already resolved transitively (v6) so this adds no lock churn.
+dirs = "6"
+# Random status-sink token without pulling `rand`. getrandom 0.2 is already in
+# the tree (reqwest/rustls dep), so pinning the direct dep churns nothing.
+getrandom = "0.2"
+# Human-readable local timestamps for persistent diagnostics. Exact version is
+# already present in Cargo.lock; `clock` enables Local timezone conversion.
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+# BLE secure channel (AES-128-CCM per frame, HKDF-SHA256 session keys). The
+# RustCrypto implementations; no hand-written crypto. sha2 0.10 is already
+# in the tree.
+aes = "0.8"
+ccm = "0.5"
+hkdf = "0.12"
+sha2 = "0.10"
+# Sealed BLE frames are base64 text lines; 0.22 is already in the tree.
+base64 = "0.22"
+# Local OTA (docs/ota.md): verify the ECDSA P-256 package signature on the PC
+# before sending it (the keyboard verifies again). RustCrypto, verify only.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tauri = { version = "2", features = [] }
+
+[dev-dependencies]
+env_logger = "0.11"

@@ -1,0 +1,18 @@
+Ki-board -- an agentic keyboard for Kiro, built on the Tuya T5AI-Core board
+Copyright 2026 The Ki-board Authors
+
+Software in this repository is licensed under the Apache License, Version 2.0
+(see LICENSE), unless a file or directory states otherwise.
+
+This repository includes third-party material under its own licence:
+
+- Bitmap font subsets in firmware/app/common/src/ak_font_data.c and
+  firmware/app/common/src/ak_font_ui_data.c, taken from Fusion Pixel Font
+  (with Ark Pixel, Cubic-11 and Galmuri), GNU Unifont, Chill Bitmap and
+  ISAS 16x16 Song. Licences (SIL OFL 1.1 and others) and attribution are in
+  firmware/app/third_party/fonts/.
+- firmware/app/common/include/ak_font8x8.h: font8x8 by Daniel Hepper,
+  public domain.
+
+Hardware design files, where present, keep the licence of their OSHWHub
+project page.

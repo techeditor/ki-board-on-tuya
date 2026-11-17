@@ -1,0 +1,78 @@
+{
+  "board": "T5AI-Core",
+  "mcu": "T5-E1",
+  "hw_version": "v0.3.1",
+  "variant": "low-profile",
+  "description": "Pin assignment for Expansion Board v0.3.1 Low-Profile (low-profile hot-swap keys + reverse-mount WS2812B-MINI-V3J). Extracted read-only from EasyEDA project 'Ki-board 矮轴版' / board 'Expansion Board_v0.3.1_low-profile' on 2026-11-05; every assignment below was cross-checked against the PCB pad nets of U1 (TUYA_T5_CORE).",
+  "eda": {
+    "project": "Ki-board 矮轴版",
+    "project_uuid": "1688d4167dad468d988f8419cfd6d52d",
+    "board": "Expansion Board_v0.3.1_low-profile",
+    "schematic": "Expansion Board_v0.3.1_low-profile",
+    "schematic_pages": ["Main", "Keys"],
+    "pcb": "PCB_ExpBoard_v0.3.1_low-profile",
+    "silkscreen_version": "v0.3.1 Low Profile, 2026/10/26"
+  },
+  "board_occupied": [
+    { "pin": "P9",  "use": "USER_LED (on dev board)", "active": "high" },
+    { "pin": "P10", "use": "UART0_RX (on-board CH342F; flash/log/comms)" },
+    { "pin": "P11", "use": "UART0_TX (on-board CH342F; flash/log/comms)" },
+    { "pin": "P28", "use": "Battery ADC (ADC4, dev board internal divider; not on 44P)" },
+    { "pin": "P29", "use": "USER_BUTTON (on dev board)", "active": "low" },
+    { "pin": "P38", "use": "CHG_DET_N (dev board internal; not on 44P)", "active": "low" },
+    { "pin": "P39", "use": "SPEAKER_EN (on dev board)", "active": "low" },
+    { "pin": "P2",  "use": "SPI1_SCK (reserved for WS2812 SPI1 group, no external load)" },
+    { "pin": "P3",  "use": "SPI1_CS (reserved for WS2812 SPI1 group, no external load)" },
+    { "pin": "P5",  "use": "SPI1_MISO (reserved for WS2812 SPI1 group, no external load)" }
+  ],
+  "assigned": [
+    { "pin": "P24", "net": "KEY1",       "header": "J2.13", "part": "KEY1", "mode": "input_pullup", "active": "low" },
+    { "pin": "P25", "net": "KEY2",       "header": "J2.8",  "part": "KEY2", "mode": "input_pullup", "active": "low" },
+    { "pin": "P26", "net": "KEY3",       "header": "J2.9",  "part": "KEY3", "mode": "input_pullup", "active": "low" },
+    { "pin": "P27", "net": "KEY4",       "header": "J2.12", "part": "KEY4", "mode": "input_pullup", "active": "low" },
+    { "pin": "P23", "net": "KEY5",       "header": "J2.7",  "part": "KEY5", "mode": "input_pullup", "active": "low" },
+    { "pin": "P32", "net": "KEY6",       "header": "J2.14", "part": "KEY6", "mode": "input_pullup", "active": "low" },
+    { "pin": "P20", "net": "EC11_A",     "header": "J2.4",  "part": "U3.A(1)", "mode": "input_nopull", "note": "External 10k pull-up (R13) + 10k series (R14) + 10nF (C10)" },
+    { "pin": "P21", "net": "EC11_B",     "header": "J2.5",  "part": "U3.B(3)", "mode": "input_nopull", "note": "External 10k pull-up (R15) + 10k series (R16) + 10nF (C11)" },
+    { "pin": "P22", "net": "EC11_SW",    "header": "J2.6",  "part": "U3.D(5)", "mode": "input_pullup", "active": "low", "note": "100nF (C12) to GND, no external pull-up" },
+    { "pin": "P4",  "net": "WS_DIN_3V3", "header": "J2.20", "part": "U2.A(2)", "mode": "spi1_mosi", "note": "7x WS2812B-MINI-V3J daisy chain via SN74LV1T34 (3.3V->5V) + R1 100R. RESET low time must be >= 280us (new LED requirement)." },
+    { "pin": "P6",  "net": "LCD_RST",    "header": "J2.18", "part": "FPC1.2",  "mode": "output" },
+    { "pin": "P7",  "net": "LCD_TE",     "header": "J2.17", "part": "FPC1.7 via R5 10k", "mode": "input_nopull", "note": "LCD TE output; old LCD_PWR role removed" },
+    { "pin": "P8",  "net": "LCD_BL",     "header": "J2.16", "part": "Q1 base via R7 2.2k", "mode": "output", "active": "high" },
+    { "pin": "P14", "net": "LCD_SCK",    "header": "J1.14", "part": "FPC1.4 via R4 0R", "mode": "spi0_sck" },
+    { "pin": "P16", "net": "LCD_MOSI",   "header": "J1.13", "part": "FPC1.3 via R3 0R", "mode": "spi0_mosi" },
+    { "pin": "P15", "net": "LCD_CS",     "header": "J1.15", "part": "FPC1.5",  "mode": "output" },
+    { "pin": "P17", "net": "LCD_DC",     "header": "J1.12", "part": "FPC1.6",  "mode": "output" }
+  ],
+  "unused_on_header": ["P30", "P31", "P34", "P36", "P44", "P45", "P46", "P47", "P19", "P18", "P13", "P12"],
+  "power": {
+    "VDD_3V3": ["U1.3V3A", "U1.3V3B", "FPC1.9 (VDD)", "FPC1.10 (LEDA)", "R13", "R15", "C13 1uF", "C14 100nF"],
+    "VDD_5V": ["U1.5V", "U2.VCC(5)", "U4..U10.VDD(1)", "C1 47uF", "C2..C9 100nF"],
+    "note": "No power entry on the expansion board; all rails come from the T5AI-Core 44P header."
+  },
+  "ws2812_chain": {
+    "part": "WS2812B-MINI-V3J",
+    "lcsc": "C22371519",
+    "pinout": { "1": "VDD", "2": "DOUT", "3": "GND", "4": "DIN" },
+    "order": [
+      { "index": 0, "ref": "U4",  "position": "K1" },
+      { "index": 1, "ref": "U5",  "position": "K2" },
+      { "index": 2, "ref": "U6",  "position": "K3" },
+      { "index": 3, "ref": "U7",  "position": "K4" },
+      { "index": 4, "ref": "U8",  "position": "K5" },
+      { "index": 5, "ref": "U9",  "position": "K6" },
+      { "index": 6, "ref": "U10", "position": "EC11" }
+    ],
+    "tail_net": "WS2812_END",
+    "mounting": "Top layer, reverse-mount through a 3.81x3.81mm in-footprint cutout; light faces the bottom (key) side",
+    "timing": { "protocol": "GRB, MSB first, 800kHz", "reset_us_min": 280, "t0h_ns": "220-380", "t1h_ns": "580-1000" },
+    "vdd_range_v": [3.7, 5.3],
+    "vih": "0.65*VDD (3.25V at 5V) -> level shifter U2 required; R2 0R bypass is DNP"
+  },
+  "lcd_spi": {
+    "panel": "T280C7-C12-26 (ST7789P3, 2.8in IPS, 240x320)",
+    "connector": "FPC1 FPC-05F-12PH20 (C2856799), 0.5mm 12P bottom-contact",
+    "sck": "P14", "mosi": "P16", "cs": "P15", "dc": "P17", "rst": "P6", "bl": "P8", "te": "P7",
+    "spi_port": "SPI0", "spi_clk_hz": 48000000, "pixel_fmt": "RGB565"
+  }
+}

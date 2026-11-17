@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "project_version": "v0.3",
+  "hardware_version": "v0.3.0",
+  "board": "T5AI-Core",
+  "mcu": "T5-E1",
+  "expansion_board": "Expansion Board_v0.3_lite",
+  "status": "schematic-and-pcb-reviewed",
+  "review_date": "2026-10-01",
+  "description": "Passive v0.3 expansion board: 6 hot-swap keys, EC11 encoder, 7 addressable RGB LEDs, and a 12-pin ST7789P3 LCD. USB, battery and charging remain on T5AI-Core.",
+  "board_internal": [
+    { "pin": "P0", "use": "UART1_TX / board debug channel", "policy": "reserved" },
+    { "pin": "P1", "use": "UART1_RX / board debug channel", "policy": "reserved" },
+    { "pin": "P9", "use": "USER_LED", "active": "high", "policy": "board-owned" },
+    { "pin": "P10", "use": "UART0_RX / onboard CH342F", "policy": "board-owned" },
+    { "pin": "P11", "use": "UART0_TX / onboard CH342F", "policy": "board-owned" },
+    { "pin": "P28", "use": "ADC_BAT / AUXADC4", "policy": "board-owned-not-on-44p" },
+    { "pin": "P29", "use": "USER_BUTTON", "active": "low", "policy": "board-owned" },
+    { "pin": "P38", "use": "CHG_DET_N", "active": "low", "policy": "board-owned-not-on-44p" },
+    { "pin": "P39", "use": "SPEAKER_EN", "active": "low", "policy": "board-owned" }
+  ],
+  "assigned": [
+    { "pin": "P4", "net": "WS_DIN_3V3", "header": "J2.20", "mode": "spi1_mosi", "direction": "output" },
+    { "pin": "P6", "net": "LCD_RST", "header": "J2.18", "mode": "gpio_output", "active": "low" },
+    { "pin": "P7", "net": "LCD_TE", "header": "J2.17", "mode": "gpio_input", "pull": "none", "note": "FPC1.7 through R8=10k; replaces obsolete LCD_PWR use" },
+    { "pin": "P8", "net": "LCD_BL", "header": "J2.16", "mode": "gpio_output", "active": "high" },
+    { "pin": "P14", "net": "LCD_SCK", "header": "J1.14", "mode": "spi0_sck", "direction": "output" },
+    { "pin": "P15", "net": "LCD_CS", "header": "J1.15", "mode": "gpio_output", "active": "low" },
+    { "pin": "P16", "net": "LCD_MOSI", "header": "J1.13", "mode": "spi0_mosi", "direction": "output" },
+    { "pin": "P17", "net": "LCD_DC", "header": "J1.12", "mode": "gpio_output" },
+    { "pin": "P20", "net": "EC11_A", "header": "J2.4", "mode": "gpio_input", "pull": "external_10k_to_3v3" },
+    { "pin": "P21", "net": "EC11_B", "header": "J2.5", "mode": "gpio_input", "pull": "external_10k_to_3v3" },
+    { "pin": "P22", "net": "EC11_SW", "header": "J2.6", "mode": "gpio_input_pullup", "active": "low" },
+    { "pin": "P23", "net": "KEY5", "header": "J2.7", "mode": "gpio_input_pullup", "active": "low" },
+    { "pin": "P24", "net": "KEY1", "header": "J2.13", "mode": "gpio_input_pullup", "active": "low" },
+    { "pin": "P25", "net": "KEY2", "header": "J2.8", "mode": "gpio_input_pullup", "active": "low" },
+    { "pin": "P26", "net": "KEY3", "header": "J2.9", "mode": "gpio_input_pullup", "active": "low" },
+    { "pin": "P27", "net": "KEY4", "header": "J2.12", "mode": "gpio_input_pullup", "active": "low" },
+    { "pin": "P32", "net": "KEY6", "header": "J2.14", "mode": "gpio_input_pullup", "active": "low" }
+  ],
+  "reserved": [
+    { "pin": "P2", "use": "SPI1_SCK fixed group", "external_load": false },
+    { "pin": "P3", "use": "SPI1_CS fixed group", "external_load": false },
+    { "pin": "P5", "use": "SPI1_MISO fixed group", "external_load": false },
+    { "pin": "P30", "use": "free after K7 cancellation" },
+    { "pin": "P31", "use": "free / UART2_TX option" },
+    { "pin": "P12", "use": "free / UART0_RTS option" },
+    { "pin": "P13", "use": "free / UART0_CTS option" },
+    { "pin": "P18", "use": "free on lite / v0.3.1; v0.3.2 LED_PWR_EN (see variant_assignments)" },
+    { "pin": "P19", "use": "free / PWM option" },
+    { "pin": "P34", "use": "free / PWM option" },
+    { "pin": "P36", "use": "free / PWM option" },
+    { "pin": "P44", "use": "free / SPI0 alternate SCK" },
+    { "pin": "P45", "use": "free / SPI0 alternate CS" },
+    { "pin": "P46", "use": "free / SPI0 alternate MOSI" },
+    { "pin": "P47", "use": "free / SPI0 alternate MISO" }
+  ],
+  "variant_assignments": {
+    "v0.3.2": [
+      { "pin": "P18", "net": "LED_PWR_EN", "header": "J1.11", "mode": "gpio_output", "active": "high",
+        "note": "WS2812 chain + U2 power switch: P18 -> R10 10k -> Q3 S8050 -> Q2 AO3401A gate; R11 10k pull-down keeps it off while P18 floats. See hardware/eda/ws2812-power-reduction-study.md" }
+    ]
+  },
+  "spi_groups": {
+    "SPI0_LCD": { "port": "SPI0", "pins": { "cs": "P15", "sck": "P14", "mosi": "P16", "miso_repurposed_as_dc": "P17" } },
+    "SPI1_WS2812": { "port": "SPI1", "pins": { "cs_reserved": "P3", "sck_reserved": "P2", "mosi": "P4", "miso_reserved": "P5" } }
+  },
+  "keys": {
+    "count": 6,
+    "active": "low",
+    "pull": "internal",
+    "debounce": "firmware",
+    "nets": ["KEY1", "KEY2", "KEY3", "KEY4", "KEY5", "KEY6"],
+    "socket": { "lcsc": "C2803348", "model": "CPG151101S11", "quantity": 6 },
+    "mechanical_footprints": { "designators": ["K1", "K2", "K3", "K4", "K5", "K6"], "add_to_bom": false },
+    "pitch_mm": { "x": 19.10, "y": 19.10, "standard_1u_reference": 19.05 }
+  },
+  "encoder": {
+    "designator": "U3",
+    "lcsc": "C9900001788",
+    "model": "EC1106S / EC11I-152 reference",
+    "pins": { "1_A": "EC11_A_RAW", "2_C": "GND", "3_B": "EC11_B_RAW", "4_E": "GND", "5_D": "EC11_SW", "6_EP": "GND", "7_EP": "GND" },
+    "filters": {
+      "A": { "pullup": "R13 10k C99198", "series": "R14 10k C99198", "capacitor": "C10 10nF C100042" },
+      "B": { "pullup": "R15 10k C99198", "series": "R16 10k C99198", "capacitor": "C11 10nF C100042" },
+      "SW": { "capacitor": "C12 100nF C14663", "pull": "T5 internal pull-up" }
+    }
+  },
+  "lcd": {
+    "model": "T280C7-C12-26",
+    "driver": "ST7789P3",
+    "resolution": "240x320",
+    "interface": "4-wire SPI write + TE input",
+    "fpc": { "designator": "FPC1", "lcsc": "C2856799", "model": "FPC-05F-12PH20", "pitch_mm": 0.5, "contact": "bottom", "placement": "top", "footprint": "FPC-SMD_12P-P0.50_FPC-05F-12PH20_REV" },
+    "pins": {
+      "1": "GND",
+      "2": "LCD_RST",
+      "3": "LCD_MOSI via R3 0R",
+      "4": "LCD_SCK via R4 0R",
+      "5": "LCD_CS",
+      "6": "LCD_DC",
+      "7": "LCD_TE via R8 10k",
+      "8": "GND",
+      "9": "VDD_3V3",
+      "10": "VDD_3V3 / LEDA+",
+      "11": "LEDK- via R5 10R and Q1",
+      "12": "GND",
+      "13": "GND / shell",
+      "14": "GND / shell"
+    },
+    "power_decoupling": ["C13 1uF C52923", "C14 100nF C343047"],
+    "backlight": { "control": "P8 LCD_BL high active", "base_resistor": "R6 2.2k C4190", "base_pulldown": "R7 10k C99198", "switch": "Q1 S8050 C908252", "led_resistor": "R5 10R C2906983" }
+  },
+  "rgb_leds": {
+    "count": 7,
+    "lcsc": "C2890364",
+    "model": "XL-3528RGBW-2812B",
+    "placement": "bottom",
+    "pinout": { "1": "GND", "2": "DI", "3": "VDD_5V", "4": "DO" },
+    "roles": { "LED1": "K1", "LED2": "K2", "LED3": "K3", "LED4": "K4", "LED5": "K5", "LED6": "K6", "LED7": "EC11" },
+    "chain": ["LED1", "LED2", "LED3", "LED4", "LED5", "LED6", "LED7"],
+    "level_shifter": { "designator": "U2", "lcsc": "C100024", "model": "SN74LV1T34DBVR", "vcc": "VDD_5V", "decoupling": "C2 100nF C343047" },
+    "input_resistor": "R1 100R C22775",
+    "direct_drive_bypass": { "designator": "R2", "value": "0R", "lcsc": "C106231", "assembly": "DNP", "rule": "Never populate with U2" },
+    "bulk_capacitor": "C1 47uF 10V X5R C6119971",
+    "decoupling": "C3-C9 100nF C343047",
+    "typical_full_white_current_ma": 255.5
+  },
+  "power": {
+    "sources": ["VDD_3V3 from T5AI-Core 44P", "VDD_5V from T5AI-Core 44P", "GND from T5AI-Core 44P"],
+    "on_expansion_usb": false,
+    "on_expansion_battery": false,
+    "on_expansion_charger": false,
+    "managed_by": "T5AI-Core ETA6003/LN2220/RY3408"
+  },
+  "pcb_review": {
+    "component_count": 54,
+    "net_count": 36,
+    "trace_count": 292,
+    "via_count": 147,
+    "ground_via_count": 134,
+    "vdd_5v_via_count": 7,
+    "ground_pours": 2,
+    "drc_errors": 0,
+    "board_size_mm": { "width": 75, "height": 99 },
+    "signal_trace_mil": 10,
+    "vdd_3v3_trace_mil": "15-20",
+    "vdd_5v_trace_mil": 20
+  },
+  "pending_physical_verification": [
+    "T5AI-Core antenna projection and 15mm metal clearance",
+    "FPC bottom-contact Pin1 direction with actual panel",
+    "MX switch and C2803348 socket mechanical alignment",
+    "19.10mm key pitch compatibility with keycaps, plate and enclosure"
+  ],
+  "sources": [
+    "hardware/eda/v0.3-schematic-review-2026-10-01.md",
+    "hardware/eda/v0.3-pcb-review-2026-10-01.md",
+    "hardware/eda/v0.3-circuit-modification-guide.md",
+    "hardware/exports/SCH_Expansion Board_v0.3_lite_2026-10-01.pdf"
+  ]
+}
