@@ -26,9 +26,9 @@
 
 | 项目版本 | 方案 | 说明 |
 |---|---|---|
-| **v0.1** | Joe Shi 的 Ki-Board 方案 | 基于 **ESP32**、多块 SPI 屏的原始参考方案（见 `ref_projects/ki-board/`）。本项目的灵感来源。 |
+| **v0.1** | 原始 Ki-Board 参考方案（外部作者） | 基于 **ESP32**、多块 SPI 屏的原始参考方案（见 `ref_projects/ki-board/`）。本项目的灵感来源。 |
 | **v0.2** | 上一版（作者自研，基于 T5AI-Core） | 首个基于 **Tuya T5AI-Core** 的自研版本：5 机械键 + 5 向摇杆 + 18P LCD + 扩展板 USB(CH340C)。硬件实物 PCB 丝印曾标 `v1.2.0`（旧号，等价于本规范 **v0.2**）。 |
-| **v0.3** | 当前迭代 | 最简化重构：去扩展板 USB/CH340C/电源开关；6 键（K1–K6）热插拔轴座；EC11 编码器替代 5 向摇杆；7× WS2812（K1–K6各1颗，LED7用于EC11）；12P LCD（ST7789P3）替代18P。详见 `hardware/expansion-baseboard-v0.3-change-scope.md`。 |
+| **v0.3** | 当前迭代 | 最简化重构：去扩展板 USB/CH340C/电源开关；6 键（K1–K6）热插拔轴座；EC11 编码器替代 5 向摇杆；7× WS2812（K1–K6各1颗，LED7用于EC11）；12P LCD（ST7789P3）替代18P。详见 `hardware/pinmap/README-v0.3.md`。 |
 
 > 历史号对照：**旧硬件丝印 `v1.2.0` = 项目 `v0.2`（的硬件）**。v0.3 起硬件丝印改用新规范号。
 
@@ -59,11 +59,11 @@
 - v0.2 归档固件（`firmware/archive/v0.2/app`）走 `0.2.y`，归档时为 `0.2.17`（接在 `release/v0.2` 的 0.2.16 之后）。
   归档版不挂钩子，需要修时手动 `python3 tools/version.py bump patch`。
 
-### 3.3 Companion（Tauri：`companion/package.json` + `src-tauri/Cargo.toml`）
+### 3.3 Companion（Tauri：`companion/package.json` + `companion/src-tauri/Cargo.toml`）
 
 - 版本号 = `v0.x.y`，随项目主线。当前对齐到 **v0.3.y**。
 - **`companion/VERSION` 是唯一来源**，用 `companion/tools/version.py set|bump` 同步 `package.json`、
-  `src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`；`version.py check` 校验一致。lock 文件随之更新。
+  `companion/src-tauri/Cargo.toml`、`companion/src-tauri/tauri.conf.json`；`version.py check` 校验一致。lock 文件随之更新。
 - v0.3 合入 main 时统一为 `0.3.1`（main 之前是 0.1.0，`feat/v0.3` 是 0.3.0）。
 - `y` = Companion 自身的小版本 / 构建序号。
 
@@ -75,12 +75,13 @@
 
 | 位置 | 当前值 | 目标值 | 备注 |
 |---|---|---|---|
+| PRD（内部文档）头部「版本」 | v1.3 | v0.3.y | 同时更新日期与硬件描述（6键/EC11/12P LCD/无扩展板USB） |
 | 硬件 PCB 工程 / 丝印 | v1.2.0（旧实物） | v0.3.0（新板） | 决策 A：改用项目号 |
 | `hardware/exports/` 导出物命名 | v1.2 / v1.0 | v0.3.y | 新导出按新号 |
-| `firmware/app/VERSION` | 0.3.y（已对齐，0.3.19 起） | 0.3.y | 2026-11-16 完成 |
-| `companion/package.json` version | 0.3.1（已对齐） | 0.3.y | 由 `companion/VERSION` 同步 |
-| `companion/src-tauri/Cargo.toml` version | 0.3.1（已对齐） | 0.3.y | 由 `companion/VERSION` 同步 |
-| `README.md` / `README.zh-CN.md` 硬件表 | 5键/WS-1002/18P | 6键/EC11/12P | 随 v0.3 硬件更新 |
+| `firmware/app/VERSION` | 0.3.y（已对齐，0.3.19 起） | 0.3.y | 2026-11-16 完成；2026-11-17 核对为 0.3.67 |
+| `companion/package.json` version | 0.3.1（已对齐） | 0.3.y | 由 `companion/VERSION` 同步；2026-11-17 核对为 0.3.4（与 `companion/VERSION` 一致） |
+| `companion/src-tauri/Cargo.toml` version | 0.3.1（已对齐） | 0.3.y | 由 `companion/VERSION` 同步；2026-11-17 核对为 0.3.4 |
+| `README.md` / `README.zh-CN.md` 硬件表 | 5键/WS-1002/18P | 6键/EC11/12P | 已完成（2026-11-17 更新状态段） |
 
 > 本文件只负责**定义规范**。实际改各文件的版本号，属于 v0.3 落地任务（见变更文档与后续同步任务），
 > 避免在规范确立当天就大范围改动尚未定稿的内容。
@@ -105,7 +106,7 @@ TuyaOpen `baedc51`，T5AI 平台 `e324ca0`。
 
 ## 6. 记录
 
-- 2026-09-30：确立本规范。确认项目主线 v0.1（Joe Shi/ESP32）、v0.2（自研 T5AI，旧丝印 v1.2.0）、
+- 2026-09-30：确立本规范。确认项目主线 v0.1（外部 Ki-Board 参考方案 / ESP32）、v0.2（自研 T5AI，旧丝印 v1.2.0）、
   v0.3（当前重构）；硬件/固件/Companion 统一 `v0.x.y`；硬件落地采用决策 A（丝印直接用项目号）。
 - 2026-11-16：v0.3 分批合入 main。v0.2 打 tag `v0.2-final`（`0746013`）并归档到 `firmware/archive/v0.2`（0.2.17）；
   第一个 v0.3 硬件固件版本号为 0.3.19，之后由钩子递增；Companion 统一到 0.3.1，以 `companion/VERSION` 为准。

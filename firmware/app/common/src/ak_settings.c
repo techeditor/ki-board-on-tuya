@@ -5,6 +5,7 @@
 
 #include "ak_i18n.h"
 #include "ak_led_policy.h"
+#include "ak_text.h"
 
 void ak_settings_init(ak_settings_model_t *model)
 {
@@ -18,7 +19,15 @@ void ak_settings_init(ak_settings_model_t *model)
     model->voice_chat = false;
     model->led_mode        = (uint8_t)AK_LED_MODE_DEFAULT;
     model->led_timeout_idx = AK_LED_TIMEOUT_IDX_DEFAULT;
-    model->lang            = (uint8_t)AK_LANG_DEFAULT;
+    /* The language is restored from KV before the settings model exists (it is
+     * needed for the first LCD draw), so start from the live value. */
+    model->lang            = (uint8_t)ak_lang_get();
+    model->font_size       = (uint8_t)ak_text_size_get(); /* restored from KV before this, like the language */
+}
+
+unsigned ak_settings_first_row(unsigned selected, unsigned rows)
+{
+    return rows == 0U || selected < rows ? 0U : selected + 1U - rows;
 }
 
 static uint8_t ak_settings_adjust_value(uint8_t value, uint8_t minimum, bool increase)
@@ -44,7 +53,8 @@ static bool item_is_value(ak_settings_item_t item)
 {
     return item == AK_SETTINGS_ITEM_VOLUME || item == AK_SETTINGS_ITEM_BRIGHTNESS ||
            item == AK_SETTINGS_ITEM_VOICE_MODE || item == AK_SETTINGS_ITEM_LED_POWER ||
-           item == AK_SETTINGS_ITEM_LED_TIMEOUT || item == AK_SETTINGS_ITEM_LANGUAGE;
+           item == AK_SETTINGS_ITEM_LED_TIMEOUT || item == AK_SETTINGS_ITEM_LANGUAGE ||
+           item == AK_SETTINGS_ITEM_FONT_SIZE;
 }
 
 static ak_settings_result_t ak_settings_move(ak_settings_model_t *model, bool forward)
@@ -74,6 +84,11 @@ static ak_settings_result_t ak_settings_adjust(ak_settings_model_t *model, bool 
         /* Two values, like the voice mode: any rotation flips 中文 / English. */
         (void)increase;
         model->lang = model->lang == (uint8_t)AK_LANG_EN ? (uint8_t)AK_LANG_ZH : (uint8_t)AK_LANG_EN;
+        return AK_SETTINGS_RESULT_CHANGED;
+    }
+    if (model->selected == AK_SETTINGS_ITEM_FONT_SIZE) {
+        /* 12 px -> 16 px, wrapping both ways (ak_text.h lists the sizes). */
+        model->font_size = (uint8_t)ak_text_size_next((ak_text_size_t)model->font_size, increase);
         return AK_SETTINGS_RESULT_CHANGED;
     }
     if (model->selected == AK_SETTINGS_ITEM_LED_POWER) {
@@ -144,6 +159,15 @@ ak_settings_result_t ak_settings_handle(ak_settings_model_t *model,
         }
         if (model->selected == AK_SETTINGS_ITEM_PAIRING) {
             return AK_SETTINGS_RESULT_PAIRING;
+        }
+        if (model->selected == AK_SETTINGS_ITEM_REBIND) {
+            return AK_SETTINGS_RESULT_REBIND;
+        }
+        if (model->selected == AK_SETTINGS_ITEM_BIND_SESSION) {
+            return AK_SETTINGS_RESULT_BIND_SESSION;
+        }
+        if (model->selected == AK_SETTINGS_ITEM_WIFI) {
+            return AK_SETTINGS_RESULT_WIFI;
         }
         if (model->selected == AK_SETTINGS_ITEM_CREDENTIALS) {
             return AK_SETTINGS_RESULT_CREDENTIALS;

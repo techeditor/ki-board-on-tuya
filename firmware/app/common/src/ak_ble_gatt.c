@@ -3,7 +3,7 @@
  * @brief BLE GATT transport backend for the Agentic Keyboard product firmware.
  *
  * See ak_ble_gatt.h. Ported from the real-hardware-verified FP-2
- * ble_gatt_link probe (firmware/feature-probes/ble_gatt_link):
+ * ble_gatt_link probe (see git tag archive/feature-probes):
  *
  *   - advertise local name "Agentic Keyboard-XXXXXX" + service UUID,
  *   - use Tuya's built-in BLE common service selected by TAL,

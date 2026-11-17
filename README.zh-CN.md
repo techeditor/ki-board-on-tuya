@@ -1,7 +1,7 @@
-# Ki-board：面向 Kiro 的 AI 小键盘（Tuya T5AI-Core）
+# Ki-board：面向 Kiro Crew 的 AI 小键盘（Tuya T5AI-Core）
 
-基于 **Tuya T5AI-Core** 开发板的小型宏键盘，配合 Kiro 使用：语音输入直接送进
-Kiro，键盘屏幕显示 Agent 状态。
+基于 **Tuya T5AI-Core** 开发板的小型 AI 键盘，配合 Kiro Crew 使用：语音输入确认后送进
+Kiro Crew，键盘屏幕显示 agent 状态。目前只支持 Kiro Crew。
 
 *(English: [README.md](README.md))*
 

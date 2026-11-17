@@ -76,6 +76,10 @@ bool ak_cloud_compiled(void);
  *  false. */
 bool ak_cloud_boot_window(void);
 
+/** True when the IoT client runs with a UUID (flashed License, or the debug
+ *  compile-time fallback): only then can Tuya App pairing work. Stub: false. */
+bool ak_cloud_license_usable(void);
+
 /** Stop the Tuya BLE and SoftAP netcfg (pairing window closed). Stub: no-op. */
 void ak_cloud_netcfg_close(void);
 

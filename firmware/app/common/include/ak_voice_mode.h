@@ -6,8 +6,10 @@
  * ASR  : recognized text goes to the Companion and into Kiro Crew (existing).
  * Chat : the board talks to the Tuya cloud agent; the reply is spoken and
  *        shown on the LCD and in the Companion, and is NEVER injected into
- *        Kiro Crew (companion-review CP-01). The mode is changed only on the
- *        device (Settings > Voice mode) and persists across reboots (Q6).
+ *        Kiro Crew (companion-review CP-01). The mode is changed on the
+ *        device (Settings > Voice mode) or by the Companion (`device_settings`
+ *        voice_mode over USB or the BLE secure channel, FR-02) and persists
+ *        across reboots (Q6).
  */
 
 #ifndef AK_VOICE_MODE_H
@@ -31,6 +33,9 @@ typedef enum {
 
 /** Wire / UI name: "asr" / "chat". */
 const char *ak_voice_mode_str(ak_voice_mode_t mode);
+
+/** device_settings `voice_mode` -> mode ("asr" / "chat"); false otherwise. */
+bool ak_voice_mode_from_wire(const char *s, ak_voice_mode_t *out);
 
 /** Decode the 1-byte KV blob. Any other length or value is rejected. */
 bool ak_voice_mode_from_blob(const uint8_t *blob, size_t len, ak_voice_mode_t *out);

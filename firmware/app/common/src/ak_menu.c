@@ -33,7 +33,8 @@ static ak_menu_kind_t kind_from(const char *s)
         ak_menu_kind_t kind;
     } k[] = {
         {"approval", AK_MENU_KIND_APPROVAL}, {"options", AK_MENU_KIND_OPTIONS}, {"question", AK_MENU_KIND_QUESTION},
-        {"model", AK_MENU_KIND_MODEL},       {"mode", AK_MENU_KIND_MODE},
+        {"model", AK_MENU_KIND_MODEL},       {"mode", AK_MENU_KIND_MODE},         {"instance", AK_MENU_KIND_INSTANCE},
+        {"session", AK_MENU_KIND_SESSION},
     };
     for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
         if (strcmp(s, k[i].name) == 0) {
@@ -238,7 +239,12 @@ bool ak_menu_owns_keys(const ak_menu_t *m)
 
 bool ak_menu_is_model(const ak_menu_t *m)
 {
-    return m->pg[0].kind == AK_MENU_KIND_MODEL || m->pg[0].kind == AK_MENU_KIND_MODE;
+    return m->pg[0].kind == AK_MENU_KIND_MODEL || m->pg[0].kind == AK_MENU_KIND_MODE || ak_menu_is_bind(m);
+}
+
+bool ak_menu_is_bind(const ak_menu_t *m)
+{
+    return m->pg[0].kind == AK_MENU_KIND_INSTANCE || m->pg[0].kind == AK_MENU_KIND_SESSION;
 }
 
 bool ak_menu_enter_allowed(const ak_menu_t *m)
@@ -596,6 +602,12 @@ void ak_menu_key(ak_menu_t *m, int key, bool down, uint32_t now_ms, ak_menu_out_
         return;
     }
     on_release(m, key, now_ms, out);
+}
+
+void ak_menu_drop_keys(ak_menu_t *m, uint8_t mask)
+{
+    m->pressed &= (uint8_t)~mask;
+    m->consumed &= (uint8_t)~mask;
 }
 
 void ak_menu_encoder(ak_menu_t *m, int32_t detents, uint32_t now_ms, ak_menu_out_t *out)

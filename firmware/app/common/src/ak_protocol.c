@@ -183,6 +183,18 @@ int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state)
     return writer_finish(&writer);
 }
 
+int ak_proto_bind_session(char *buf, size_t size, uint32_t seq, uint8_t slot)
+{
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"bind_session\",\"payload\":{\"slot\":");
+    writer_u32(&writer, slot);
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
 int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text)
 {
     ak_json_writer_t writer;
@@ -246,6 +258,38 @@ int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state
     writer_raw(&writer, ",\"ssid\":");
     writer_json_string(&writer, ssid);
     writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
+static const char *wifi_sec_name(uint8_t sec)
+{
+    static const char *const names[] = {"open", "wep", "wpa", "wpa2", "wpa_wpa2", "wpa3"};
+    return sec < sizeof(names) / sizeof(names[0]) ? names[sec] : "unknown";
+}
+
+int ak_proto_wifi_list(char *buf, size_t size, uint32_t seq, const ak_proto_wifi_entry_t *entries, size_t n,
+                       uint32_t max)
+{
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"wifi_list_state\",\"payload\":{\"max\":");
+    writer_u32(&writer, max);
+    writer_raw(&writer, ",\"entries\":[");
+    for (size_t i = 0U; entries != NULL && i < n; i++) {
+        if (i > 0U) {
+            writer_char(&writer, ',');
+        }
+        writer_raw(&writer, "{\"ssid\":");
+        writer_json_string(&writer, entries[i].ssid);
+        writer_raw(&writer, ",\"sec\":");
+        writer_json_string(&writer, wifi_sec_name(entries[i].sec));
+        writer_raw(&writer, ",\"current\":");
+        writer_raw(&writer, entries[i].current ? "true" : "false");
+        writer_char(&writer, '}');
+    }
+    writer_raw(&writer, "]}}\n");
     return writer_finish(&writer);
 }
 
@@ -358,23 +402,30 @@ int ak_proto_system_info(char *buf, size_t size, uint32_t seq,
     return writer_finish(&writer);
 }
 
-int ak_proto_device_settings(char *buf, size_t size, uint32_t seq, uint8_t volume, uint8_t brightness,
-                             const char *led_power, uint32_t led_auto_off_s, const char *language)
+int ak_proto_device_settings(char *buf, size_t size, uint32_t seq, const ak_proto_settings_t *s)
 {
     ak_json_writer_t writer;
     writer_init(&writer, buf, size);
     writer_raw(&writer, "{\"v\":1,\"seq\":");
     writer_u32(&writer, seq);
     writer_raw(&writer, ",\"type\":\"device_settings_state\",\"payload\":{\"volume\":");
-    writer_u32(&writer, volume);
+    writer_u32(&writer, s->volume);
     writer_raw(&writer, ",\"brightness\":");
-    writer_u32(&writer, brightness);
+    writer_u32(&writer, s->brightness);
     writer_raw(&writer, ",\"led_power\":");
-    writer_json_string(&writer, led_power);
+    writer_json_string(&writer, s->led_power);
     writer_raw(&writer, ",\"led_auto_off_s\":");
-    writer_u32(&writer, led_auto_off_s);
+    writer_u32(&writer, s->led_auto_off_s);
     writer_raw(&writer, ",\"language\":");
-    writer_json_string(&writer, language);
+    writer_json_string(&writer, s->language);
+    writer_raw(&writer, ",\"voice_mode\":");
+    writer_json_string(&writer, s->voice_mode);
+    writer_raw(&writer, ",\"font_size\":");
+    writer_u32(&writer, s->font_size);
+    writer_raw(&writer, ",\"license\":");
+    writer_json_string(&writer, s->license_present ? "present" : "missing");
+    writer_raw(&writer, ",\"ble_paired\":");
+    writer_raw(&writer, s->ble_paired ? "true" : "false");
     writer_raw(&writer, "}}\n");
     return writer_finish(&writer);
 }
@@ -400,7 +451,8 @@ int ak_proto_hello_ack_caps(char *buf, size_t size, const char *fw, const char *
         writer_raw(&writer, ",\"system_info\"");
     }
     if (menu) {
-        writer_raw(&writer, ",\"menu\"");
+        /* Display builds wait in ② for the Companion's PC ASR text. */
+        writer_raw(&writer, ",\"menu\",\"pc_asr_wait\",\"bind_session\"");
     }
     writer_raw(&writer, "]}}\n");
     return writer_finish(&writer);

@@ -14,6 +14,9 @@
   阈值：长按 800 ms，双击窗口 250 ms（第一次松开到第二次按下），`single` 在窗口到期时上报。
   完整语义、时序和 Companion 路由见权威源的 `key` 一节和 `firmware-key-gesture-events-spec.md`。
 - **PC→板 命令**：`led`、`display`、`config`、`ack`
+- **键盘设置（FR-02）**：`device_settings` 可写音量、亮度、语言、语音模式、灯光电源、自动断电时长与 LCD 字号（USB 或已配对 BLE），
+  `device_settings_state` 另报 License / BLE 配对是否存在；敏感项只经 USB 且键盘弹⑦确认（`prov_open`、`ble_unpair`、
+  `reset_netcfg`，或在⑦打开的配网窗口内的 `wifi` / `license` / `ble_pair`）。设置项清单见权威源 `device_settings` 一节。
 - **LCD 菜单与按键灯光**（FR-04/06/07/08/09/10）：工作状态机（①待命 ②语音输入 ③输入确认 ④菜单 ⑤模型/模式菜单
   ⑥设置/测试 ⑦系统确认）；PC→板 `menu`（每页 ≤4 项、≤12 页、≤511 字节截断、`more` = 内容看电脑屏幕）、`menu_close`、
   `notice`、`menu_parked`（被 ESC 的请求数，K4 找回）；板→PC `menu_result`（选中项下标数组、口述答案 `text` 或 `dismissed`）。
@@ -28,6 +31,6 @@
 
 1. 协议跨阶段复用：从有线到 BLE，`type`/`payload` 语义不变，只换载体。
 2. 传输层与协议层解耦：固件与 Companion 各自实现可替换的 transport 后端。
-3. 参照已克隆的 ki-board `shared/protocol/serial-protocol.md`，减少重复设计。
+3. 参照已克隆的外部参考项目（ki-board）的串口协议文档，减少重复设计。
 
 详细字段、示例、状态机、配对鉴权见权威源文档。

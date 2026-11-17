@@ -28,6 +28,9 @@ int ak_proto_key_gesture_text(char *buf, size_t size, uint32_t seq, const char *
    (positive = clockwise, negative = counter-clockwise). Replaces ak_proto_nav. */
 int ak_proto_encoder(char *buf, size_t size, uint32_t seq, int32_t detents);
 int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state);
+/* Board -> PC: Settings > Bind session picked slot `slot` (1..3); the
+   Companion answers with an instance / session menu or bind_done. */
+int ak_proto_bind_session(char *buf, size_t size, uint32_t seq, uint8_t slot);
 /* Board -> PC: recognized speech text from the board-side (Tuya cloud) ASR.
    The builder JSON-escapes arbitrary text, including quotes and newlines. */
 int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text);
@@ -45,6 +48,16 @@ int ak_proto_tuya_chat(char *buf, size_t size, uint32_t seq, const char *role, c
    "connecting" / "connected" / "failed" / "disconnected"; `ssid` is the target
    AP (may be empty). Sent when a wifi config frame is applied and on change. */
 int ak_proto_wifi_status(char *buf, size_t size, uint32_t seq, const char *state, const char *ssid);
+/* wifi_list_state (board -> PC, FR-15): the remembered networks, most recently
+   connected first. SSID, security name and the "current" flag only; a
+   password has no field here and never leaves the board. */
+typedef struct {
+    const char *ssid;
+    uint8_t     sec; /* AK_WIFI_SEC_UNKNOWN or a scan security value */
+    bool        current;
+} ak_proto_wifi_entry_t;
+int ak_proto_wifi_list(char *buf, size_t size, uint32_t seq, const ak_proto_wifi_entry_t *entries, size_t n,
+                       uint32_t max);
 /* Board -> Companion: Tuya activation lifecycle. `qr_url` is populated only
    for `scan_qr`; it contains PID+UUID but never AuthKey. UART0-only. */
 int ak_proto_activation_status(char *buf, size_t size, uint32_t seq,
@@ -70,11 +83,25 @@ int ak_proto_system_info(char *buf, size_t size, uint32_t seq,
                          const char *wifi_name, const char *wifi_state,
                          const char *ble_name, const char *ble_state,
                          const char *cloud_state, const char *license_state);
-/* Board -> PC: report the runtime values currently applied by the AK.
+/* Board -> PC: report the settings currently applied by the AK (FR-02).
  * led_power is "off" / "on" / "auto"; led_auto_off_s the Auto power-off delay;
- * language the interface language "zh" / "en" (ak_lang_wire_str). */
-int ak_proto_device_settings(char *buf, size_t size, uint32_t seq, uint8_t volume, uint8_t brightness,
-                             const char *led_power, uint32_t led_auto_off_s, const char *language);
+ * language "zh" / "en" (ak_lang_wire_str); voice_mode "asr" / "chat";
+ * font_size the LCD font size in px (12 / 16, ak_text_size_px). The
+ * last two are status only: whether a License is stored and whether a BLE
+ * pairing key is set (never the values). */
+typedef struct {
+    uint8_t     volume;
+    uint8_t     brightness;
+    const char *led_power;
+    uint32_t    led_auto_off_s;
+    const char *language;
+    const char *voice_mode;
+    uint8_t     font_size;
+    bool        license_present;
+    bool        ble_paired;
+} ak_proto_settings_t;
+
+int ak_proto_device_settings(char *buf, size_t size, uint32_t seq, const ak_proto_settings_t *s);
 
 /* Handshake / heartbeat. */
 int ak_proto_hello_ack(char *buf, size_t size, const char *fw, const char *transport);

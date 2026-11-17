@@ -53,12 +53,20 @@ impl Default for CrewApiConfig {
 }
 
 impl CrewApiConfig {
+    /// Release builds always use `~/.kiro/crew` and port 5476. The
+    /// `KIROCREW_HOME` / `KIROCREW_PORT` overrides exist in debug builds only
+    /// (CP-09): in a release build an environment variable must not be able
+    /// to point the Companion's secret at another directory or port.
     pub fn from_env() -> Self {
+        let default_home = crate::app_dirs::home_dir().join(".kiro").join("crew");
+        if !cfg!(debug_assertions) {
+            return Self { host: "127.0.0.1".to_string(), port: DEFAULT_CREW_PORT, crew_home: default_home };
+        }
         let crew_home = std::env::var("KIROCREW_HOME")
             .ok()
             .filter(|v| !v.trim().is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| crate::app_dirs::home_dir().join(".kiro").join("crew"));
+            .unwrap_or(default_home);
         let port = std::env::var("KIROCREW_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
@@ -83,6 +91,12 @@ impl CrewApiConfig {
         self.crew_home.join(".local_secret")
     }
 
+    /// Where the gateway's executable must live: the parent of the Crew home
+    /// (`~/.kiro`), see `crew_identity`.
+    pub fn install_root(&self) -> PathBuf {
+        self.crew_home.parent().map(PathBuf::from).unwrap_or_else(|| self.crew_home.clone())
+    }
+
     fn socket_addr(&self) -> Result<std::net::SocketAddr, String> {
         (self.host.as_str(), self.port)
             .to_socket_addrs()
@@ -98,6 +112,8 @@ pub struct CrewApiClient {
     http: reqwest::blocking::Client,
     /// Session token shared by every clone of this client.
     tokens: TokenCache,
+    /// Who owns the Crew port (CP-09); the OS query unless a test injects one.
+    identity: Arc<dyn crate::crew_identity::ListenerQuery + Send + Sync>,
 }
 
 /// The exchanged Crew session token, kept in process memory only: never
@@ -207,6 +223,65 @@ pub struct CrewSlot {
     pub trust: bool,
     #[serde(default, deserialize_with = "null_default")]
     pub trust_reads: bool,
+    /// `member` on a Bot (crewmate) thread; empty on an ordinary session.
+    #[serde(default, deserialize_with = "null_default")]
+    pub mode: String,
+    /// Set on a Crew Mode worker row: the root session's key.
+    #[serde(default, deserialize_with = "null_default")]
+    pub crew_root: String,
+    /// Set on a session a Bot dispatched: the Bot thread's key.
+    #[serde(default, deserialize_with = "null_default")]
+    pub mate_root: String,
+}
+
+impl CrewSlot {
+    /// A Bot (crewmate) thread. Remote rows carry no `mode`; their derived
+    /// `member-` key prefix (`members_parts/member_sessions.py`) tells instead.
+    pub fn is_bot(&self) -> bool {
+        self.mode == "member" || self.key.starts_with("member-")
+    }
+
+    /// A worker session: dispatched by a Crew Mode root or by a Bot.
+    pub fn is_worker(&self) -> bool {
+        !self.crew_root.is_empty() || !self.mate_root.is_empty()
+    }
+}
+
+/// One usable remote crew from `GET /api/instances`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrewInstance {
+    pub id: String,
+    pub name: String,
+}
+
+/// The remote crews worth listing: not disabled, and connected now or before,
+/// the same filter the dashboard's instance switcher applies (Ctrl+2.. follow
+/// this order). Anything malformed is skipped.
+pub fn parse_instances(v: &Value) -> Vec<CrewInstance> {
+    v.get("instances")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|i| !i.get("disabled").and_then(Value::as_bool).unwrap_or(false))
+        .filter(|i| {
+            i.get("was_connected").and_then(Value::as_bool).unwrap_or(false)
+                || i.pointer("/status/state").and_then(Value::as_str) == Some("connected")
+        })
+        .filter_map(|i| {
+            let id = i.get("id").and_then(Value::as_str)?.trim();
+            validate_instance_id(id).ok()?;
+            let name = i.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).unwrap_or(id);
+            Some(CrewInstance { id: id.to_string(), name: name.to_string() })
+        })
+        .collect()
+}
+
+/// A Crew instance id: the slug of its name (`instances/registry.py`).
+pub fn validate_instance_id(id: &str) -> Result<&str, String> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'));
+    if ok { Ok(id) } else { Err(format!("invalid Kiro Crew instance id {id:?}")) }
 }
 
 /// `pending_approval_info` of a slot projection (fields are redacted by Crew).
@@ -397,7 +472,20 @@ impl CrewApiClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("build Crew HTTP client: {e}"))?;
-        Ok(Self { config, http, tokens: TokenCache::default() })
+        Ok(Self { config, http, tokens: TokenCache::default(), identity: Arc::from(crate::crew_identity::system_query()) })
+    }
+
+    /// Replace the port-owner query (tests).
+    pub fn with_identity_query(mut self, q: Arc<dyn crate::crew_identity::ListenerQuery + Send + Sync>) -> Self {
+        self.identity = q;
+        self
+    }
+
+    /// CP-09: the process on 127.0.0.1:<port> must be this user's Kiro Crew
+    /// gateway before the secret or a token is sent to it. Fails closed.
+    pub fn verify_gateway(&self) -> Result<u32, String> {
+        crate::crew_identity::verify_gateway(self.identity.as_ref(), self.config.port, &self.config.install_root())
+            .map_err(|e| e.to_string())
     }
 
     pub fn from_env() -> Result<Self, String> {
@@ -460,6 +548,8 @@ impl CrewApiClient {
     }
 
     fn local_link_token(&self) -> Result<String, String> {
+        // Identity first: nothing is read or sent before the listener passes.
+        self.verify_gateway()?;
         let secret = self.read_local_secret()?;
         let url = format!("{}/api/token/local", self.config.base_url());
         let response = self
@@ -486,8 +576,35 @@ impl CrewApiClient {
     /// List live chat slots. The owner token gives this local desktop app the
     /// same slot visibility as the dashboard itself.
     pub fn list_slots(&self) -> Result<Vec<CrewSlot>, String> {
-        let v = self.get_json(&["api", "chat", "slots"], "list chats")?;
-        serde_json::from_value(v).map_err(|e| format!("decode Kiro Crew chats: {e}"))
+        // `crew=all`: a person's list leaves Crew Mode workers out by default
+        // (`crew_mode.list_view`); the Companion filters them itself
+        // (CrewSlot::is_worker), like the dashboard does.
+        let mut url = self.api_url(&["api", "chat", "slots"])?;
+        url.set_query(Some("crew=all"));
+        let resp = self.send_authed("list chats", |cookie| self.http.get(url.clone()).header(reqwest::header::COOKIE, cookie))?;
+        serde_json::from_value(read_json_response(resp, "list chats")?)
+            .map_err(|e| format!("decode Kiro Crew chats: {e}"))
+    }
+
+    /// Remote crews (`GET /api/instances`, owner-only). The feature being off
+    /// (`instances_disabled`) or absent means none.
+    /// shortcut: that 403 also re-mints the session token once (send_authed);
+    /// cache "disabled" if it shows up in the gateway's rate limits.
+    pub fn list_instances(&self) -> Result<Vec<CrewInstance>, String> {
+        match self.get_json(&["api", "instances"], "list instances") {
+            Ok(v) => Ok(parse_instances(&v)),
+            Err(e) if e.contains("instances_disabled") || e.contains("HTTP 404") => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A remote crew's live sessions through the Hub
+    /// (`GET /api/instances/{id}/chat-slots`). Rows carry only key, title,
+    /// agent, running / pending_approval / needs_input and `crew_root`.
+    pub fn list_remote_slots(&self, instance: &str) -> Result<Vec<CrewSlot>, String> {
+        let instance = validate_instance_id(instance)?;
+        let v = self.get_json(&["api", "instances", instance, "chat-slots"], "list remote chats")?;
+        serde_json::from_value(v).map_err(|e| format!("decode remote Kiro Crew chats: {e}"))
     }
 
     /// Send a user message to one stable slot key. `ws=1` asks the gateway for
@@ -561,6 +678,9 @@ impl CrewApiClient {
         what: &str,
         build: impl Fn(&str) -> reqwest::blocking::RequestBuilder,
     ) -> Result<reqwest::blocking::Response, String> {
+        // A cached token is an owner credential too: check the listener
+        // before every request, not only before minting.
+        self.verify_gateway()?;
         with_auth_retry(&self.tokens, || self.bootstrap_token(), |token| {
             let resp = build(&self.auth_cookie(token))
                 .send()
@@ -718,27 +838,36 @@ pub fn validate_slot_key(slot: &str) -> Result<&str, String> {
     Ok(slot)
 }
 
-/// Refuse a `.local_secret` that other users can read or write (Unix). Crew
-/// writes it 0600; anything wider was not written by Crew for this user, or
-/// has leaked (CP-09). Windows relies on the per-user profile ACL.
+/// Refuse a `.local_secret` that is not this user's private file (Unix): it
+/// must be owned by the current user and have mode exactly 0600, as Crew
+/// writes it. Anything else was not written by Crew for this user, or has
+/// leaked (CP-09). Windows relies on the per-user profile ACL.
 fn check_secret_permissions(path: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(path)
-            .map_err(|e| format!("read Kiro Crew local secret {}: {e}", path.display()))?
-            .permissions()
-            .mode();
-        if mode & 0o077 != 0 {
-            return Err(format!(
-                "Kiro Crew local secret {} is accessible to other users (mode {:o}); refusing to use it",
-                path.display(),
-                mode & 0o777
-            ));
-        }
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(path)
+            .map_err(|e| format!("read Kiro Crew local secret {}: {e}", path.display()))?;
+        secret_file_ok(meta.file_type().is_file(), meta.uid(), meta.mode(), crate::crew_identity::current_uid())
+            .map_err(|why| format!("Kiro Crew local secret {} {why}; refusing to use it", path.display()))?;
     }
     #[cfg(not(unix))]
     let _ = path;
+    Ok(())
+}
+
+/// The Unix rule above, pure for tests.
+#[cfg(unix)]
+fn secret_file_ok(regular: bool, owner: u32, mode: u32, me: u32) -> Result<(), String> {
+    if !regular {
+        return Err("is not a regular file".into());
+    }
+    if owner != me {
+        return Err(format!("is owned by uid {owner}, not the current user ({me})"));
+    }
+    if mode & 0o777 != 0o600 {
+        return Err(format!("has mode {:o}, expected 600", mode & 0o777));
+    }
     Ok(())
 }
 
@@ -902,6 +1031,8 @@ where
     F: Fn(CrewEvent),
 {
     let token = api.session_token()?;
+    // The cached token is sent in the handshake: check the listener first.
+    api.verify_gateway()?;
     let addr = api.config.socket_addr()?;
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
         .map_err(|e| format!("connect Kiro Crew WebSocket: {e}"))?;
@@ -991,6 +1122,37 @@ fn sleep_interruptible(stop: &AtomicBool, duration: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instances_list_keeps_the_switcher_order_and_usable_rows() {
+        let v = json!({"active": true, "instances": [
+            {"id": "remote1", "name": "Remote 1", "was_connected": true, "status": {"state": "disconnected"}},
+            {"id": "off", "name": "Off", "disabled": true, "was_connected": true},
+            {"id": "never", "name": "Never", "was_connected": false, "status": {"state": "disconnected"}},
+            {"id": "lab-2", "name": "", "status": {"state": "connected"}},
+            {"id": "Bad Id", "was_connected": true}
+        ]});
+        assert_eq!(
+            parse_instances(&v),
+            vec![
+                CrewInstance { id: "remote1".into(), name: "Remote 1".into() },
+                CrewInstance { id: "lab-2".into(), name: "lab-2".into() },
+            ]
+        );
+        assert!(parse_instances(&json!({})).is_empty());
+        assert!(validate_instance_id("../x").is_err());
+    }
+
+    #[test]
+    fn bots_and_workers_are_recognised() {
+        let bot: CrewSlot = serde_json::from_value(json!({"key": "member-mate.memory-member-mate-ab", "mode": "member"})).unwrap();
+        let remote_bot: CrewSlot = serde_json::from_value(json!({"key": "member-ops"})).unwrap();
+        let worker: CrewSlot = serde_json::from_value(json!({"key": "chat-9-1", "mate_root": "member-mate"})).unwrap();
+        let crew_worker: CrewSlot = serde_json::from_value(json!({"key": "chat-8-1", "crew_root": "chat-1-1", "mode": null})).unwrap();
+        let plain: CrewSlot = serde_json::from_value(json!({"key": "chat-7-1"})).unwrap();
+        assert!(bot.is_bot() && remote_bot.is_bot() && !plain.is_bot());
+        assert!(worker.is_worker() && crew_worker.is_worker() && !bot.is_worker() && !plain.is_worker());
+    }
 
     #[test]
     fn config_builds_expected_urls() {
@@ -1294,9 +1456,69 @@ mod tests {
         })
         .unwrap();
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(client.read_local_secret().unwrap_err().contains("other users"));
+        assert!(client.read_local_secret().unwrap_err().contains("mode 644"));
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(client.read_local_secret().unwrap_err().contains("expected 600"));
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(client.read_local_secret().unwrap(), "s3cr3t");
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_rule() {
+        assert_eq!(secret_file_ok(true, 1000, 0o100600, 1000), Ok(()));
+        assert!(secret_file_ok(true, 0, 0o100600, 1000).unwrap_err().contains("owned by uid 0"));
+        assert!(secret_file_ok(true, 1000, 0o100640, 1000).is_err());
+        assert!(secret_file_ok(true, 1000, 0o100700, 1000).is_err());
+        assert!(secret_file_ok(false, 1000, 0o120600, 1000).unwrap_err().contains("regular"));
+    }
+
+    struct FakeListeners(Result<Vec<crate::crew_identity::Listener>, String>, &'static str);
+    impl crate::crew_identity::ListenerQuery for FakeListeners {
+        fn listeners(&self, _port: u16) -> Result<Vec<crate::crew_identity::Listener>, String> {
+            self.0.clone()
+        }
+        fn current_user(&self) -> Result<crate::crew_identity::OwnerId, String> {
+            Ok(crate::crew_identity::OwnerId(self.1.into()))
+        }
+    }
+
+    #[test]
+    fn identity_failure_blocks_secret_and_requests() {
+        use crate::crew_identity::{Listener, OwnerId, IDENTITY_FAILED};
+        let home = PathBuf::from("/home/u/.kiro/crew");
+        let mk = |q: FakeListeners| {
+            CrewApiClient::new(CrewApiConfig { host: "127.0.0.1".into(), port: 1, crew_home: home.clone() })
+                .unwrap()
+                .with_identity_query(Arc::new(q))
+        };
+        let gw = PathBuf::from("/home/u/.kiro/crew-python/bin/python3.12");
+        // Wrong owner / wrong executable / query failure: refused before the
+        // secret file is even read (it does not exist here) or a socket opens.
+        for q in [
+            FakeListeners(Ok(vec![Listener { pid: 5, owner: OwnerId("0".into()), exe: gw.clone() }]), "1000"),
+            FakeListeners(
+                Ok(vec![Listener { pid: 5, owner: OwnerId("1000".into()), exe: "/usr/bin/nc".into() }]),
+                "1000",
+            ),
+            FakeListeners(Err("denied".into()), "1000"),
+        ] {
+            let c = mk(q);
+            assert!(c.bootstrap_token().unwrap_err().starts_with(IDENTITY_FAILED));
+            assert!(c.list_slots().unwrap_err().starts_with(IDENTITY_FAILED));
+        }
+        // Genuine gateway: the check passes and the next step (reading the
+        // missing secret) is what fails.
+        let ok = mk(FakeListeners(Ok(vec![Listener { pid: 5, owner: OwnerId("1000".into()), exe: gw }]), "1000"));
+        assert_eq!(ok.verify_gateway(), Ok(5));
+        let err = ok.bootstrap_token().unwrap_err();
+        assert!(!err.starts_with(IDENTITY_FAILED) && err.contains("local secret"), "{err}");
+    }
+
+    #[test]
+    fn install_root_is_the_parent_of_the_crew_home() {
+        let cfg = CrewApiConfig { host: "127.0.0.1".into(), port: 1, crew_home: PathBuf::from("/home/u/.kiro/crew") };
+        assert_eq!(cfg.install_root(), PathBuf::from("/home/u/.kiro"));
     }
 }

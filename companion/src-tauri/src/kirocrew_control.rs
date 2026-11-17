@@ -18,7 +18,8 @@
 //!   decoded board [`Inbound`] event to a [`ControlAction`]. Table-driven and
 //!   unit-tested on Linux (the tests at the bottom run in `cargo test`).
 //!
-//! Design ref: `.kiro/specs/feature-probes-kirocrew-local-control/design.md`.
+//! Design ref: see git tag `archive/feature-probes`
+//! (`.kiro/specs/feature-probes-kirocrew-local-control/design.md`).
 
 use crate::protocol::{Inbound, KeyAction};
 
@@ -132,10 +133,6 @@ pub enum ControlAction {
 pub struct ControlCtx {
     /// Chat numbers for K1, K2, K3 (index 0..=2). Configurable by the UI.
     pub jump_chats: Vec<u8>,
-    /// Crew instance numbers for K1, K2, K3 double-click (index 0..=2),
-    /// mapped to Ctrl+N (Kiro Crew "Remote Crews": 1 = Local, 2 = remote crew
-    /// 1, 3 = remote crew 2…). Configurable by the UI. Defaults to [1, 2, 3].
-    pub switch_instances: Vec<u8>,
 }
 
 impl ControlCtx {
@@ -143,12 +140,12 @@ impl ControlCtx {
     /// double-click K1->instance 1 (Local), K2->instance 2, K3->instance 3
     /// (Ctrl+1/2/3).
     pub fn with_default_jumps() -> Self {
-        Self { jump_chats: vec![1, 2, 3], switch_instances: vec![1, 2, 3] }
+        Self { jump_chats: vec![1, 2, 3] }
     }
 
     // Note: chat/instance targets travel on the wire in the gesture's `bind`
     // (KeyAction::Chat(n)/Instance(n)) — route_input reads N from the frame, not
-    // from this ctx. jump_chats/switch_instances remain only as the persisted
+    // from this ctx. jump_chats remains only as the persisted
     // default-number store surfaced by the bind UI; they no longer gate routing.
 }
 
@@ -174,7 +171,7 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 /// | key, `bind: confirm`                 | `Chord(Enter)` |
 /// | key, other `bind` (e.g. `settings`)  | `None` — local action on the board |
 /// | `enc` `single`, no bind              | `Chord(Enter)` |
-/// | K1-K3 `single`/`long`, no bind       | `None` here — Crew API slot select / long-press auto-bind in the app layer |
+/// | K1-K3 `single`/`long`, no bind       | `None` here — Crew API slot select in the app layer; `long` does nothing |
 /// | voice key `down`/`up`                | `None` — dictation edges, text arrives as `asr`/`macro` |
 /// | `encoder { detents>0 }`              | `ChordRepeat(Down, detents)` |
 /// | `encoder { detents<0 }`              | `ChordRepeat(Up, |detents|)` |
@@ -213,8 +210,9 @@ pub fn route_input(ev: &Inbound, _ctx: &ControlCtx) -> ControlAction {
         }
 
         // Everything else is a no-op here: unbound K1-K3 `single` selects the
-        // Crew API slot and `long` drives the long-press auto-bind (both in the
-        // app layer), and the voice key's down/up edges start/stop dictation.
+        // Crew API slot (app layer), an unbound `long` is kept free (sessions
+        // are bound from Settings > Bind session), and the voice key's down/up
+        // edges start/stop dictation.
 
         // EC11 rotation: scroll by one arrow key per detent. Clockwise
         // (positive) moves down / to the next item; counter-clockwise (negative)
@@ -1203,8 +1201,8 @@ mod tests {
 
     #[test]
     fn unbound_gestures_are_none_at_the_router() {
-        // Unbound K1-K3 single/long are handled in the app layer (Crew API slot
-        // select / long-press auto-bind); an unbound double does nothing.
+        // Unbound K1-K3 single is the app layer's Crew API slot select; an
+        // unbound double or long does nothing.
         let ctx = ControlCtx::default();
         for g in [KeyAction::Single, KeyAction::Double, KeyAction::Long] {
             assert_eq!(route_input(&key("k1", g), &ctx), ControlAction::None, "{g:?}");

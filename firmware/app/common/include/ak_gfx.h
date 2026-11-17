@@ -70,13 +70,15 @@ void ak_gfx_char_thin(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, 
 /**
  * @brief Draw a NUL-terminated string left-to-right on one line.
  *
- * UTF-8: a string with any non-ASCII character is drawn whole with the UI font
- * (ak_font_ui, 12 px x scale, starting 2 px x scale above y), so Chinese and
- * mixed text work at every call site. Measure with ak_text_width() (ak_text.h).
+ * UTF-8, in the current font size (ak_text.h): at 12 px a pure-ASCII string
+ * uses the 8x8 font and any other string the 12 px UI font; at 16 px every
+ * string uses the 16 px UI font (x scale). y is the top of the 8 px row; a UI
+ * font cell starts ak_text_dy() x scale above it. Characters outside the font
+ * draw as a box. Measure with ak_text_width() (ak_text.h).
  */
 void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale);
 
-/** @brief Draw a NUL-terminated string using the thin body-text style (UTF-8 as above). */
+/** @brief Thin body-text style of ak_gfx_text() (differs only for 8x8 text; the UI fonts have one weight). */
 void ak_gfx_text_thin(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale);
 
 /**

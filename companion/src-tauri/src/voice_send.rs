@@ -72,10 +72,16 @@ pub fn failure_reason(error: &str) -> &'static str {
     }
 }
 
-/// Companion -> keyboard: a direct send failed; show `text` in ③ again with
-/// `msg` on the status bar. The text is clipped (UTF-8 safe) until the frame
-/// fits the keyboard's 511-byte line limit.
-pub fn input_restore_payload(text: &str, msg: &str) -> Value {
+/// Where an `input_restore` text comes from (`src`): the keyboard shows a
+/// failed send in red and a PC ASR result in its normal colour.
+pub const SRC_RETRY: &str = "retry";
+pub const SRC_PC: &str = "pc";
+
+/// Companion -> keyboard: show `text` in ③ with `msg` on the status bar
+/// (a failed send, or a PC ASR result; an empty PC text ends the keyboard's
+/// wait in ②). The text is clipped (UTF-8 safe) until the frame fits the
+/// keyboard's 511-byte line limit.
+pub fn input_restore_payload(text: &str, msg: &str, src: &str) -> Value {
     let msg = clip_text(msg, NOTICE_MAX);
     let mut budget = text.len();
     loop {
@@ -84,6 +90,7 @@ pub fn input_restore_payload(text: &str, msg: &str) -> Value {
         if !msg.is_empty() {
             p.insert("msg".into(), Value::String(msg.clone()));
         }
+        p.insert("src".into(), Value::String(src.to_string()));
         let frame = serde_json::json!({ "v": PROTOCOL_VERSION, "type": "input_restore", "payload": Value::Object(p) });
         let len = serde_json::to_vec(&frame).map(|b| b.len()).unwrap_or(usize::MAX);
         if len <= MAX_FRAME_BYTES || budget <= 3 {
@@ -155,15 +162,17 @@ mod tests {
 
     #[test]
     fn restore_frame_fits_and_keeps_utf8() {
-        let f = input_restore_payload("你好 world", "Crew not running");
+        let f = input_restore_payload("你好 world", "Crew not running", SRC_RETRY);
         assert_eq!(f["type"], "input_restore");
-        assert_eq!(f["payload"], serde_json::json!({"text":"你好 world","msg":"Crew not running"}));
+        assert_eq!(f["payload"], serde_json::json!({"text":"你好 world","msg":"Crew not running","src":"retry"}));
+        let f = input_restore_payload("", "没听清", SRC_PC);
+        assert_eq!(f["payload"], serde_json::json!({"text":"","msg":"没听清","src":"pc"}));
         let quotes = "\"".repeat(300);
-        let f = input_restore_payload(&quotes, "m");
+        let f = input_restore_payload(&quotes, "m", SRC_PC);
         assert!(serde_json::to_vec(&f).unwrap().len() <= MAX_FRAME_BYTES);
         assert!(f["payload"]["text"].as_str().unwrap().ends_with("..."));
         let cjk = "你".repeat(250);
-        let f = input_restore_payload(&cjk, "");
+        let f = input_restore_payload(&cjk, "", SRC_PC);
         assert!(serde_json::to_vec(&f).unwrap().len() <= MAX_FRAME_BYTES);
         assert!(f["payload"].get("msg").is_none());
     }

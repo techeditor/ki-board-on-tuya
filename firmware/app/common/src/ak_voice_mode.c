@@ -12,6 +12,21 @@ const char *ak_voice_mode_str(ak_voice_mode_t mode)
     return mode == AK_VOICE_MODE_CHAT ? "chat" : "asr";
 }
 
+bool ak_voice_mode_from_wire(const char *s, ak_voice_mode_t *out)
+{
+    if (s == NULL || out == NULL) {
+        return false;
+    }
+    if (strcmp(s, "asr") == 0) {
+        *out = AK_VOICE_MODE_ASR;
+    } else if (strcmp(s, "chat") == 0) {
+        *out = AK_VOICE_MODE_CHAT;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 bool ak_voice_mode_from_blob(const uint8_t *blob, size_t len, ak_voice_mode_t *out)
 {
     if (blob == NULL || out == NULL || len != 1U || blob[0] > (uint8_t)AK_VOICE_MODE_CHAT) {

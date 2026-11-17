@@ -9,7 +9,6 @@
 
 #include "ak_font.h"
 #include "ak_font8x8.h"
-#include "ak_font_ui.h"
 #include "ak_text.h"
 #include "tdl_display_draw.h"
 
@@ -147,10 +146,11 @@ void ak_gfx_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8
     ak_gfx_char_impl(x, y, c, fg, bg, scale, false);
 }
 
-/* A string with any non-ASCII byte is drawn whole with the UI font (Chinese and
- * its ASCII share one font and baseline), 2 px (x scale) above the 8x8 cell so
- * its 12 px glyphs centre on the same row. Pure-ASCII strings return false and
- * keep the 8x8 look. Width/wrapping rules: ak_text.h. */
+/* Strings drawn with the UI font of the current size (ak_text_font()) start
+ * its cell ak_text_dy() (x scale) above y so the glyphs centre on the 8 px
+ * row. At 12 px a pure-ASCII string keeps the 8x8 font (ak_text_uses_font()
+ * is false); at 16 px every string uses the UI font. Width/wrapping rules:
+ * ak_text.h. */
 static uint16_t s_scale_x0;
 static uint16_t s_scale_y0;
 static uint8_t  s_scale = 1U;
@@ -162,25 +162,25 @@ static void ak_gfx_scaled_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, u
                      (uint16_t)(h * s_scale), color);
 }
 
-static bool ak_gfx_text_wide(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale)
+static bool ak_gfx_text_ui(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale)
 {
-    if (s_fb == NULL || !ak_text_is_wide(s, strlen(s))) {
+    if (s_fb == NULL || !ak_text_uses_font(s, strlen(s))) {
         return false;
     }
     if (scale == 0U) {
         scale = 1U;
     }
-    uint16_t dy  = (uint16_t)(AK_TEXT_WIDE_DY * scale);
-    uint16_t top = y >= dy ? (uint16_t)(y - dy) : 0U;
+    const ak_font_t *font = ak_text_font();
+    uint16_t         dy   = (uint16_t)(ak_text_dy() * scale);
+    uint16_t         top  = y >= dy ? (uint16_t)(y - dy) : 0U;
     if (scale == 1U || x >= s_fb->width) {
-        (void)ak_font_draw_text(&ak_font_ui, x, top, s, fg, bg, (uint16_t)s_fb->width, ak_gfx_fill_rect);
+        (void)ak_font_draw_text(font, x, top, s, fg, bg, (uint16_t)s_fb->width, ak_gfx_fill_rect);
         return true;
     }
     s_scale_x0 = x;
     s_scale_y0 = top;
     s_scale    = scale;
-    (void)ak_font_draw_text(&ak_font_ui, x, top, s, fg, bg, (uint16_t)(x + (s_fb->width - x) / scale),
-                            ak_gfx_scaled_rect);
+    (void)ak_font_draw_text(font, x, top, s, fg, bg, (uint16_t)(x + (s_fb->width - x) / scale), ak_gfx_scaled_rect);
     return true;
 }
 
@@ -194,7 +194,7 @@ void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg
     if (s == NULL) {
         return;
     }
-    if (ak_gfx_text_wide(x, y, s, fg, bg, scale)) {
+    if (ak_gfx_text_ui(x, y, s, fg, bg, scale)) {
         return;
     }
     if (scale == 0) {
@@ -208,13 +208,14 @@ void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg
     }
 }
 
+/* The UI fonts have one weight: thin only changes 8x8 (12 px pure-ASCII) text. */
 void ak_gfx_text_thin(uint16_t x, uint16_t y, const char *s, uint16_t fg,
                       uint16_t bg, uint8_t scale)
 {
     if (s == NULL) {
         return;
     }
-    if (ak_gfx_text_wide(x, y, s, fg, bg, scale)) {
+    if (ak_gfx_text_ui(x, y, s, fg, bg, scale)) {
         return;
     }
     if (scale == 0) {

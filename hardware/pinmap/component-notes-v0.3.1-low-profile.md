@@ -1,7 +1,7 @@
 # 器件使用要点 — Expansion Board v0.3.1 Low-Profile
 
 > 用途：审核 / 改板 / 写固件时快速查阅 v0.3.1 **新增或变化**的器件。其余器件（SN74LV1T34、S8050、12P LCD、EC11 RC 去抖）
-> 与 v0.3 相同，见 `component-notes-v0.3.md` 与 `hardware/eda/expansion-baseboard-v0.3-change-scope.md`。
+> 与 v0.3 相同，见 `component-notes-v0.3.md`。
 > 封装数据取自 EDA 工程内的封装源码（2026-11-05 只读导出）；坐标单位 mm，封装局部坐标 Y 向上。
 
 | 器件 | 位号 | 型号 / LCSC | 封装 | datasheet（`datasheets/`） |

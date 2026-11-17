@@ -10,6 +10,7 @@ import { I18nProvider, LOCALES, isLocale, useI18n, type Locale } from "./i18n";
 import { Card, StateBadge } from "./ui/primitives";
 import { BoardStatusCards } from "./ui/BoardStatusCards";
 import { FirmwareUpdateCard } from "./ui/FirmwareUpdateCard";
+import { PcAsrPanel } from "./ui/PcAsrPanel";
 import { useBoardStatus } from "./ui/boardStatus";
 
 // ─── Types mirroring the Rust backend (src-tauri/src/lib.rs) ────────────────
@@ -24,6 +25,7 @@ type Status = {
   last_error: string;
   control_enabled?: boolean;
   focus_on_select?: boolean;
+  show_workers?: boolean;
   voice_inject?: boolean;
   device_volume: number;
   device_brightness: number;
@@ -53,6 +55,12 @@ type CrewConnection = {
   error: string;
   retry_secs: number;
 };
+
+/** CP-09: the Rust side prefixes every gateway identity failure with this. */
+const IDENTITY_FAILED_PREFIX = "Crew identity check failed";
+function isIdentityFailure(error: string): boolean {
+  return error.startsWith(IDENTITY_FAILED_PREFIX);
+}
 
 type DeviceSettings = {
   volume: number;
@@ -342,40 +350,11 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
   const [kcStatuses, setKcStatuses] = useState<Record<string, KcStatus>>({});
   const [watchedView, setWatchedView] = useState<WatchedView>("compact");
   const [quickBindDraft, setQuickBindDraft] = useState<QuickBindDraft | null>(null);
-  // Mode 2 (long-press bind): the session the user picked in the Watched Chat
-  // list as the target for the next physical K1/K2/K3 long-press. Long-pressing
-  // a key binds this session to that key's slot (K1->A, K2->B, K3->C), writing
-  // through the SAME path as the dropdown bind so the settings UI stays in sync.
-  const [selectedSession, setSelectedSession] = useState("");
-  // Transient banner shown after a long-press bind completes (also mirrored to
-  // the keyboard screen via a display frame).
-  const [longBindNotice, setLongBindNotice] = useState("");
   // FP-4b Route STATUS (option A): the pinned "watched chat". "" = follow all
   // sessions. Non-empty = only that session's status drives the board LCD.
   const [pinnedSession, setPinnedSession] = useState("");
   // FP-4b: Crew ScriptHookStore hooks apply globally to dashboard agent turns.
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
-
-  // The `board-event` listener is registered once, so it reads live values
-  // through refs instead of its (stale) initial closure. These mirror the state
-  // the long-press auto-bind path needs: the picked session, the API chat list,
-  // and the current bind numbers/aliases.
-  const selectedSessionRef = useRef("");
-  const crewSlotsRef = useRef<CrewSlot[]>([]);
-  const bindsRef = useRef<ChatNumbers>([]);
-  const bindAliasesRef = useRef<ChatAliases>(["", "", ""]);
-  useEffect(() => {
-    selectedSessionRef.current = selectedSession;
-  }, [selectedSession]);
-  useEffect(() => {
-    crewSlotsRef.current = crewSlots;
-  }, [crewSlots]);
-  useEffect(() => {
-    bindsRef.current = binds;
-  }, [binds]);
-  useEffect(() => {
-    bindAliasesRef.current = bindAliases;
-  }, [bindAliases]);
 
   const boardPorts = useMemo(
     () => ports.filter((port) => port.kind !== "flash"),
@@ -511,7 +490,7 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
 
   // Enable/disable routing board keys to Kiro Crew control. Default ON so the
   // Companion is ready to drive Kiro Crew immediately; disabling it still
-  // gates every board-triggered PC action, including K4 / Win+H.
+  // gates every board-triggered PC action, including PC ASR.
   async function toggleControl(enabled: boolean) {
     await invoke("set_control_enabled", { enabled });
     setStatus((s) => ({ ...s, control_enabled: enabled }));
@@ -521,6 +500,11 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
   async function toggleFocusOnSelect(enabled: boolean) {
     await invoke("set_focus_on_select", { enabled });
     setStatus((s) => ({ ...s, focus_on_select: enabled }));
+  }
+
+  async function toggleShowWorkers(enabled: boolean) {
+    await invoke("set_show_workers", { enabled });
+    setStatus((s) => ({ ...s, show_workers: enabled }));
   }
 
   // Voice input after K6: straight to the selected chat (default) or typed
@@ -631,9 +615,10 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
       return;
     }
     const ok = window.confirm(
-      "Enter pairing mode?\n\nThis clears the keyboard's saved Wi-Fi and cloud " +
-        "binding and reboots it into provisioning. The device License " +
-        "(UUID/AuthKey) is kept. You will need to re-provision Wi-Fi afterwards.",
+      "Unbind the device?\n\nOnly for a new account or a fresh setup; to change Wi-Fi, " +
+        "use the WiFi form instead (the device stays bound). This clears the Tuya binding " +
+        "and the current Wi-Fi and reboots the keyboard into the pairing window. The License " +
+        "(UUID/AuthKey) and the saved Wi-Fi list are kept. Pair it again in the Tuya app.",
     );
     if (!ok) {
       return;
@@ -805,51 +790,6 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
     });
   }
 
-  // Mode 2: a physical K1/K2/K3 long-press binds the currently selected
-  // Watched Chat session to that key's slot. Reads live values from refs (the
-  // board-event listener closure is stale). Writes through bindSession — the
-  // SAME path as the dropdown — so the settings UI updates automatically, then
-  // mirrors a confirmation to the keyboard screen via a display frame.
-  async function longPressBind(slot: number) {
-    const sessionId = selectedSessionRef.current.trim();
-    if (!sessionId) {
-      setLongBindNotice(
-        `长按 K${slot}:先在 Watched Chat 列表里选择一个对话,再长按按键绑定。`,
-      );
-      return;
-    }
-    const slots = crewSlotsRef.current;
-    const match = slots.find((s) => s.key === sessionId);
-    if (!match) {
-      setLongBindNotice(`长按 K${slot}:选中的对话已不在 API 列表中,无法绑定。`);
-      return;
-    }
-    // Preserve the slot's existing Alt+N fallback number (session binding is
-    // what drives the jump while the API is connected; the number is only the
-    // offline fallback and must stay a valid 1..=9 for the backend).
-    const defaultName = SLOT_DEFAULT_NAMES[slot - 1];
-    // Preserve the slot's existing Alt+N jump setting (0 = not set).
-    const number = bindsRef.current[slot - 1] ?? 0;
-    const alias = bindAliasesRef.current[slot - 1] || defaultName;
-    await runBind(async () => {
-      await bindSession(slot, number, sessionId);
-      setSelectedSession("");
-      const label = match.title || sessionDisplayName(sessionId);
-      setLongBindNotice(`已绑定 Chat ${defaultName} (K${slot}) → ${label}`);
-      // Mirror to the keyboard screen (best-effort; ignored when board offline).
-      try {
-        await invoke("send_display", {
-          chatSlot: slot,
-          agentName: alias,
-          displayState: "idle",
-          text: `Bound K${slot}->Chat ${defaultName}`,
-        });
-      } catch {
-        // Board may be disconnected; the on-screen UI notice still confirms it.
-      }
-    });
-  }
-
   function bindAliasDraft(slot: number, alias: string) {
     setBindAliases((current) => {
       const next = [...current];
@@ -965,18 +905,6 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
             const id = payload.id;
             window.setTimeout(() => setLastKey((cur) => (cur === id ? "" : cur)), 300);
           }
-          // Mode 2: an unbound K1/K2/K3 long-press auto-binds the selected chat
-          // to the matching A/B/C slot. A long-press the keymap bound to an
-          // action (payload.bind) is that action instead.
-          // Fire-and-forget; longPressBind reads live refs.
-          if (
-            payload.action === "long" &&
-            !payload.bind &&
-            (payload.id === "k1" || payload.id === "k2" || payload.id === "k3")
-          ) {
-            const slot = payload.id === "k1" ? 1 : payload.id === "k2" ? 2 : 3;
-            void longPressBind(slot);
-          }
         } else if (payload.action === "up") {
           // Release clears the highlight so the INPUT view reflects only the
           // current physical trigger state, not the last-pressed key.
@@ -1011,6 +939,11 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
       setCrewSelectedSlot((current) =>
         current && slots.some((slot) => slot.key === current) ? current : (slots[0]?.key ?? ""),
       );
+    });
+
+    // A slot was bound / unbound on the keyboard (Settings > Bind session).
+    const unlistenBindsChanged = listen<number>("kc-binds-changed", () => {
+      void refreshBinds().catch(() => undefined);
     });
 
     const unlistenCrewActiveSlot = listen<string>("crew-api-active-slot", (event) => {
@@ -1127,6 +1060,7 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
       unlistenCrewConnection.then((fn) => fn());
       unlistenCrewSlots.then((fn) => fn());
       unlistenCrewActiveSlot.then((fn) => fn());
+      unlistenBindsChanged.then((fn) => fn());
       unlistenCrewDraft.then((fn) => fn());
       unlistenVoiceSource.then((fn) => fn());
       unlistenWifi.then((fn) => fn());
@@ -1337,28 +1271,7 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
               </span>
             </div>
 
-            <label>Voice recognition path</label>
-            <div className="actions" style={{ marginTop: 6 }}>
-              <button
-                className={voiceSource === "cloud" ? "" : "secondary"}
-                onClick={() => runAction(() => selectVoiceSource("cloud"))}
-              >
-                Board cloud ASR
-              </button>
-              <button
-                className={voiceSource === "system" ? "" : "secondary"}
-                onClick={() => runAction(() => selectVoiceSource("system"))}
-              >
-                PC system ASR
-              </button>
-            </div>
-            <p className="hint">
-              <strong>Board cloud ASR</strong>: the board mic feeds Tuya cloud ASR; recognized text
-              returns as an <code>asr</code> frame. <strong>PC system ASR</strong>: a K4 press sends
-              <code> voice.start</code> and the companion activates Windows dictation (Win+H). The
-              choice is mirrored to the board (and the board can switch it too — this reflects the
-              board's reported path).
-            </p>
+            <PcAsrPanel voiceSource={voiceSource} onSelectSource={selectVoiceSource} />
 
             <label style={{ marginTop: 14 }}>WiFi provisioning (for board cloud ASR)</label>
             <input
@@ -1504,7 +1417,7 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
                 disabled={!usbProvisioningAvailable || pairingBusy}
                 onClick={() => enterPairing()}
               >
-                Enter pairing mode
+                Unbind device (new account)
               </button>
             </div>
             <div className="lcd" style={{ marginTop: 6 }}>
@@ -1512,9 +1425,10 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
               <strong>{pairingStatus || "-- (idle)"}</strong>
             </div>
             <p className={`hint ${usbProvisioningAvailable ? "good-text" : "warn-text"}`}>
-              USB connection required. Clears the board's saved WiFi and cloud binding and reboots
-              it into provisioning so you can re-provision WiFi. The device license (UUID/AuthKey)
-              is preserved. Same effect as three fast power cycles.
+              USB connection required. Only for a new account or a fresh setup: clears the Tuya
+              binding and the current Wi-Fi and reboots into the pairing window. The License and the
+              saved Wi-Fi list are kept. To change Wi-Fi only, use the WiFi form; the device stays
+              bound. Same as Unbind device on the keyboard (Settings, or hold K1+K6 for 5 s).
             </p>
 
             <label style={{ marginTop: 14 }}>Device license (UUID / AuthKey)</label>
@@ -1610,6 +1524,28 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
                 type="button"
                 className={`kc-seg ${status.focus_on_select === false ? "on" : ""}`}
                 onClick={() => runAction(() => toggleFocusOnSelect(false))}
+              >
+                {t("common.off")}
+              </button>
+            </div>
+            <div className="kc-field" style={{ marginTop: 12 }}>
+              <span>{t("control.showWorkers")}</span>
+              <StateBadge tone={status.show_workers ? "success" : "neutral"}>
+                {status.show_workers ? t("common.on") : t("common.off")}
+              </StateBadge>
+            </div>
+            <div className="kc-keymap-head" style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                className={`kc-seg ${status.show_workers ? "on" : ""}`}
+                onClick={() => runAction(() => toggleShowWorkers(true))}
+              >
+                {t("common.on")}
+              </button>
+              <button
+                type="button"
+                className={`kc-seg ${!status.show_workers ? "on" : ""}`}
+                onClick={() => runAction(() => toggleShowWorkers(false))}
               >
                 {t("common.off")}
               </button>
@@ -1763,6 +1699,9 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
 
               {(crewApiError || status.crew_api_last_error) && (
                 <div className="error-banner" style={{ marginTop: 12 }}>
+                  {isIdentityFailure(crewApiError || (status.crew_api_last_error ?? "")) && (
+                    <strong>{t("crew.identityFailed")} </strong>
+                  )}
                   {crewApiError || status.crew_api_last_error} · Hook fallback remains available.
                 </div>
               )}
@@ -1829,6 +1768,11 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
                             {crewSlot.title || crewSlot.key} · {crewSlot.key}
                           </option>
                         ))}
+                        {/* A remote crew's session (bound on the keyboard): `<instance>:<key>`. */}
+                        {bindSessions[slot - 1] &&
+                          !crewSlots.some((crewSlot) => crewSlot.key === bindSessions[slot - 1]) && (
+                            <option value={bindSessions[slot - 1]}>{bindSessions[slot - 1]}</option>
+                          )}
                       </select>
                     </div>
                     <div className="binding-field">
@@ -2045,36 +1989,9 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
               </p>
 
               <p className="hint">
-                长按绑定:在下方列表里<strong>点选一个对话</strong>,再<strong>长按键盘上的
-                K1 / K2 / K3</strong>,即可把它绑定到 Chat A / B / C。绑定结果会同步到上方
-                "Bind Chats with Keys" 设置,并在键盘屏幕上显示提示。
+                在键盘上绑定:旋钮长按打开设置页 → <strong>绑定会话</strong> → K1 / K2 / K3 选槽 → 选会话。
+                也可以用下方每个对话右侧的 A / B / C 按钮绑定。
               </p>
-
-              {selectedSession && (
-                <div className="watched-selected-banner">
-                  已选中:<code>{selectedSession}</code> · 现在长按 K1/K2/K3 完成绑定
-                  <button
-                    className="secondary"
-                    onClick={() => setSelectedSession("")}
-                    style={{ marginLeft: 8 }}
-                  >
-                    取消选择
-                  </button>
-                </div>
-              )}
-
-              {longBindNotice && (
-                <div className="watched-bind-notice">
-                  {longBindNotice}
-                  <button
-                    className="secondary"
-                    onClick={() => setLongBindNotice("")}
-                    style={{ marginLeft: 8 }}
-                  >
-                    知道了
-                  </button>
-                </div>
-              )}
 
               <div className="watched-tabs" role="tablist" aria-label="Watched chat view">
                 <button
@@ -2103,43 +2020,12 @@ function App({ theme, setTheme }: { theme: ThemeId; setTheme: (t: ThemeId) => vo
                 ) : watchedView === "compact" ? (
                   sortedKcStatuses.map((s) => {
                     const isPinned = s.session_id === pinnedSession;
-                    const isSelected = s.session_id === selectedSession;
                     const boundSlot = bindSessions.findIndex((id) => id === s.session_id) + 1;
                     const draftForSession = quickBindDraft?.sessionId === s.session_id;
                     return (
                       <div
-                        className={`watched-compact-card${isPinned ? " pinned" : ""}${isSelected ? " selected" : ""}`}
+                        className={`watched-compact-card${isPinned ? " pinned" : ""}`}
                         key={s.session_id}
-                        role="button"
-                        tabIndex={0}
-                        aria-pressed={isSelected}
-                        title="点击选中此对话,然后长按 K1/K2/K3 绑定到 Chat A/B/C"
-                        onClick={(event) => {
-                          // Ignore clicks that land on an inner control (the
-                          // quick-bind buttons, Watch, the chat # select) so
-                          // selecting the card never fights those actions.
-                          if (
-                            (event.target as HTMLElement).closest(
-                              "button, select, input, label",
-                            )
-                          ) {
-                            return;
-                          }
-                          setSelectedSession((cur) =>
-                            cur === s.session_id ? "" : s.session_id,
-                          );
-                        }}
-                        onKeyDown={(event) => {
-                          if (
-                            (event.key === "Enter" || event.key === " ") &&
-                            event.target === event.currentTarget
-                          ) {
-                            event.preventDefault();
-                            setSelectedSession((cur) =>
-                              cur === s.session_id ? "" : s.session_id,
-                            );
-                          }
-                        }}
                       >
                         <div className="watched-compact-row">
                           <div className="watched-session-summary">

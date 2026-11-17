@@ -35,7 +35,12 @@ pub fn hello_payload() -> Value {
     serde_json::json!({
         "v": PROTOCOL_VERSION,
         "type": "hello",
-        "payload": { "client": "companion", "version": env!("CARGO_PKG_VERSION") }
+        "payload": {
+            "client": "companion",
+            "version": env!("CARGO_PKG_VERSION"),
+            // PC ASR text comes back as input_restore: the keyboard may wait in ②.
+            "pc_asr": true
+        }
     })
 }
 
@@ -88,19 +93,41 @@ pub fn config_payload(voice_engine: &str) -> Value {
     })
 }
 
-/// PC -> board: synchronize optional display aliases for slots A, B, and C.
-/// Empty strings tell the AK to render the corresponding default letter.
-pub fn binding_aliases_payload(aliases: &[String]) -> Value {
+/// PC -> board: synchronize optional display aliases for slots A, B, and C,
+/// and the name of the Crew session bound to each (Settings > Bind session
+/// page; empty = not bound, clipped to 48 bytes). Empty aliases tell the AK
+/// to render the corresponding default letter.
+pub fn bindings_payload(aliases: &[String], names: &[String]) -> Value {
     let alias = |index: usize| aliases.get(index).map(String::as_str).unwrap_or("");
+    let name = |index: usize| {
+        crate::menu_wire::clip_text(names.get(index).map(String::as_str).unwrap_or(""), BIND_NAME_MAX)
+    };
     serde_json::json!({
         "v": PROTOCOL_VERSION,
         "type": "bindings",
         "payload": {
             "alias_a": alias(0),
             "alias_b": alias(1),
-            "alias_c": alias(2)
+            "alias_c": alias(2),
+            "name_a": name(0),
+            "name_b": name(1),
+            "name_c": name(2)
         }
     })
+}
+
+/// Longest bound-session name in `bindings` (bytes).
+pub const BIND_NAME_MAX: usize = 48;
+
+/// PC -> board: answer to `bind_session` that ends a step of the keyboard's
+/// Bind session flow. `result`: `bound` / `unbound` / `back` / `closed` /
+/// `error`; `msg` (status line, <= 48 bytes) is omitted when empty.
+pub fn bind_done_payload(slot: u8, result: &str, msg: &str) -> Value {
+    let mut payload = serde_json::json!({ "slot": slot, "result": result });
+    if !msg.is_empty() {
+        payload["msg"] = Value::String(crate::menu_wire::clip_text(msg, crate::menu_wire::NOTICE_MAX));
+    }
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "bind_done", "payload": payload })
 }
 
 /// PC -> board: set the current device volume and screen brightness.
@@ -120,6 +147,129 @@ pub fn device_language_payload(language: &str) -> Value {
         "type": "device_settings",
         "payload": { "language": language }
     })
+}
+
+/// FR-02: the normal keyboard settings the Companion may change (USB or the
+/// BLE secure channel). Only the fields that are `Some` are sent; the board
+/// rejects the whole frame if any of them is out of range.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct DeviceSettingsUpdate {
+    #[serde(default)]
+    pub volume: Option<u8>,
+    #[serde(default)]
+    pub brightness: Option<u8>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub voice_mode: Option<String>,
+    #[serde(default)]
+    pub led_power: Option<String>,
+    #[serde(default)]
+    pub led_auto_off_s: Option<u32>,
+    #[serde(default)]
+    pub font_size: Option<u8>,
+}
+
+/// Auto power-off delays the keyboard offers (ak_led_policy.c).
+pub const LED_AUTO_OFF_S: [u32; 4] = [30, 60, 300, 900];
+
+/// LCD font sizes in px the keyboard offers (ak_text.h).
+pub const FONT_SIZES: [u8; 2] = [12, 16];
+
+impl DeviceSettingsUpdate {
+    /// Same ranges as the firmware, so the UI gets an error instead of a
+    /// silently dropped frame.
+    pub fn validate(&self) -> Result<(), String> {
+        let empty = self.volume.is_none()
+            && self.brightness.is_none()
+            && self.language.is_none()
+            && self.voice_mode.is_none()
+            && self.led_power.is_none()
+            && self.led_auto_off_s.is_none()
+            && self.font_size.is_none();
+        if empty {
+            return Err("no setting to change".into());
+        }
+        if self.volume.is_some_and(|v| v > 100) {
+            return Err("volume must be 0..=100".into());
+        }
+        if self.brightness.is_some_and(|b| !(10..=100).contains(&b)) {
+            return Err("brightness must be 10..=100".into());
+        }
+        if self.language.as_deref().is_some_and(|l| l != "zh" && l != "en") {
+            return Err("language must be zh or en".into());
+        }
+        if self.voice_mode.as_deref().is_some_and(|m| m != "asr" && m != "chat") {
+            return Err("voice_mode must be asr or chat".into());
+        }
+        if self.led_power.as_deref().is_some_and(|m| !matches!(m, "off" | "on" | "auto")) {
+            return Err("led_power must be off, on or auto".into());
+        }
+        if self.led_auto_off_s.is_some_and(|s| !LED_AUTO_OFF_S.contains(&s)) {
+            return Err("led_auto_off_s must be 30, 60, 300 or 900".into());
+        }
+        if self.font_size.is_some_and(|s| !FONT_SIZES.contains(&s)) {
+            return Err("font_size must be 12 or 16".into());
+        }
+        Ok(())
+    }
+}
+
+/// PC -> board: change some of the normal settings (FR-02).
+pub fn device_settings_update_payload(u: &DeviceSettingsUpdate) -> Value {
+    let mut p = serde_json::Map::new();
+    if let Some(v) = u.volume {
+        p.insert("volume".into(), v.into());
+    }
+    if let Some(v) = u.brightness {
+        p.insert("brightness".into(), v.into());
+    }
+    if let Some(v) = &u.language {
+        p.insert("language".into(), v.clone().into());
+    }
+    if let Some(v) = &u.voice_mode {
+        p.insert("voice_mode".into(), v.clone().into());
+    }
+    if let Some(v) = &u.led_power {
+        p.insert("led_power".into(), v.clone().into());
+    }
+    if let Some(v) = u.led_auto_off_s {
+        p.insert("led_auto_off_s".into(), v.into());
+    }
+    if let Some(v) = u.font_size {
+        p.insert("font_size".into(), v.into());
+    }
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "device_settings", "payload": Value::Object(p) })
+}
+
+/// PC -> board (USB only): ask the keyboard to open the pairing window; the
+/// keyboard shows its own K6 / K1 confirm (FR-02).
+pub fn prov_open_payload() -> Value {
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "prov_open" })
+}
+
+/// PC -> board (USB only): ask the keyboard to clear its BLE pairing key; the
+/// keyboard shows its own K6 / K1 confirm (FR-02).
+pub fn ble_unpair_payload() -> Value {
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "ble_unpair" })
+}
+
+/// PC -> board: ask for the remembered Wi-Fi networks (FR-15). Read only; the
+/// answer is a `wifi_list_state` frame with SSIDs and no passwords. Allowed on
+/// USB and on the paired BLE channel.
+pub fn wifi_list_payload() -> Value {
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "wifi_list" })
+}
+
+/// PC -> board (USB only): forget one remembered network (FR-15). Needs no
+/// pairing window; it only removes data.
+pub fn wifi_forget_payload(ssid: &str) -> Value {
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "wifi_forget", "payload": { "ssid": ssid } })
+}
+
+/// PC -> board (USB only): forget every remembered network (FR-15).
+pub fn wifi_clear_payload() -> Value {
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "wifi_clear" })
 }
 
 /// PC -> board: downlink per-gesture keymap bindings (plan A, stage 乙). Each
@@ -304,6 +454,8 @@ impl Serialize for KeyAction {
 pub enum VoiceState {
     Start,
     Stop,
+    /// The keyboard gave up waiting for the PC ASR text (K1 or timeout).
+    Cancel,
     #[serde(other)]
     Unknown,
 }
@@ -407,6 +559,26 @@ pub struct WifiStatusPayload {
     pub ssid: String,
 }
 
+/// One remembered network in `wifi_list_state` (FR-15). The board never sends
+/// a password; there is no field for one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiSavedEntry {
+    pub ssid: String,
+    #[serde(default)]
+    pub sec: String,
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// `wifi_list_state` payload: remembered networks, most recently connected first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiListPayload {
+    #[serde(default)]
+    pub max: u32,
+    #[serde(default)]
+    pub entries: Vec<WifiSavedEntry>,
+}
+
 /// `activation_status` payload: Tuya pairing/activation lifecycle. The QR URL
 /// contains PID+UUID only and is populated solely while waiting for SmartLife.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -503,13 +675,30 @@ pub struct SystemInfoPayload {
 }
 
 /// `device_settings_state` payload: the values currently applied by the AK.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceSettingsPayload {
     pub volume: u8,
     pub brightness: u8,
     /// Interface language "zh" / "en" (FR-01); absent from older firmware.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// LED power "off" / "on" / "auto" and the Auto power-off delay (s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub led_power: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub led_auto_off_s: Option<u32>,
+    /// Voice mode "asr" / "chat" (FR-02); absent from older firmware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_mode: Option<String>,
+    /// LCD font size in px (12 / 16); absent from older firmware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<u8>,
+    /// Status only (FR-02): "present" / "missing", never the License itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// Status only (FR-02): whether the keyboard holds a BLE pairing key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ble_paired: Option<bool>,
 }
 
 /// `menu_result` payload: the user's answer to LCD menu `id`. `selected` holds
@@ -527,6 +716,12 @@ pub struct MenuResultPayload {
     pub reason: String,
     #[serde(default)]
     pub text: String,
+}
+
+/// `bind_session` (board -> PC): the slot picked on the Bind session page.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct BindSessionPayload {
+    pub slot: u8,
 }
 
 // ─────────────────────── Payload structs (PC -> board) ───────────────────────
@@ -600,6 +795,8 @@ pub enum Inbound {
     TuyaChat { seq: Option<u64>, payload: TuyaChatPayload },
     /// The board's Wi-Fi provisioning/connection status.
     WifiStatus { seq: Option<u64>, payload: WifiStatusPayload },
+    /// The remembered Wi-Fi networks (FR-15): SSIDs only.
+    WifiList { seq: Option<u64>, payload: WifiListPayload },
     /// Tuya pairing, QR scan, activation and cloud-ready lifecycle.
     ActivationStatus { seq: Option<u64>, payload: ActivationStatusPayload },
     /// The board's device-license provisioning result.
@@ -616,6 +813,8 @@ pub enum Inbound {
     DeviceSettings { seq: Option<u64>, payload: DeviceSettingsPayload },
     /// The user's answer to an LCD menu (physical keys on the keyboard).
     MenuResult { seq: Option<u64>, payload: MenuResultPayload },
+    /// Settings > Bind session on the keyboard picked a slot (1..3).
+    BindSession { seq: Option<u64>, payload: BindSessionPayload },
     /// Local firmware update status / transfer ack (USB only).
     OtaStatus(OtaStatusPayload),
     OtaAck(OtaAckPayload),
@@ -673,6 +872,9 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "wifi_status" => serde_json::from_value::<WifiStatusPayload>(payload)
             .ok()
             .map(|p| Inbound::WifiStatus { seq, payload: p }),
+        "wifi_list_state" => serde_json::from_value::<WifiListPayload>(payload)
+            .ok()
+            .map(|p| Inbound::WifiList { seq, payload: p }),
         "activation_status" => serde_json::from_value::<ActivationStatusPayload>(payload)
             .ok()
             .map(|p| Inbound::ActivationStatus { seq, payload: p }),
@@ -697,6 +899,10 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "menu_result" => serde_json::from_value::<MenuResultPayload>(payload)
             .ok()
             .map(|p| Inbound::MenuResult { seq, payload: p }),
+        "bind_session" => serde_json::from_value::<BindSessionPayload>(payload)
+            .ok()
+            .filter(|p| (1..=3).contains(&p.slot))
+            .map(|p| Inbound::BindSession { seq, payload: p }),
         "ota_status" => serde_json::from_value::<OtaStatusPayload>(payload)
             .ok()
             .map(Inbound::OtaStatus),
@@ -775,6 +981,15 @@ mod tests {
         let hello = hello_payload();
         assert_eq!(hello["v"], PROTOCOL_VERSION);
         assert_eq!(hello["type"], "hello");
+        assert_eq!(hello["payload"]["pc_asr"], true);
+    }
+
+    #[test]
+    fn voice_cancel_decodes_and_unknown_states_stay_unknown() {
+        let f = decode_line(r#"{"v":1,"seq":4,"type":"voice","payload":{"state":"cancel"}}"#).unwrap();
+        assert!(matches!(f, Inbound::Voice { payload: VoicePayload { state: VoiceState::Cancel }, .. }));
+        let f = decode_line(r#"{"v":1,"type":"voice","payload":{"state":"later"}}"#).unwrap();
+        assert!(matches!(f, Inbound::Voice { payload: VoicePayload { state: VoiceState::Unknown }, .. }));
     }
 
     #[test]
@@ -795,11 +1010,24 @@ mod tests {
         assert_eq!(display["payload"]["state"], "running");
         assert_eq!(led_payload("on", "green")["payload"]["color"], "green");
         assert_eq!(config_payload("system")["payload"]["voice_engine"], "system");
-        let aliases = binding_aliases_payload(&["Plan".into(), "".into()]);
+        let aliases = bindings_payload(&["Plan".into(), "".into()], &["".into(), "Ki-board Mate".into()]);
         assert_eq!(aliases["type"], "bindings");
         assert_eq!(aliases["payload"]["alias_a"], "Plan");
         assert_eq!(aliases["payload"]["alias_b"], "");
         assert_eq!(aliases["payload"]["alias_c"], "");
+        assert_eq!(aliases["payload"]["name_a"], "");
+        assert_eq!(aliases["payload"]["name_b"], "Ki-board Mate");
+        assert_eq!(aliases["payload"]["name_c"], "");
+        let long = bindings_payload(&[], &["会话".repeat(20)]);
+        assert!(long["payload"]["name_a"].as_str().unwrap().len() <= BIND_NAME_MAX);
+        assert!(matches!(
+            decode_line(r#"{"v":1,"seq":4,"type":"bind_session","payload":{"slot":2}}"#),
+            Some(Inbound::BindSession { seq: Some(4), payload: BindSessionPayload { slot: 2 } })
+        ));
+        assert!(decode_line(r#"{"v":1,"type":"bind_session","payload":{"slot":4}}"#).is_none());
+        let done = bind_done_payload(2, "bound", "");
+        assert_eq!(done, serde_json::json!({"v":1,"type":"bind_done","payload":{"slot":2,"result":"bound"}}));
+        assert_eq!(bind_done_payload(1, "error", "Crew offline")["payload"]["msg"], "Crew offline");
         let settings = device_settings_payload(70, 90);
         assert_eq!(settings["type"], "device_settings");
         assert_eq!(settings["payload"]["volume"], 70);
@@ -989,6 +1217,34 @@ mod tests {
     }
 
     #[test]
+    fn wifi_list_frames() {
+        assert_eq!(wifi_list_payload()["type"], "wifi_list");
+        let f = wifi_forget_payload("Lab AP");
+        assert_eq!(f["type"], "wifi_forget");
+        assert_eq!(f["payload"]["ssid"], "Lab AP");
+        assert_eq!(wifi_clear_payload()["type"], "wifi_clear");
+        // No password field exists in either direction of the list.
+        assert!(f.to_string().find("pass").is_none());
+
+        let list = decode_line(
+            r#"{"v":1,"seq":4,"type":"wifi_list_state","payload":{"max":10,"entries":[{"ssid":"Home","sec":"wpa2","current":true},{"ssid":"Cafe","sec":"unknown","current":false}]}}"#,
+        )
+        .unwrap();
+        match list {
+            Inbound::WifiList { seq, payload } => {
+                assert_eq!(seq, Some(4));
+                assert_eq!(payload.max, 10);
+                assert_eq!(payload.entries.len(), 2);
+                assert!(payload.entries[0].current);
+                assert_eq!(payload.entries[1].ssid, "Cafe");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let empty = decode_line(r#"{"v":1,"type":"wifi_list_state","payload":{"max":10,"entries":[]}}"#).unwrap();
+        assert!(matches!(empty, Inbound::WifiList { ref payload, .. } if payload.entries.is_empty()));
+    }
+
+    #[test]
     fn decode_activation_status_with_qr_url() {
         let frame = decode_line(
             r#"{"v":1,"seq":20,"type":"activation_status","payload":{"state":"scan_qr","qr_url":"https://smartapp.tuya.com/s/p?p=pid&uuid=uuid123&v=2.0"}}"#,
@@ -1120,7 +1376,7 @@ mod tests {
 
     #[test]
     fn device_settings_state_with_led_power_still_parses() {
-        // 0.3.52+ firmware adds led_power / led_auto_off_s; older Companions ignore them.
+        // 0.3.52+ firmware adds led_power / led_auto_off_s.
         let state = decode_line(
             r#"{"v":1,"seq":16,"type":"device_settings_state","payload":{"volume":60,"brightness":80,"led_power":"auto","led_auto_off_s":60}}"#,
         )
@@ -1129,9 +1385,77 @@ mod tests {
             state,
             Inbound::DeviceSettings {
                 seq: Some(16),
-                payload: DeviceSettingsPayload { volume: 60, brightness: 80, language: None },
+                payload: DeviceSettingsPayload {
+                    volume: 60,
+                    brightness: 80,
+                    led_power: Some("auto".into()),
+                    led_auto_off_s: Some(60),
+                    ..Default::default()
+                },
             }
         );
+    }
+
+    #[test]
+    fn device_settings_fr02_fields_parse_and_build() {
+        let state = decode_line(
+            r#"{"v":1,"seq":18,"type":"device_settings_state","payload":{"volume":60,"brightness":80,"led_power":"off","led_auto_off_s":900,"language":"en","voice_mode":"chat","license":"present","ble_paired":true}}"#,
+        )
+        .unwrap();
+        match state {
+            Inbound::DeviceSettings { payload, .. } => {
+                assert_eq!(payload.voice_mode.as_deref(), Some("chat"));
+                assert_eq!(payload.license.as_deref(), Some("present"));
+                assert_eq!(payload.ble_paired, Some(true));
+                assert_eq!(payload.led_auto_off_s, Some(900));
+            }
+            other => panic!("{other:?}"),
+        }
+        let down = device_settings_update_payload(&DeviceSettingsUpdate {
+            voice_mode: Some("asr".into()),
+            led_power: Some("on".into()),
+            ..Default::default()
+        });
+        assert_eq!(down["type"], "device_settings");
+        assert_eq!(down["payload"], serde_json::json!({ "voice_mode": "asr", "led_power": "on" }));
+        let font = decode_line(
+            r#"{"v":1,"seq":19,"type":"device_settings_state","payload":{"volume":60,"brightness":80,"font_size":16}}"#,
+        )
+        .unwrap();
+        match font {
+            Inbound::DeviceSettings { payload, .. } => assert_eq!(payload.font_size, Some(16)),
+            other => panic!("{other:?}"),
+        }
+        let down = device_settings_update_payload(&DeviceSettingsUpdate { font_size: Some(12), ..Default::default() });
+        assert_eq!(down["payload"], serde_json::json!({ "font_size": 12 }));
+        assert_eq!(prov_open_payload()["type"], "prov_open");
+        assert_eq!(ble_unpair_payload()["type"], "ble_unpair");
+    }
+
+    #[test]
+    fn device_settings_update_is_validated() {
+        let ok = DeviceSettingsUpdate {
+            volume: Some(100),
+            brightness: Some(10),
+            language: Some("zh".into()),
+            voice_mode: Some("chat".into()),
+            led_power: Some("auto".into()),
+            led_auto_off_s: Some(300),
+            font_size: Some(16),
+        };
+        assert_eq!(ok.validate(), Ok(()));
+        for bad in [
+            DeviceSettingsUpdate { volume: Some(101), ..Default::default() },
+            DeviceSettingsUpdate { brightness: Some(5), ..Default::default() },
+            DeviceSettingsUpdate { language: Some("fr".into()), ..Default::default() },
+            DeviceSettingsUpdate { voice_mode: Some("yolo".into()), ..Default::default() },
+            DeviceSettingsUpdate { led_power: Some("Auto".into()), ..Default::default() },
+            DeviceSettingsUpdate { led_auto_off_s: Some(45), ..Default::default() },
+            DeviceSettingsUpdate { font_size: Some(14), ..Default::default() },
+            DeviceSettingsUpdate::default(),
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -1144,7 +1468,14 @@ mod tests {
             state,
             Inbound::DeviceSettings {
                 seq: Some(17),
-                payload: DeviceSettingsPayload { volume: 60, brightness: 80, language: Some("zh".into()) },
+                payload: DeviceSettingsPayload {
+                    volume: 60,
+                    brightness: 80,
+                    language: Some("zh".into()),
+                    led_power: Some("auto".into()),
+                    led_auto_off_s: Some(60),
+                    ..Default::default()
+                },
             }
         );
         let down = device_language_payload("en");
@@ -1166,6 +1497,7 @@ mod tests {
                     volume: 60,
                     brightness: 80,
                     language: None,
+                    ..Default::default()
                 },
             }
         );

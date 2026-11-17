@@ -31,6 +31,8 @@ set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_reset_netcfg.c
     ${AK_COMMON_PATH}/src/ak_window_marker.c
     ${AK_COMMON_PATH}/src/ak_wifi.c
+    ${AK_COMMON_PATH}/src/ak_wifi_store.c
+    ${AK_COMMON_PATH}/src/ak_combo.c
     ${AK_COMMON_PATH}/src/ak_input_fsm.c
     ${AK_COMMON_PATH}/src/ak_keymap.c
     ${AK_COMMON_PATH}/src/ak_voice_route.c
@@ -43,6 +45,7 @@ set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_rx.c
     ${AK_COMMON_PATH}/src/ak_menu.c
     ${AK_COMMON_PATH}/src/ak_ui.c
+    ${AK_COMMON_PATH}/src/ak_bind.c
     ${AK_COMMON_PATH}/src/ak_validate.c
     ${AK_COMMON_PATH}/src/ak_provision.c
     ${AK_COMMON_PATH}/src/ak_cred.c
@@ -58,7 +61,8 @@ set(AK_CORE_SRCS
     ${AK_COMMON_PATH}/src/ak_font.c
     ${AK_COMMON_PATH}/src/ak_font_data.c
     ${AK_COMMON_PATH}/src/ak_fonttest.c
-    ${AK_COMMON_PATH}/src/ak_font_ui_data.c
+    ${AK_COMMON_PATH}/src/ak_font_ui12_data.c
+    ${AK_COMMON_PATH}/src/ak_font_ui16_data.c
     ${AK_COMMON_PATH}/src/ak_text.c
     ${AK_COMMON_PATH}/src/ak_i18n.c
     ${AK_COMMON_PATH}/src/ak_statuslcd.c

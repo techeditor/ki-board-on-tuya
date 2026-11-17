@@ -20,7 +20,7 @@
 #if AK_ASR_BOARD_CLOUD
 
 /* ── Real backend (Tuya IoT client + netmgr) ────────────────────────────────
- * Ported from firmware/feature-probes/tuya_cloud_asr/src/tuya_main.c. Only the
+ * Ported from tuya_cloud_asr/src/tuya_main.c (see git tag archive/feature-probes). Only the
  * IoT bring-up is ported here; K4 capture is routed by the app through the
  * official HOLD mode events in ak_asr.c, and recognized text reaches the app
  * through ak_asr.c's callback. K4 remains owned by ak_input so system/cloud
@@ -407,6 +407,11 @@ bool ak_cloud_boot_window(void)
     return s_boot_window;
 }
 
+bool ak_cloud_license_usable(void)
+{
+    return s_license.uuid != NULL && s_license.uuid[0] != '\0';
+}
+
 void ak_cloud_netcfg_close(void)
 {
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
@@ -419,6 +424,11 @@ void ak_cloud_netcfg_close(void)
 #else /* !AK_ASR_BOARD_CLOUD — stub */
 
 bool ak_cloud_boot_window(void)
+{
+    return false;
+}
+
+bool ak_cloud_license_usable(void)
 {
     return false;
 }

@@ -5,6 +5,8 @@
 
 #include "ak_led_policy.h"
 
+#include <string.h>
+
 static const uint32_t k_timeout_ms[AK_LED_TIMEOUT_COUNT] = {30000U, 60000U, 300000U, 900000U};
 static const char *const k_timeout_str[AK_LED_TIMEOUT_COUNT] = {"30 s", "60 s", "5 min", "15 min"};
 
@@ -125,6 +127,35 @@ const char *ak_led_mode_wire_str(ak_led_mode_t mode)
     default:
         return "auto";
     }
+}
+
+bool ak_led_mode_from_wire(const char *s, ak_led_mode_t *out)
+{
+    static const ak_led_mode_t modes[] = {AK_LED_MODE_OFF, AK_LED_MODE_ON, AK_LED_MODE_AUTO};
+    if (s == NULL || out == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        if (strcmp(s, ak_led_mode_wire_str(modes[i])) == 0) {
+            *out = modes[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ak_led_policy_timeout_from_s(uint32_t seconds, uint8_t *idx_out)
+{
+    if (idx_out == NULL) {
+        return false;
+    }
+    for (uint8_t i = 0U; i < AK_LED_TIMEOUT_COUNT; i++) {
+        if (k_timeout_ms[i] == seconds * 1000U && seconds <= 3600U) {
+            *idx_out = i;
+            return true;
+        }
+    }
+    return false;
 }
 
 void ak_led_policy_to_blob(ak_led_mode_t mode, uint8_t timeout_idx, uint8_t blob[AK_LED_POLICY_BLOB_LEN])

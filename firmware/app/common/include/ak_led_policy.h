@@ -85,6 +85,13 @@ const char *ak_led_policy_timeout_str(uint8_t timeout_idx); /* "30 s", "60 s", "
 const char *ak_led_mode_str(ak_led_mode_t mode);            /* "Off", "On", "Auto" */
 const char *ak_led_mode_wire_str(ak_led_mode_t mode);       /* "off", "on", "auto" (device_settings_state) */
 
+/** device_settings `led_power` -> mode. False (out untouched) for anything else. */
+bool ak_led_mode_from_wire(const char *s, ak_led_mode_t *out);
+
+/** device_settings `led_auto_off_s` -> Auto timeout index. Only the offered
+ *  delays (30 / 60 / 300 / 900) are accepted. */
+bool ak_led_policy_timeout_from_s(uint32_t seconds, uint8_t *idx_out);
+
 /** KV blob <-> setting. from_blob rejects any other length, version or value. */
 void ak_led_policy_to_blob(ak_led_mode_t mode, uint8_t timeout_idx, uint8_t blob[AK_LED_POLICY_BLOB_LEN]);
 bool ak_led_policy_from_blob(const uint8_t *blob, size_t len, ak_led_mode_t *mode, uint8_t *timeout_idx);

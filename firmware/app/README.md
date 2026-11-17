@@ -1,141 +1,110 @@
-# Agentic Keyboard for Kiro — product firmware
+# Ki-board product firmware
 
-Product firmware for the Tuya T5AI-Core + expansion baseboard **v1.2**.
-Distinct from `firmware/bringup/` (throwaway per-peripheral hardware validation).
+Product firmware for the Ki-board v0.3 hardware (Tuya T5AI-Core + passive
+expansion board with 6 keys, an EC11 knob, 7 WS2812 LEDs and a 320×240 ST7789
+LCD). For the hardware tests used on a new board, see
+[`../bringup/`](../bringup/).
 
-## Architecture (mechanism A)
+Wire protocol: [`shared/protocol/protocol.md`](../../shared/protocol/protocol.md).
+Local firmware update (OTA): [`docs/ota.md`](../../docs/ota.md).
 
-ONE app, one shared core, and **build-time-selected** transport / ASR backends.
-Each build profile produces a distinct flashable binary, so variants can be
-flashed and compared like the bring-up apps — without forking the shared code.
+## What it does
 
-```
-firmware/app/
-├── common/
-│   ├── include/
-│   │   ├── ak_board_io.h   # authoritative v1.2 pinout (WS2812=P4/SPI1, LCD_BL=P8)
-│   │   ├── ak_features.h   # compile-time variant selection (transport / ASR)
-│   │   └── ak_uart.h       # UART0 transport backend
-│   └── src/
-│       └── ak_uart.c
-├── src/
-│   └── tuya_app_main.c     # entry: hello_ack + heartbeat over selected transport
-├── config/
-│   └── TUYA_T5AI_CORE.config   # active build profile (v1: UART)
-├── app_default.config          # mirrors the active profile (see build note)
-└── CMakeLists.txt
-```
+| Area | Summary |
+|---|---|
+| Input | Scans K1–K6 and the EC11 knob, debounces them and classifies single / double / long presses; a keymap (default table, or one sent by the Companion and kept across reboots) turns gestures into actions |
+| Display | Status bar, three chat-slot icons coloured by agent state, voice input confirm page, paged menus for approvals / questions / options / model and mode, settings page; Chinese and English UI |
+| LEDs | Per-key colours for menus and states, breathing / blinking effects, chain power off / on / auto-off |
+| Links | USB serial (UART0) and BLE GATT, used together in the dual profiles; BLE frames go through an encrypted channel; sensitive commands are accepted from USB only |
+| Voice | Hold-to-talk key; board-side Tuya cloud ASR or PC dictation; recognised text is confirmed on the keyboard before it is sent; optional chat mode with a cloud agent |
+| Provisioning | Pairing window opened on the keyboard, Wi-Fi and device licence written over USB, Tuya app activation |
+| Update | Local OTA over USB: signed package, version only goes up, confirmed on the keyboard |
+| Settings | Volume, brightness, language, voice mode, LED power; language, voice mode and LED power survive a reboot (KV storage) |
 
-### Variant matrix (planned)
+The shared code lives in `common/` (one `ak_*` module per area) and
+`src/tuya_app_main.c` wires it together. Host unit tests are in `test/`,
+build and signing tools in `tools/`.
 
-| Profile | Transport | Board cloud ASR | Phase |
-|---------|-----------|-----------------|-------|
-| v1 (current) | UART0 (`AK_TRANSPORT_UART`) | off (PC-side Windows ASR) | 1 |
-| v2 | BLE GATT (`AK_TRANSPORT_BLE_GATT`) | off | 2 |
-| +cloud-asr | any | on (`AK_ASR_BOARD_CLOUD`) | 1–2 |
-| v3 | BLE HID (`AK_TRANSPORT_BLE_HID`, no JSONL) | — | 3 |
+## Build profiles
 
-Exactly one `AK_TRANSPORT_*` is enabled per build (guarded in `ak_features.h`).
+One app, five TuyaOpen profiles in `config/`. `app_default.config` is a copy
+of `TUYA_T5AI_CORE_dual_cloudasr.config`.
 
-`TUYA_T5AI_CORE_dual_cloudasr_debug.config` is the development twin of
-`TUYA_T5AI_CORE_dual_cloudasr.config`: it adds `CONFIG_AK_LICENSE_DEBUG_READ=y`
-(UART0 `license_read`, Credentials page "Source" row) and the compile-time
-UUID/AuthKey fallback from the gitignored `include/ak_tuya_authkey.h`. Release
-profiles have neither and build without that header; a board without a
-flashed License stays offline until one is written in the pairing window.
-The BLE GATT profiles advertise as `Agentic Keyboard-XXXXXX`, where `XXXXXX`
-is derived from the device address so multiple nearby keyboards can be told
-apart. The shared core (input scan, event FSM, protocol, display) is written
-once and reused across all profiles.
+| Profile | Links | Board cloud ASR | Use |
+|---|---|---|---|
+| `TUYA_T5AI_CORE.config` | USB serial | off | minimal wired build |
+| `TUYA_T5AI_CORE_ble.config` | BLE GATT only | off | wireless-only test build; cannot pair (pairing needs USB) unless a key is already stored |
+| `TUYA_T5AI_CORE_dual.config` | USB + BLE | off | dual link without cloud |
+| `TUYA_T5AI_CORE_dual_cloudasr.config` | USB + BLE | on | **release profile** |
+| `TUYA_T5AI_CORE_dual_cloudasr_debug.config` | USB + BLE | on | development only: adds UART licence readout, the OTA test key and debug probes; never shipped |
 
-## Firmware version
+The BLE profiles advertise as `Agentic Keyboard-XXXXXX`, where `XXXXXX` comes
+from the device address, so several keyboards nearby can be told apart.
 
-`VERSION` is the single source of truth. The version command synchronizes it
-with every TuyaOpen profile so the runtime `hello_ack`, cloud software version,
-and generated BIN/dist names stay aligned.
-
-```bash
-cd firmware/app
-python3 tools/version.py show          # current version
-python3 tools/version.py bump          # automatic patch bump: 0.1.0 -> 0.1.1
-python3 tools/version.py bump minor    # 0.1.1 -> 0.2.0
-python3 tools/version.py bump major    # 0.2.0 -> 1.0.0
-python3 tools/version.py set 0.3.0     # manually set an exact version
-python3 tools/version.py check         # CI/build consistency check
-```
-
-Patch versions increase automatically when a commit contains staged
-`firmware/app` implementation changes. The pre-commit hook synchronizes and
-stages `VERSION` plus every TuyaOpen profile in the same commit. Re-running a
-failed commit does not bump again, and an explicit `set`/`bump minor`/`bump
-major` is preserved rather than receiving an extra patch increment. Builds do
-not change the version, so repeated builds of one commit remain reproducible.
-
-Enable the tracked hook once per clone (this checkout is configured already):
-
-```bash
-git config core.hooksPath .githooks
-```
+Release profiles contain no device credentials. The device licence
+(UUID / AuthKey) is written over USB inside the pairing window and stored on
+the device. Only the debug profile can fall back to a gitignored
+`include/ak_tuya_authkey.h` (copy `ak_tuya_authkey.h.example`).
 
 ## Tuya product ID (PID)
 
-Board-side cloud ASR needs your own Tuya product ID. The repository ships with
-an empty PID (`CONFIG_TUYA_PRODUCT_ID=""`); without it the firmware runs, but
-the cloud features stay off. Create a product on the Tuya IoT platform, then set
-the PID with `tos.py config menu` or by editing `CONFIG_TUYA_PRODUCT_ID` in
-`app_default.config` / `config/<profile>.config`, and run `tos.py clean -f`
-before building. Do not commit your PID or any device UUID/AuthKey.
+Board-side cloud ASR needs a Tuya product ID. Set it with `tos.py config menu`
+or by editing `CONFIG_TUYA_PRODUCT_ID` in `app_default.config` /
+`config/<profile>.config`, then run `tos.py clean -f` before building. Without
+a PID the firmware still runs, but the cloud features stay off. Do not commit
+a PID, UUID or AuthKey.
 
-## Build (cloud host)
+## Build
 
 ```bash
 source <TuyaOpen>/export.sh
 cd firmware/app
-tos.py config choice -c TUYA_T5AI_CORE.config
-tos.py clean -f && tos.py build      # clean needed after any .config change
+tos.py config choice -c TUYA_T5AI_CORE_dual_cloudasr.config
+tos.py clean -f && tos.py build      # clean is required after any .config change
 ```
 
-Artifacts: `dist/<version>/*_QIO_*.bin` (flashed on the board) / `*_UG_*.bin`
-(OTA). Build on the cloud host; flash from your local machine with a serial flash tool (tyutool).
+Output in `dist/app_<version>/`:
 
-> `app_default.config` and `config/TUYA_T5AI_CORE.config` are kept identical for
-> the current single profile (same convention as `firmware/bringup/`). When more
-> profiles are added, each lives under `config/<variant>.config` and is selected
-> with `tos.py config choice -c <variant>.config`.
+- `app_QIO_<version>.bin`: full image, flashed over USB.
+- `app_UG_<version>.bin`: upgrade image, the input for an OTA package.
 
-## Host unit tests (no board)
+A release build sets `AK_RELEASE_BUILD=1`. It refuses debug profiles and the
+placeholder OTA release key; see [`docs/ota.md`](../../docs/ota.md).
 
-Pure modules (`ak_input_fsm`, `ak_protocol`) are unit-tested on the host:
+## Flash
+
+Connect the T5AI-Core USB port and flash the QIO image with `tos.py flash`
+(TuyaOpen) or with tyutool on the host PC. Close the Companion first; it holds
+the serial port. Once a keyboard runs a firmware with OTA support, later
+versions can be installed from the Companion with a signed `.akota` package.
+
+## Version number
+
+`VERSION` holds the firmware version (for example `0.3.66`).
+`tools/version.py` keeps it in sync with `CONFIG_PROJECT_VERSION` in every
+profile, so `hello_ack`, the cloud software version and the output file names
+agree.
 
 ```bash
-firmware/app/test/run_host_tests.sh   # gcc-compiles + runs; needs no SDK/board
+cd firmware/app
+python3 tools/version.py show          # current version
+python3 tools/version.py bump          # patch: 0.3.66 -> 0.3.67
+python3 tools/version.py bump minor    # 0.3.67 -> 0.4.0
+python3 tools/version.py set 0.3.70    # exact version
+python3 tools/version.py check         # VERSION and profiles agree
 ```
 
-Covers debounce, single-DOWN, one-shot LONG at the 800 ms threshold, bounce
-rejection, and exact JSONL frame strings.
+A commit that stages changes under `firmware/app` bumps the patch version
+automatically (pre-commit hook in `.githooks/`; enable it once per clone with
+`git config core.hooksPath .githooks`). Building never changes the version.
+The numbering scheme is in [`docs/versioning.md`](../../docs/versioning.md).
 
-## Status
+## Host unit tests
 
-- **Task 3 (M1)** — skeleton: v1.2 board config + UART0 `hello_ack` + 2 s `ping`
-  heartbeat (JSONL protocol v1). cloud build ✅ / clang-format ✅ / check_pins ✅.
-- **Task 4** — input scan: 5 keys + 5-way nav with 20 ms debounce + 800 ms
-  long-press; logic in the pure host-tested `ak_input_fsm`; emits `key`/`nav`
-  events. cloud build ✅ / host tests ✅.
-- **Task 5** — protocol v1 complete: pure `ak_protocol` frame builders
-  (key/nav/voice/hello_ack/ping/pong/ack) + pure `ak_rx` line assembler & field
-  extractors. App RX loop replies `hello`→`hello_ack`, `ping`→`pong`,
-  `config`→`ack`, logs `display` (LCD render pending Task 9), ignores unknown
-  types. cloud build ✅ / host tests ✅ / clang-format ✅.
+```bash
+firmware/app/test/run_host_tests.sh
+```
 
-- **Task 9 (partial)** — LCD bring-up: `ak_display` registers the ST7789 on the
-  v1.2 wiring (SPI0 + DC/RST, backlight P8) with the CL28CK230 INVOFF init
-  sequence validated in bring-up, opens via TDL, sets backlight and draws a
-  colour-bar test pattern. `CONFIG_ENABLE_SPI`/`ENABLE_DISPLAY` on; LVGL not yet
-  needed. cloud build ✅. The LVGL 3-zone product UI is deferred until the
-  interaction design is finalised and the v1.2 board is in hand.
-
-Awaiting the v1.2 board to smoke-test on hardware (keys/nav/UART RX/TX on the
-v1.0 board now; WS2812=P4, LCD_BL=P8, and the colour-bar/INVOFF check need v1.2).
-
-Next: Companion port from `ref_projects/ki-board/` (transport + protocol v1 +
-injection); then LVGL UI + Task 10 once the interaction design lands.
+Compiles the pure modules (input state machine, gestures, protocol, receive
+validation, menus, OTA checks and more) with the host gcc and runs them; no
+board needed. Set `TUYAOPEN_ROOT` if the SDK is not at the default location.

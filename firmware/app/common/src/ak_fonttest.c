@@ -14,10 +14,14 @@
 #include "ak_gfx.h"
 #include "ak_i18n.h"
 #include "ak_statuslcd.h"
+#include "ak_text.h"
 
 #define FT_TITLE_H 22U
 #define FT_BODY_Y  26U
-#define FT_FOOT_Y  207U
+/* Same footer as the other pages: a rule, then two text rows. */
+#define FT_FOOT_Y  ak_text_pick(207U, 204U)
+#define FT_HINT1_Y ak_text_pick(211U, 209U)
+#define FT_HINT2_Y 225U
 #define FT_MARGIN  4U
 
 unsigned ak_fonttest_count(void)
@@ -106,7 +110,7 @@ void ak_fonttest_draw(int idx)
     ak_gfx_fill_rect(0U, FT_FOOT_Y, AK_STATUSLCD_W, (uint16_t)(AK_STATUSLCD_H - FT_FOOT_Y), AK_COL_BLACK);
     ak_gfx_fill_rect(0U, FT_FOOT_Y, AK_STATUSLCD_W, 1U, AK_COL_PURPLE);
     (void)snprintf(foot, sizeof(foot), "%u/%u %s", ak_fonttest_norm(idx) + 1U, (unsigned)AK_FONT_TEST_COUNT, font->name);
-    ak_gfx_text_thin(4U, 211U, foot, AK_COL_CYAN, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(4U, 225U, ak_tr(AK_STR_FONT_HINT), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, FT_HINT1_Y, foot, AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, FT_HINT2_Y, ak_tr(AK_STR_FONT_HINT), AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
 }

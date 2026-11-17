@@ -45,6 +45,7 @@ typedef struct {
     bool          menu_waiting; /* a menu arrived and is not on screen yet */
     bool          menu_model;   /* ... that menu is a model / mode menu */
     bool          dictating;    /* ②/③ answer the open menu's voice item */
+    bool          pc_wait;      /* ② after the voice key: waiting for the PC ASR text */
     uint32_t      confirm_ms;   /* ③ entered at */
 } ak_ui_t;
 
@@ -81,8 +82,13 @@ bool ak_ui_voice_start(ak_ui_t *ui);
 /** Voice input finished. `chat` = Chat voice mode (no input confirm). */
 void ak_ui_voice_end(ak_ui_t *ui, ak_ui_voice_t result, bool chat, uint32_t now_ms);
 
-/** Companion `input_restore` (a direct send failed): ① -> ③ again with the
- *  returned text. Refused (false) in any other state. */
+/** System route, voice key released, and the Companion said it returns
+ *  the PC ASR text (`hello` `pc_asr`): stay in ② until `input_restore`.
+ *  True when now waiting (② and not a dictated answer). */
+bool ak_ui_pc_wait(ak_ui_t *ui);
+
+/** Companion `input_restore`: ① -> ③ (a direct send failed), or ② -> ③
+ *  while waiting for the PC ASR text. Refused (false) in any other state. */
 bool ak_ui_input_restore(ak_ui_t *ui, uint32_t now_ms);
 
 /** Delete the last UTF-8 character of `s` in place (K4 in ③). True when one

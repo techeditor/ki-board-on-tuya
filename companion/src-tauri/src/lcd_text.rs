@@ -15,6 +15,11 @@ pub fn set_board_language(language: Option<&str>) {
     BOARD_ZH.store(language == Some("zh"), Ordering::Relaxed);
 }
 
+/// Whether the board reported Chinese.
+pub fn board_zh() -> bool {
+    BOARD_ZH.load(Ordering::Relaxed)
+}
+
 /// `en` in the board's language.
 pub fn lcd(en: &'static str) -> &'static str {
     tr(en, BOARD_ZH.load(Ordering::Relaxed))
@@ -62,6 +67,27 @@ pub fn tr(en: &'static str, zh: bool) -> &'static str {
         "Model: " => "模型：",
         " (next turn)" => "（下一轮）",
         "Failed: " => "失败：",
+        "Crew identity check failed" => "Crew 身份校验失败",
+        "PC ASR: Doubao" => "电脑识别:豆包",
+        "PC ASR: Aliyun" => "电脑识别:阿里云",
+        "PC ASR: local" => "电脑识别:本地",
+        "Cloud failed, used local" => "云端失败,已用本地识别",
+        "PC ASR: no API key" => "电脑识别:没有 Key",
+        "PC ASR: key refused" => "电脑识别:Key 无效",
+        "PC ASR: network error" => "电脑识别:网络错误",
+        "PC ASR failed" => "电脑识别失败",
+        "PC ASR timed out" => "电脑识别超时",
+        "Local model missing" => "本地模型未下载",
+        "Microphone error" => "电脑麦克风错误",
+        "Didn't catch that" => "没听清",
+        "Bind" => "绑定",
+        "This computer" => "本机",
+        "Unbind" => "解除绑定",
+        "Bound" => "已绑定",
+        "Unbound" => "已解除绑定",
+        "Session list unavailable" => "无法获取会话列表",
+        "Binding not saved" => "绑定未保存",
+        "Remote chat: status only" => "远端会话：仅显示状态",
         _ => en,
     }
 }
@@ -80,13 +106,34 @@ mod tests {
 
     #[test]
     fn chinese_texts_fit_the_wire_limits() {
-        for en in ["Approve once", "Reject once", "Dictate answer", "Normal", "Reads", "Trust", "Auto"] {
+        for en in ["Approve once", "Reject once", "Dictate answer", "Normal", "Reads", "Trust", "Auto", "This computer", "Unbind"] {
             assert!(tr(en, true).len() <= LABEL_MAX, "{en}");
         }
         for en in ["Done", "Expired", "Invalid", "Failed", "Model: next turn", "Mode: Reads", "Approved"] {
             assert!(tr(en, true).len() <= CLOSE_MSG_MAX, "{en}");
         }
-        for en in ["Crew window not in front", "Model list unavailable", "Select a chat first"] {
+        for en in ["Crew window not in front", "Model list unavailable", "Select a chat first", "Crew identity check failed",
+                   "Session list unavailable", "Binding not saved", "Remote chat: status only", "Bound", "Unbound"] {
+            assert!(tr(en, true).len() <= NOTICE_MAX, "{en}");
+        }
+    }
+
+    #[test]
+    fn pc_asr_texts_are_translated_and_fit_a_notice() {
+        let errors = [
+            crate::stream_asr::AsrErrorKind::NoKey,
+            crate::stream_asr::AsrErrorKind::Auth,
+            crate::stream_asr::AsrErrorKind::Network,
+            crate::stream_asr::AsrErrorKind::Server,
+            crate::stream_asr::AsrErrorKind::Timeout,
+            crate::stream_asr::AsrErrorKind::NotInstalled,
+            crate::stream_asr::AsrErrorKind::Audio,
+        ]
+        .map(|k| crate::stream_asr::AsrError::new(k, "").short());
+        let labels = ["PC ASR: Doubao", "PC ASR: Aliyun", "PC ASR: local", "Cloud failed, used local", "Microphone error", "Didn't catch that"];
+        for en in errors.iter().chain(labels.iter()) {
+            assert!(en.len() <= NOTICE_MAX, "{en}");
+            assert_ne!(tr(en, true), *en, "{en} has no Chinese text");
             assert!(tr(en, true).len() <= NOTICE_MAX, "{en}");
         }
     }

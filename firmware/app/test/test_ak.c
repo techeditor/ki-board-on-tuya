@@ -19,6 +19,7 @@
 #include "ak_keymap.h"
 #include "ak_menu.h"
 #include "ak_ui.h"
+#include "ak_bind.h"
 #include "ak_ble_sec.h"
 #include "ak_byte_ring.h"
 #include "mbedtls/base64.h"
@@ -35,6 +36,8 @@
 #include "ak_settings.h"
 #include "ak_validate.h"
 #include "ak_window_marker.h"
+#include "ak_wifi_store.h"
+#include "ak_combo.h"
 #include "ak_voice_mode.h"
 #include "ak_voice_route.h"
 
@@ -146,7 +149,7 @@ static void test_debounce_bounce(void)
 static void test_protocol(void)
 {
     printf("test_protocol\n");
-    char buf[192];
+    char buf[384]; /* SYSTEM_INFO_FRAME_BUFFER_SIZE: device_settings_state needs more than 192 */
 
     ak_proto_key(buf, sizeof(buf), 7, "k1", "down", 0);
     CHECK_STR(buf,
@@ -297,11 +300,32 @@ static void test_protocol(void)
                   "system_info frame");
     }
 
-    ak_proto_device_settings(buf, sizeof(buf), 15, 70, 90, "auto", 60U, "zh");
+    {
+        ak_proto_settings_t st = {70, 90, "auto", 60U, "zh", "chat", 16U, true, false};
+        ak_proto_device_settings(buf, sizeof(buf), 15, &st);
+    }
     CHECK_STR(buf,
               "{\"v\":1,\"seq\":15,\"type\":\"device_settings_state\",\"payload\":{\"volume\":70,\"brightness\":90,"
-              "\"led_power\":\"auto\",\"led_auto_off_s\":60,\"language\":\"zh\"}}\n",
+              "\"led_power\":\"auto\",\"led_auto_off_s\":60,\"language\":\"zh\",\"voice_mode\":\"chat\","
+              "\"font_size\":16,\"license\":\"present\",\"ble_paired\":false}}\n",
               "device settings frame");
+    {
+        ak_led_mode_t m = AK_LED_MODE_AUTO;
+        uint8_t       idx = 9U;
+        CHECK(ak_led_mode_from_wire("off", &m) && m == AK_LED_MODE_OFF && ak_led_mode_from_wire("on", &m) &&
+                  m == AK_LED_MODE_ON && !ak_led_mode_from_wire("Auto", &m) && m == AK_LED_MODE_ON,
+              "led_power from wire");
+        CHECK(ak_led_policy_timeout_from_s(30U, &idx) && ak_led_policy_timeout_ms(idx) == 30000U &&
+                  ak_led_policy_timeout_from_s(900U, &idx) && ak_led_policy_timeout_ms(idx) == 900000U,
+              "led_auto_off_s accepts the offered delays");
+        idx = 7U;
+        CHECK(!ak_led_policy_timeout_from_s(45U, &idx) && !ak_led_policy_timeout_from_s(0U, &idx) && idx == 7U,
+              "led_auto_off_s rejects other delays");
+        ak_voice_mode_t v = AK_VOICE_MODE_ASR;
+        CHECK(ak_voice_mode_from_wire("chat", &v) && v == AK_VOICE_MODE_CHAT && ak_voice_mode_from_wire("asr", &v) &&
+                  v == AK_VOICE_MODE_ASR && !ak_voice_mode_from_wire("yolo", &v),
+              "voice_mode from wire");
+    }
     CHECK(strcmp(ak_led_mode_wire_str(AK_LED_MODE_OFF), "off") == 0 &&
               strcmp(ak_led_mode_wire_str(AK_LED_MODE_ON), "on") == 0 &&
               strcmp(ak_led_mode_wire_str(AK_LED_MODE_AUTO), "auto") == 0,
@@ -322,10 +346,12 @@ static void test_protocol(void)
     ak_proto_hello_ack_caps(buf, sizeof(buf), "0.1.0", "dual", true);
     CHECK_STR(buf,
               "{\"v\":1,\"type\":\"hello_ack\",\"payload\":{\"fw\":\"0.1.0\",\"transport\":\"dual\","
-              "\"capabilities\":[\"dual\",\"keymap\",\"voice_state\",\"device_settings\",\"system_info\",\"menu\"]}}\n",
+              "\"capabilities\":[\"dual\",\"keymap\",\"voice_state\",\"device_settings\",\"system_info\",\"menu\",\"pc_asr_wait\",\"bind_session\"]}}\n",
               "hello_ack advertises menu");
     ak_proto_hello_ack_caps(buf, sizeof(buf), "0.1.0", "ble_gatt", true);
-    CHECK(strstr(buf, "\"menu\"]") != NULL, "menu capability on BLE too");
+    CHECK(strstr(buf, "\"menu\",\"pc_asr_wait\",\"bind_session\"]") != NULL, "menu capability on BLE too");
+    ak_proto_bind_session(buf, sizeof(buf), 9, 2);
+    CHECK_STR(buf, "{\"v\":1,\"seq\":9,\"type\":\"bind_session\",\"payload\":{\"slot\":2}}\n", "bind_session frame");
 
     {
         const uint8_t sel[] = {0, 2, 47};
@@ -517,6 +543,11 @@ static void test_rx_attacks(void)
     }
     CHECK(ak_rx_source_allows("keymap", AK_RX_SRC_BLE) && ak_rx_source_allows("ping", AK_RX_SRC_BLE),
           "non-sensitive commands allowed from BLE");
+    CHECK(!ak_rx_source_allows("prov_open", AK_RX_SRC_BLE) && !ak_rx_source_allows("ble_unpair", AK_RX_SRC_BLE) &&
+              ak_rx_source_allows("prov_open", AK_RX_SRC_UART) && ak_rx_source_allows("ble_unpair", AK_RX_SRC_UART) &&
+              !ak_rx_type_is_sensitive("prov_open") && !ak_rx_type_is_sensitive("ble_unpair"),
+          "prov_open / ble_unpair: USB only, not tied to the pairing window");
+    CHECK(ak_rx_source_allows("device_settings", AK_RX_SRC_BLE), "device_settings (normal items) allowed from BLE");
 
     /* FW-06: nested "type" before the top-level one must not win. */
     CHECK(ak_rx_parse_frame("{\"v\":1,\"payload\":{\"type\":\"wifi\"},\"type\":\"ping\"}", &f) &&
@@ -1070,6 +1101,22 @@ static void test_provision(void)
     ak_provision_reset_request(&p, t);
     ak_provision_close(&p);
     CHECK(!ak_provision_reset_resolve(&p, true, t + 1U), "closing the window drops a pending reset");
+
+    /* FR-02 ble_unpair: device confirm, no window needed, one dialog at a time. */
+    ak_provision_init(&p);
+    CHECK(ak_provision_unpair_request(&p, t) && ak_provision_unpair_pending(&p, t + 1U),
+          "ble_unpair asks on the device even with the window closed");
+    CHECK(!ak_provision_unpair_request(&p, t + 1U), "a second request while one is up is refused");
+    CHECK(!ak_provision_unpair_resolve(&p, false, t + 2U) && !ak_provision_unpair_pending(&p, t + 2U),
+          "K1 cancels the unpair");
+    CHECK(ak_provision_unpair_request(&p, t) && ak_provision_unpair_resolve(&p, true, t + 3U), "K6 clears");
+    ak_provision_unpair_request(&p, t);
+    CHECK(ak_provision_tick(&p, t + AK_PROV_RESET_CONFIRM_MS) &&
+              !ak_provision_unpair_resolve(&p, true, t + AK_PROV_RESET_CONFIRM_MS),
+          "unanswered unpair dialog expires; a late K6 does nothing");
+    ak_provision_request(&p, t);
+    CHECK(!ak_provision_unpair_request(&p, t + 1U), "no unpair dialog over the pairing confirm");
+    ak_provision_init(&p);
 
     CHECK(strcmp(ak_provision_state_str(AK_PROV_OPEN), "open") == 0 &&
               strcmp(ak_provision_verdict_str(AK_PROV_DENY_CLOSED), "closed") == 0,
@@ -1654,7 +1701,45 @@ static void test_settings(void)
               !settings.editing,
           "click commits the language");
 
+    /* Font size row: 12 px <-> 16 px, applied by the app on commit. */
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_FONT_SIZE && settings.font_size == (uint8_t)AK_TEXT_SIZE_12,
+          "font size row follows the language and defaults to 12 px");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_ENTER_EDIT,
+          "click edits the font size");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN) == AK_SETTINGS_RESULT_CHANGED &&
+              settings.font_size == (uint8_t)AK_TEXT_SIZE_16,
+          "rotate selects 16 px");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN) == AK_SETTINGS_RESULT_CHANGED &&
+              settings.font_size == (uint8_t)AK_TEXT_SIZE_12,
+          "and wraps back to 12 px");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_UP) == AK_SETTINGS_RESULT_CHANGED &&
+              settings.font_size == (uint8_t)AK_TEXT_SIZE_16,
+          "the other direction wraps too");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_CONFIRMED &&
+              !settings.editing && settings.font_size == (uint8_t)AK_TEXT_SIZE_16,
+          "click commits the font size");
+
+    /* Fourteen items, ten rows: the list scrolls only to keep the selection visible. */
+    CHECK(ak_settings_first_row(AK_SETTINGS_ITEM_VOLUME, 10U) == 0U &&
+              ak_settings_first_row(AK_SETTINGS_ITEM_CREDENTIALS, 10U) == 0U &&
+              ak_settings_first_row(AK_SETTINGS_ITEM_PAIRING, 10U) == 1U &&
+              ak_settings_first_row(AK_SETTINGS_ITEM_TEST, 10U) == 3U &&
+              ak_settings_first_row(AK_SETTINGS_ITEM_EXIT, 10U) == 4U &&
+              ak_settings_first_row(AK_SETTINGS_ITEM_EXIT, 20U) == 0U && ak_settings_first_row(5U, 0U) == 0U,
+          "settings list scroll window");
+
     /* Action items execute directly on a single click (no edit mode). */
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_BIND_SESSION, "rotate selects bind session");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_BIND_SESSION &&
+              !settings.editing,
+          "click on bind session opens the slot page");
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_WIFI, "rotate selects saved Wi-Fi");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_WIFI &&
+              !settings.editing,
+          "click on saved Wi-Fi opens the list page");
     ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
     CHECK(settings.selected == AK_SETTINGS_ITEM_CREDENTIALS, "rotate selects credentials");
     CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_CREDENTIALS &&
@@ -1665,6 +1750,11 @@ static void test_settings(void)
     CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) ==
               AK_SETTINGS_RESULT_PAIRING && !settings.editing,
           "click on pairing mode asks the app to open the confirm dialog");
+    ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
+    CHECK(settings.selected == AK_SETTINGS_ITEM_REBIND, "rotate selects unbind & re-pair");
+    CHECK(ak_settings_handle(&settings, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_REBIND &&
+              !settings.editing,
+          "click on unbind & re-pair asks the app");
 
     ak_settings_handle(&settings, AK_SETTINGS_ACTION_DOWN);
     CHECK(settings.selected == AK_SETTINGS_ITEM_TEST, "rotate selects test");
@@ -2517,6 +2607,33 @@ static void test_ui_states(void)
           "input_restore re-enters confirm from standby");
     CHECK(!ak_ui_input_restore(&ui, 7100U) && ui.confirm_ms == 7000U, "input_restore refused outside standby");
     ak_ui_voice_abort(&ui);
+
+    /* PC ASR: after the voice key the keyboard waits in ② for the text. */
+    CHECK(!ak_ui_pc_wait(&ui) && !ui.pc_wait, "no PC wait outside voice input");
+    ak_ui_voice_start(&ui);
+    CHECK(!ak_ui_input_restore(&ui, 7200U), "input_restore refused in ② without a PC wait");
+    CHECK(ak_ui_pc_wait(&ui) && ak_ui_state(&ui) == AK_UI_VOICE, "voice key up -> ② waits for the PC text");
+    CHECK(ak_ui_input_restore(&ui, 7300U) && ak_ui_state(&ui) == AK_UI_CONFIRM && !ui.pc_wait &&
+              ui.confirm_ms == 7300U,
+          "PC text: ② -> ③");
+    CHECK(ak_ui_voice_start(&ui) && ak_ui_pc_wait(&ui), "speak again from ③, wait again");
+    CHECK(ak_ui_voice_start(&ui) && !ui.pc_wait && ak_ui_state(&ui) == AK_UI_VOICE,
+          "voice key during the wait starts a new utterance");
+    ak_ui_pc_wait(&ui);
+    ak_ui_voice_end(&ui, AK_UI_VOICE_ERROR, false, 0U);
+    CHECK(ak_ui_state(&ui) == AK_UI_STANDBY && !ui.pc_wait, "PC timeout / nothing recognised -> standby");
+    ak_ui_voice_start(&ui);
+    ak_ui_pc_wait(&ui);
+    ak_ui_voice_abort(&ui);
+    CHECK(ak_ui_state(&ui) == AK_UI_STANDBY && !ui.pc_wait, "K1 cancels the PC wait");
+    ak_ui_voice_start(&ui);
+    ak_ui_pc_wait(&ui);
+    ak_ui_menu_arrived(&ui, false);
+    CHECK(ak_ui_state(&ui) == AK_UI_VOICE && ui.menu_waiting, "a menu waits behind the PC wait");
+    CHECK(ak_ui_input_restore(&ui, 0U) && ak_ui_state(&ui) == AK_UI_CONFIRM, "PC text still lands while a menu waits");
+    ak_ui_confirm_done(&ui);
+    CHECK(ak_ui_state(&ui) == AK_UI_MENU, "the menu shows after ③");
+    ak_ui_menu_gone(&ui);
     {
         char t[16] = "ab\xE4\xBD\xA0"; /* "ab" + U+4F60 */
         CHECK(ak_utf8_pop_last(t) && strcmp(t, "ab") == 0, "pop removes a whole 3-byte character");
@@ -2681,21 +2798,43 @@ static void test_i18n(void)
             missing++;
         }
         if (ak_text_is_wide(en, strlen(en))) {
-            not_ascii_en++; /* English keeps the 8x8 look */
+            not_ascii_en++; /* English strings are plain ASCII */
         }
-        /* Every character must be a real glyph of the UI font, not the box. */
-        const char *p = zh;
-        uint32_t    cp;
-        while ((cp = ak_utf8_next(&p)) != 0U) {
-            int idx = ak_font_find(&ak_font_ui, cp);
-            if (idx < 0 || ak_font_ui.codes[idx] != cp) {
-                printf("  string %d: U+%04X not in ak_font_ui (run tools/gen_font_ui.py)\n", id, (unsigned)cp);
-                missing++;
+        /* Every character must be a real glyph of both UI fonts, not the box. */
+        const ak_font_t *fonts[] = {&ak_font_ui12, &ak_font_ui16};
+        for (size_t f = 0U; f < sizeof(fonts) / sizeof(fonts[0]); f++) {
+            const char *p = zh;
+            uint32_t    cp;
+            while ((cp = ak_utf8_next(&p)) != 0U) {
+                int idx = ak_font_find(fonts[f], cp);
+                if (idx < 0 || fonts[f]->codes[idx] != cp) {
+                    printf("  string %d: U+%04X not in %s (run tools/gen_font_ui.py)\n", id, (unsigned)cp,
+                           fonts[f]->name);
+                    missing++;
+                }
             }
         }
     }
     CHECK(missing == 0, "every string has both languages and all its glyphs");
     CHECK(not_ascii_en == 0, "English strings are ASCII");
+    /* At every font size no string may run past the 320 px panel when drawn
+     * from the 4 px page margin (the widest hint lines start there). */
+    int too_wide = 0;
+    for (int size = 0; size < (int)AK_TEXT_SIZE_COUNT; size++) {
+        ak_text_size_set((ak_text_size_t)size);
+        for (int id = 0; id < (int)AK_STR_COUNT; id++) {
+            for (int lang = 0; lang < (int)AK_LANG_COUNT; lang++) {
+                const char *s = ak_tr_lang((ak_str_id_t)id, (ak_lang_t)lang);
+                if (ak_text_width(s) > 316U) {
+                    printf("  %u px: string %d (%s) is %u px wide\n", (unsigned)ak_text_size_px((ak_text_size_t)size),
+                           id, lang == AK_LANG_ZH ? "zh" : "en", (unsigned)ak_text_width(s));
+                    too_wide++;
+                }
+            }
+        }
+    }
+    ak_text_size_set(AK_TEXT_SIZE_DEFAULT);
+    CHECK(too_wide == 0, "every string fits the panel width from x=4 at 12 and 16 px");
     /* Strings used as printf formats must take the same arguments in both. */
     int fmt_mismatch = 0;
     for (int id = 0; id < (int)AK_STR_COUNT; id++) {
@@ -2740,6 +2879,28 @@ static void test_i18n(void)
           "unknown wire names rejected, out untouched");
     CHECK(strcmp(ak_lang_wire_str(AK_LANG_ZH), "zh") == 0 && strcmp(ak_lang_wire_str(AK_LANG_EN), "en") == 0,
           "wire names");
+
+    /* Boot with KV = en: the language is restored before the settings model
+     * is created; the Settings row must show English, and opening and
+     * confirming it without a rotation must keep English (real-board bug). */
+    {
+        uint8_t             kv = ak_lang_to_byte(AK_LANG_EN);
+        ak_lang_t           boot = AK_LANG_ZH;
+        ak_settings_model_t st;
+        CHECK(ak_lang_from_blob(&kv, 1U, &boot), "KV en parses");
+        ak_lang_set(boot);
+        ak_settings_init(&st);
+        CHECK(st.lang == (uint8_t)AK_LANG_EN && strcmp(ak_lang_name((ak_lang_t)st.lang), "English") == 0,
+              "after boot with KV=en the Settings language row shows English");
+        while (st.selected != AK_SETTINGS_ITEM_LANGUAGE) {
+            ak_settings_handle(&st, AK_SETTINGS_ACTION_DOWN);
+        }
+        CHECK(ak_settings_handle(&st, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_ENTER_EDIT &&
+                  ak_settings_handle(&st, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_CONFIRMED &&
+                  st.lang == (uint8_t)AK_LANG_EN,
+              "confirming the language row without rotating keeps English");
+        ak_lang_set(AK_LANG_ZH);
+    }
     uint8_t b = ak_lang_to_byte(AK_LANG_EN);
     CHECK(ak_lang_from_blob(&b, 1U, &l) && l == AK_LANG_EN, "KV blob round trip");
     b = 2U;
@@ -2749,19 +2910,98 @@ static void test_i18n(void)
               strstr(ak_lang_agent_param(AK_LANG_ZH), "\"lang\":\"zh\"") != NULL,
           "agent custom.param JSON");
 
-    CHECK(ak_font_ui.px == 12U && ak_font_ui.bpp == 1U && ak_font_ui.count > 3800U, "UI font: 12 px 1bpp, >3800 glyphs");
-    int idx = ak_font_find(&ak_font_ui, 0x4E2DU); /* 中 */
-    CHECK(idx >= 0 && ak_font_ui.adv[idx] == 12U && ak_font_ui.adv[ak_font_find(&ak_font_ui, 'A')] == 6U,
-          "CJK 12 px, ASCII 6 px");
+    CHECK(ak_font_ui12.px == 12U && ak_font_ui12.bpp == 1U && ak_font_ui12.count > 3800U,
+          "12 px UI font: 1bpp, >3800 glyphs");
+    int idx = ak_font_find(&ak_font_ui12, 0x4E2DU); /* 中 */
+    CHECK(idx >= 0 && ak_font_ui12.adv[idx] == 12U && ak_font_ui12.adv[ak_font_find(&ak_font_ui12, 'A')] == 6U,
+          "12 px: CJK 12 px, ASCII 6 px");
+    CHECK(ak_font_ui16.px == 16U && ak_font_ui16.bpp == 1U && ak_font_ui16.count > 3600U,
+          "16 px UI font: 1bpp, >3600 glyphs");
+    idx = ak_font_find(&ak_font_ui16, 0x4E2DU);
+    CHECK(idx >= 0 && ak_font_ui16.adv[idx] == 16U && ak_font_ui16.adv[ak_font_find(&ak_font_ui16, 'A')] == 8U,
+          "16 px: CJK 16 px, ASCII 8 px");
+    CHECK(ak_font_ui16.adv[ak_font_find(&ak_font_ui16, 0x2026U)] == 8U, "halfwidth \"…\" keeps half a cell");
+    /* A character outside the set (here 龘, not in Tongyong level 1) falls back
+     * to the box glyph rather than drawing nothing. */
+    idx = ak_font_find(&ak_font_ui16, 0x9F98U);
+    CHECK(idx >= 0 && ak_font_ui16.codes[idx] == 0x7FU && ak_font_ui16.adv[idx] == 8U, "missing character -> box");
+    ak_text_size_set(AK_TEXT_SIZE_16);
+    CHECK(ak_text_width("\xE9\xBE\x98") == 8U, "the box is measured like it is drawn");
+    ak_text_size_set(AK_TEXT_SIZE_DEFAULT);
+}
+
+static void test_text_size(void)
+{
+    printf("test_text_size\n");
+    ak_text_size_t sz = AK_TEXT_SIZE_16;
+    CHECK(ak_text_size_get() == AK_TEXT_SIZE_12 && AK_TEXT_SIZE_DEFAULT == AK_TEXT_SIZE_12, "default size is 12 px");
+    CHECK(ak_text_font() == &ak_font_ui12 && ak_text_dy() == 2U && ak_text_line_h() == 12U, "12 px font and metrics");
+    CHECK(ak_text_pick(1U, 2U) == 1U, "12 px picks the 12 px layout");
+    CHECK(ak_text_size_from_px(12U, &sz) && sz == AK_TEXT_SIZE_12 && ak_text_size_from_px(16U, &sz) &&
+              sz == AK_TEXT_SIZE_16,
+          "wire / KV px -> size");
+    CHECK(!ak_text_size_from_px(14U, &sz) && !ak_text_size_from_px(0U, &sz) && !ak_text_size_from_px(16U, NULL),
+          "14 px (not offered yet) and other values are rejected");
+    CHECK(ak_text_size_px(AK_TEXT_SIZE_12) == 12U && ak_text_size_px(AK_TEXT_SIZE_16) == 16U, "size -> px");
+    CHECK(ak_text_size_next(AK_TEXT_SIZE_12, true) == AK_TEXT_SIZE_16 &&
+              ak_text_size_next(AK_TEXT_SIZE_16, true) == AK_TEXT_SIZE_12 &&
+              ak_text_size_next(AK_TEXT_SIZE_12, false) == AK_TEXT_SIZE_16,
+          "the Settings value wraps through the offered sizes");
+    ak_text_size_set(AK_TEXT_SIZE_16);
+    CHECK(ak_text_font() == &ak_font_ui16 && ak_text_dy() == 4U && ak_text_line_h() == 16U &&
+              ak_text_pick(1U, 2U) == 2U,
+          "16 px font and metrics");
+    {
+        /* The size is restored from KV before the settings model exists; the
+         * Font size row must start from it, or confirming it would revert. */
+        ak_settings_model_t m;
+        ak_settings_init(&m);
+        CHECK(m.font_size == (uint8_t)AK_TEXT_SIZE_16, "Settings starts from the restored font size");
+        /* KV = 16 at boot: open the row and confirm it without rotating. */
+        m.selected = AK_SETTINGS_ITEM_FONT_SIZE;
+        CHECK(ak_settings_handle(&m, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_ENTER_EDIT &&
+                  ak_settings_handle(&m, AK_SETTINGS_ACTION_CONFIRM) == AK_SETTINGS_RESULT_CONFIRMED &&
+                  m.font_size == (uint8_t)AK_TEXT_SIZE_16,
+              "confirming the Font size row without rotating keeps 16 px");
+    }
+    CHECK(ak_text_uses_font("abc", 3U), "16 px draws ASCII with the UI font too");
+    ak_text_size_set(AK_TEXT_SIZE_COUNT);
+    CHECK(ak_text_size_get() == AK_TEXT_SIZE_16, "an out-of-range size is ignored");
+    ak_text_size_set(AK_TEXT_SIZE_12);
+    CHECK(!ak_text_uses_font("abc", 3U) && ak_text_uses_font("中", 3U), "12 px: 8x8 for ASCII, UI font otherwise");
+}
+
+/* 12 px (default): 8x8 ASCII, Fusion Pixel 12 for anything else. */
+static void test_text_12(void)
+{
+    printf("test_text_12\n");
+    CHECK(ak_text_width("abc") == 24U, "ASCII uses the 8x8 advance");
+    CHECK(ak_text_width("中a") == 18U, "mixed text uses the UI font (12 + 6)");
+    CHECK(ak_text_width_n("中文", 4U) == 12U, "a sequence cut by n is not counted");
+    size_t n = ak_text_wrap("一二三四五六七八九十一二三四五六七八九十", 232U);
+    CHECK(n == 57U, "19 CJK characters per 232 px line");
+    n = ak_text_wrap("一二三四五六七八九十一二三四五六七八九，好", 232U);
+    CHECK(n == 54U, "\"，\" is not moved to the next line start");
+    n = ak_text_wrap("hello世界", 40U); /* hello=30 px, 世 would reach 42 */
+    CHECK(n == 5U, "break before a CJK character");
+    char label[] = "四个汉字";
+    label[ak_text_wrap(label, 60U)] = '\0';
+    CHECK(strcmp(label, "四个汉字") == 0, "the 60 px sidebar label holds 4 CJK characters");
 }
 
 static void test_text(void)
 {
-    printf("test_text\n");
-    CHECK(ak_text_width("abc") == 24U, "ASCII uses the 8x8 advance");
-    CHECK(ak_text_width("中a") == 18U, "mixed text uses the UI font (12 + 6)");
-    CHECK(ak_text_width_n("中文", 4U) == 12U, "a sequence cut by n is not counted");
+    printf("test_text (16 px)\n");
+    test_text_size();
+    test_text_12();
+    ak_text_size_set(AK_TEXT_SIZE_16);
+    CHECK(ak_text_width("abc") == 24U, "ASCII advance is 8 px");
+    CHECK(ak_text_width("中a") == 24U, "mixed text: 16 + 8");
+    CHECK(ak_text_width_n("中文", 4U) == 16U, "a sequence cut by n is not counted");
     CHECK(!ak_text_is_wide("Settings", 8U) && ak_text_is_wide("设置", 6U), "wide detection");
+    char label[] = "四个汉字";
+    label[ak_text_wrap(label, 60U)] = '\0';
+    CHECK(strcmp(label, "四个汉") == 0, "the 60 px sidebar label holds 3 CJK characters");
 
     /* 29 ASCII columns: break at the last space. */
     const char *en = "The quick brown fox jumps over the lazy dog";
@@ -2769,16 +3009,16 @@ static void test_text(void)
     CHECK(n == 26U && en[n - 1U] == ' ', "ASCII wraps after a space within 232 px");
     CHECK(ak_text_wrap("abcdefghijklmnopqrstuvwxyzABCDEFG", 232U) == 29U, "a long word is cut at 29 columns");
 
-    /* 20 CJK characters: 19 fit (228 px). */
+    /* 20 CJK characters: 14 fit (224 px). */
     const char *zh = "一二三四五六七八九十一二三四五六七八九十";
     n = ak_text_wrap(zh, 232U);
-    CHECK(n == 57U, "19 CJK characters per 232 px line");
+    CHECK(n == 42U, "14 CJK characters per 232 px line");
     /* A comma never starts a line: it stays with the character before it. */
-    const char *zh2 = "一二三四五六七八九十一二三四五六七八九，好";
+    const char *zh2 = "一二三四五六七八九十一二三四，好";
     n = ak_text_wrap(zh2, 232U);
-    CHECK(n == 54U, "\"，\" is not moved to the next line start");
+    CHECK(n == 39U, "\"，\" is not moved to the next line start");
     /* Mixed: English word then CJK breaks before the CJK character. */
-    n = ak_text_wrap("hello世界", 40U); /* hello=30 px, 世 would reach 42 */
+    n = ak_text_wrap("hello世界", 48U); /* hello=40 px, 世 would reach 56 */
     CHECK(n == 5U, "break before a CJK character");
     CHECK(ak_text_wrap("中", 4U) == 3U, "one character wider than the line still progresses");
     CHECK(ak_text_wrap("", 100U) == 0U, "empty text ends");
@@ -2793,6 +3033,337 @@ static void test_text(void)
     memcpy(buf, "a\xE4\xB8\xAD", 5U);
     ak_text_utf8_trim(buf);
     CHECK(strcmp(buf, "a\xE4\xB8\xAD") == 0, "trim keeps a whole one");
+    ak_text_size_set(AK_TEXT_SIZE_DEFAULT);
+}
+
+/* ── FR-15 remembered Wi-Fi networks ─────────────────────────────────────── */
+
+static void wifi_add(ak_wifi_store_t *s, const char *ssid, const char *pass)
+{
+    (void)ak_wifi_store_touch(s, ssid, pass, AK_WIFI_SEC_UNKNOWN, NULL);
+}
+
+static void test_wifi_store(void)
+{
+    printf("[wifi_store]\n");
+    ak_wifi_store_t s;
+    char            dropped[AK_WIFI_STORE_SSID_MAX + 1U];
+    char            name[16];
+    ak_wifi_store_init(&s);
+
+    /* add, then the same SSID updates in place (password, security, recency) */
+    CHECK(ak_wifi_store_touch(&s, "Home", "pass-one-1", 3U, NULL) == AK_WIFI_STORE_ADDED, "first add");
+    CHECK(ak_wifi_store_touch(&s, "Home", "pass-two-2", AK_WIFI_SEC_UNKNOWN, NULL) == AK_WIFI_STORE_UPDATED,
+          "same SSID updates");
+    CHECK(s.count == 1U, "no duplicate record");
+    CHECK_STR(s.rec[0].pass, "pass-two-2", "password updated");
+    CHECK(s.rec[0].sec == 3U, "unknown security keeps the known one");
+    CHECK(ak_wifi_store_touch(&s, "", "x", 0U, NULL) == AK_WIFI_STORE_INVALID, "empty SSID rejected");
+    CHECK(ak_wifi_store_touch(&s, "0123456789012345678901234567890123", "", 0U, NULL) == AK_WIFI_STORE_INVALID,
+          "33-byte SSID rejected");
+
+    /* LRU: fill to 10, reconnect to the oldest, then add an 11th */
+    for (unsigned i = 1U; i < AK_WIFI_STORE_MAX; i++) {
+        (void)snprintf(name, sizeof(name), "net%u", i);
+        wifi_add(&s, name, "password1");
+    }
+    CHECK(s.count == AK_WIFI_STORE_MAX, "list holds 10");
+    wifi_add(&s, "Home", "pass-two-2"); /* Home was the oldest; now the newest */
+    CHECK(ak_wifi_store_touch(&s, "extra", "password1", 3U, dropped) == AK_WIFI_STORE_REPLACED, "11th replaces");
+    CHECK_STR(dropped, "net1", "least recently connected (net1, not Home) is dropped");
+    CHECK(s.count == AK_WIFI_STORE_MAX, "still 10");
+    CHECK(ak_wifi_store_find(&s, "Home") >= 0, "recently reconnected Home survives");
+    CHECK(ak_wifi_store_find(&s, "net1") < 0, "net1 is gone");
+    uint8_t order[AK_WIFI_STORE_MAX];
+    CHECK(ak_wifi_store_by_recency(&s, order) == AK_WIFI_STORE_MAX, "recency lists all");
+    CHECK_STR(s.rec[order[0]].ssid, "extra", "newest first");
+    CHECK_STR(s.rec[order[1]].ssid, "Home", "then Home");
+
+    /* delete, and a deleted network is new when it connects again */
+    CHECK(ak_wifi_store_remove(&s, "net5"), "remove existing");
+    CHECK(!ak_wifi_store_remove(&s, "net5"), "remove missing");
+    CHECK(s.count == AK_WIFI_STORE_MAX - 1U, "count drops");
+    CHECK(ak_wifi_store_touch(&s, "net5", "password1", 3U, NULL) == AK_WIFI_STORE_ADDED, "re-add after delete");
+
+    /* blob round trip */
+    uint8_t blob[AK_WIFI_STORE_BLOB_MAX];
+    size_t  n = ak_wifi_store_serialize(&s, blob, sizeof(blob));
+    CHECK(n > 12U && n <= AK_WIFI_STORE_BLOB_MAX, "blob size within the bound");
+    ak_wifi_store_t back;
+    CHECK(ak_wifi_store_parse(&back, blob, n) == AK_WIFI_BLOB_OK, "parse ok");
+    CHECK(back.count == s.count && back.next_seq == s.next_seq, "round trip keeps count and sequence");
+    CHECK_STR(back.rec[3].ssid, s.rec[3].ssid, "round trip keeps SSIDs");
+    CHECK_STR(back.rec[3].pass, s.rec[3].pass, "round trip keeps passwords");
+    CHECK(ak_wifi_store_serialize(&s, blob, 20U) == 0U, "too small buffer");
+
+    /* corruption: every failure empties the list */
+    uint8_t bad[AK_WIFI_STORE_BLOB_MAX];
+    memcpy(bad, blob, n);
+    bad[20] ^= 0x01U;
+    CHECK(ak_wifi_store_parse(&back, bad, n) == AK_WIFI_BLOB_BAD_CRC, "flipped bit: CRC");
+    CHECK(back.count == 0U, "corrupt blob leaves an empty list");
+    CHECK(ak_wifi_store_parse(&back, blob, n - 1U) != AK_WIFI_BLOB_OK, "truncated blob");
+    memcpy(bad, blob, n);
+    bad[0] = 'X';
+    CHECK(ak_wifi_store_parse(&back, bad, n) == AK_WIFI_BLOB_BAD_FORMAT, "bad magic");
+    memcpy(bad, blob, n);
+    bad[2] = 2U; /* version 2 with a matching CRC is still refused */
+    {
+        /* recompute the trailing CRC through serialize of a v1 store is not possible;
+         * patch via a fresh blob whose CRC we recompute here */
+        uint32_t crc = 0xFFFFFFFFU;
+        for (size_t i = 0U; i < n - 4U; i++) {
+            crc ^= bad[i];
+            for (int b = 0; b < 8; b++) {
+                crc = (crc >> 1) ^ (0xEDB88320U & (0U - (crc & 1U)));
+            }
+        }
+        crc = ~crc;
+        bad[n - 4U] = (uint8_t)crc;
+        bad[n - 3U] = (uint8_t)(crc >> 8);
+        bad[n - 2U] = (uint8_t)(crc >> 16);
+        bad[n - 1U] = (uint8_t)(crc >> 24);
+    }
+    CHECK(ak_wifi_store_parse(&back, bad, n) == AK_WIFI_BLOB_BAD_VERSION, "unknown version");
+    CHECK(ak_wifi_store_parse(&back, NULL, 0U) == AK_WIFI_BLOB_BAD_FORMAT, "no blob");
+
+    /* migration: only into an empty list */
+    ak_wifi_store_t m;
+    ak_wifi_store_init(&m);
+    CHECK(ak_wifi_store_migrate_legacy(&m, "OldAP", "oldpass12"), "legacy config becomes record 1");
+    CHECK(m.count == 1U && strcmp(m.rec[0].ssid, "OldAP") == 0 && strcmp(m.rec[0].pass, "oldpass12") == 0,
+          "migrated record content");
+    CHECK(m.rec[0].sec == AK_WIFI_SEC_UNKNOWN, "migrated security unknown");
+    CHECK(!ak_wifi_store_migrate_legacy(&m, "Other", "x"), "no migration into a non-empty list");
+    ak_wifi_store_init(&m);
+    CHECK(!ak_wifi_store_migrate_legacy(&m, "", ""), "no legacy SSID, nothing to migrate");
+    CHECK(ak_wifi_store_migrate_legacy(&m, "OpenAP", NULL), "open network migrates");
+
+    /* reconnect order: strongest known network first, unknown SSIDs ignored */
+    ak_wifi_store_init(&s);
+    wifi_add(&s, "A", "password1");
+    wifi_add(&s, "B", "password1");
+    wifi_add(&s, "C", "password1");
+    wifi_add(&s, "D", "password1"); /* stored but not in range */
+    ak_wifi_scan_t scan[5];
+    memset(scan, 0, sizeof(scan));
+    (void)snprintf(scan[0].ssid, sizeof(scan[0].ssid), "C");
+    scan[0].rssi = -50;
+    (void)snprintf(scan[1].ssid, sizeof(scan[1].ssid), "Stranger");
+    scan[1].rssi = -30;
+    (void)snprintf(scan[2].ssid, sizeof(scan[2].ssid), "A");
+    scan[2].rssi = -70;
+    (void)snprintf(scan[3].ssid, sizeof(scan[3].ssid), "B");
+    scan[3].rssi = -50; /* ties with C; C was connected more recently than B */
+    (void)snprintf(scan[4].ssid, sizeof(scan[4].ssid), "A");
+    scan[4].rssi = -40; /* a second access point of A, stronger: A counts as -40 */
+    uint8_t plan[AK_WIFI_STORE_MAX];
+    size_t  pn = ak_wifi_store_plan(&s, scan, 5U, 0U, plan, sizeof(plan));
+    CHECK(pn == 3U, "three known networks in range");
+    CHECK_STR(s.rec[plan[0]].ssid, "A", "A first (best access point -40)");
+    CHECK_STR(s.rec[plan[1]].ssid, "C", "tie on signal: the more recent one");
+    CHECK_STR(s.rec[plan[2]].ssid, "B", "then B");
+    uint16_t tried = (uint16_t)(1U << plan[0]);
+    pn             = ak_wifi_store_plan(&s, scan, 5U, tried, plan, sizeof(plan));
+    CHECK(pn == 2U && strcmp(s.rec[plan[0]].ssid, "C") == 0, "a tried network is skipped");
+    CHECK(ak_wifi_store_plan(&s, scan, 0U, 0U, plan, sizeof(plan)) == 0U, "empty scan: nothing planned");
+    CHECK(ak_wifi_store_mru(&s, 0U) == 3, "fallback is the most recent record (D)");
+    CHECK(ak_wifi_store_mru(&s, (uint16_t)(1U << 3)) == 2, "fallback skips tried records");
+    CHECK(ak_wifi_store_mru(&s, 0x0FU) == -1, "all tried: none left");
+
+    /* backoff grows, then holds */
+    CHECK(ak_wifi_roam_backoff_ms(0U) == 15000U, "first backoff 15 s");
+    CHECK(ak_wifi_roam_backoff_ms(1U) > ak_wifi_roam_backoff_ms(0U), "backoff grows");
+    CHECK(ak_wifi_roam_backoff_ms(200U) == 300000U, "backoff capped at 5 min");
+
+    /* protocol: the list frame carries no password, escapes the SSID */
+    ak_wifi_store_init(&s);
+    CHECK(ak_wifi_store_touch(&s, "Lab\"AP", "TOPSECRET99", 3U, NULL) == AK_WIFI_STORE_ADDED, "add for frame");
+    ak_proto_wifi_entry_t e[2] = {{s.rec[0].ssid, s.rec[0].sec, true}, {"Cafe", AK_WIFI_SEC_UNKNOWN, false}};
+    char                  frame[512];
+    int                   fl = ak_proto_wifi_list(frame, sizeof(frame), 9U, e, 2U, AK_WIFI_STORE_MAX);
+    CHECK(fl > 0 && (size_t)fl < sizeof(frame), "list frame fits");
+    CHECK(strstr(frame, "TOPSECRET99") == NULL && strstr(frame, "pass") == NULL, "no password in the frame");
+    CHECK(strstr(frame, "\"type\":\"wifi_list_state\"") != NULL, "frame type");
+    CHECK(strstr(frame, "\"ssid\":\"Lab\\\"AP\",\"sec\":\"wpa2\",\"current\":true") != NULL, "first entry");
+    CHECK(strstr(frame, "\"ssid\":\"Cafe\",\"sec\":\"unknown\",\"current\":false") != NULL, "second entry");
+    CHECK(strstr(frame, "\"max\":10") != NULL, "max");
+    fl = ak_proto_wifi_list(frame, sizeof(frame), 1U, NULL, 0U, AK_WIFI_STORE_MAX);
+    CHECK(fl > 0 && strstr(frame, "\"entries\":[]") != NULL, "empty list frame");
+
+    /* source gating: reading is open, removing is USB only */
+    CHECK(ak_rx_source_allows("wifi_list", AK_RX_SRC_BLE), "BLE may read the SSID list");
+    CHECK(!ak_rx_source_allows("wifi_forget", AK_RX_SRC_BLE), "BLE cannot delete");
+    CHECK(!ak_rx_source_allows("wifi_clear", AK_RX_SRC_BLE), "BLE cannot clear");
+    CHECK(ak_rx_source_allows("wifi_forget", AK_RX_SRC_UART), "USB may delete");
+    CHECK(!ak_rx_type_is_sensitive("wifi_forget"), "delete needs no pairing window");
+}
+
+/* Unbind & re-pair, and when AK may take BLE from Tuya (0.3.63 board log). */
+static void test_rebind(void)
+{
+    printf("test_rebind\n");
+    ak_provision_t p;
+    ak_provision_init(&p);
+
+    CHECK(ak_provision_rebind_action(false, true) == AK_PAIR_ACTION_NEED_LICENSE, "no License: only a hint");
+    CHECK(ak_provision_rebind_action(false, false) == AK_PAIR_ACTION_NEED_LICENSE, "no License, unactivated: hint");
+    CHECK(ak_provision_rebind_action(true, false) == AK_PAIR_ACTION_PAIRING, "unactivated: plain pairing mode");
+    CHECK(ak_provision_rebind_action(true, true) == AK_PAIR_ACTION_REBIND, "activated: unbind confirm");
+    CHECK(ak_provision_pairing_needs_restart(true, false), "unactivated with License: restart for Tuya App pairing");
+    CHECK(!ak_provision_pairing_needs_restart(true, true), "activated: Change Wi-Fi opens at once, binding kept");
+    CHECK(!ak_provision_pairing_needs_restart(false, false), "no License: window opens at once for USB");
+
+    /* confirm: K6 runs, K1 cancels, 10 s timeout cancels */
+    CHECK(ak_provision_rebind_request(&p, 1000U), "request opens the confirm");
+    CHECK(ak_provision_rebind_pending(&p, 1500U), "pending");
+    CHECK(!ak_provision_rebind_request(&p, 1600U), "a second request is busy");
+    CHECK(!ak_provision_unpair_request(&p, 1600U), "no BLE unpair confirm on top");
+    CHECK(!ak_provision_rebind_resolve(&p, false, 2000U), "K1 cancels");
+    CHECK(!ak_provision_rebind_pending(&p, 2000U), "closed after K1");
+    CHECK(ak_provision_rebind_request(&p, 3000U), "ask again");
+    CHECK(ak_provision_rebind_resolve(&p, true, 4000U), "K6 runs the unbind");
+    CHECK(!ak_provision_rebind_pending(&p, 4000U), "closed after K6");
+    CHECK(ak_provision_rebind_request(&p, 5000U), "ask again");
+    CHECK(ak_provision_tick(&p, 5000U + AK_PROV_RESET_CONFIRM_MS), "timeout is a change");
+    CHECK(!ak_provision_rebind_resolve(&p, true, 5000U + AK_PROV_RESET_CONFIRM_MS), "K6 after the timeout does nothing");
+    ak_provision_request(&p, 6000U);
+    CHECK(!ak_provision_rebind_request(&p, 6000U), "not while the pairing confirm is up");
+    ak_provision_close(&p);
+    CHECK(ak_provision_unpair_request(&p, 7000U), "BLE unpair confirm first");
+    CHECK(!ak_provision_rebind_request(&p, 7000U), "then no unbind confirm on top");
+    ak_provision_init(&p);
+
+    /* BLE takeover: never while a pairing window (or its confirm) is up */
+    CHECK(!ak_provision_ble_takeover_allowed(&p, false, false), "unactivated: Tuya keeps BLE");
+    CHECK(ak_provision_ble_takeover_allowed(&p, true, false), "activated, no window: AK takes BLE");
+    CHECK(!ak_provision_ble_takeover_allowed(&p, true, true), "Tuya binding in progress: wait");
+    ak_provision_open(&p, 10000U); /* boot after Settings > Pairing mode or an unbind */
+    CHECK(!ak_provision_ble_takeover_allowed(&p, true, false), "activated but the window is open: wait (0.3.63 bug)");
+    ak_provision_on_cloud_ready(&p, 20000U);
+    CHECK(!ak_provision_ble_takeover_allowed(&p, true, false), "still open in the 5 s after cloud_ready");
+    CHECK(ak_provision_tick(&p, 20000U + AK_PROV_CLOSE_AFTER_READY_MS), "window closes");
+    CHECK(ak_provision_ble_takeover_allowed(&p, true, false), "window closed: AK takes BLE");
+    ak_provision_open(&p, 30000U);
+    CHECK(ak_provision_tick(&p, 30000U + AK_PROV_WINDOW_MS), "window runs out");
+    CHECK(ak_provision_ble_takeover_allowed(&p, true, false), "after the timeout: AK takes BLE");
+    ak_provision_request(&p, 40000U);
+    CHECK(!ak_provision_ble_takeover_allowed(&p, true, false), "not while the pairing confirm is up");
+}
+
+/* Recovery combo: K1 + K6 held 5 s, in either order, without leaking events. */
+static void test_combo(void)
+{
+    printf("test_combo\n");
+    ak_combo_t c;
+    ak_combo_init(&c);
+
+    CHECK(ak_combo_key(&c, "k2", AK_INPUT_EVENT_DOWN, 0U) == AK_COMBO_PASS, "other keys pass");
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_DOWN, 0U) == AK_COMBO_PASS, "K1 alone passes");
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_UP, 100U) == AK_COMBO_PASS, "K1 release alone passes");
+    CHECK(!ak_combo_tick(&c, 9000U), "nothing without both keys");
+
+    /* K1 then K6 */
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_DOWN, 1000U) == AK_COMBO_PASS, "K1 down passes");
+    CHECK(ak_combo_key(&c, "k6", AK_INPUT_EVENT_DOWN, 1050U) == AK_COMBO_START, "K6 while K1 held starts");
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_LONG, 1800U) == AK_COMBO_SWALLOW, "K1 long is swallowed");
+    CHECK(ak_combo_key(&c, "k3", AK_INPUT_EVENT_DOWN, 2000U) == AK_COMBO_PASS, "other keys still pass");
+    CHECK(!ak_combo_tick(&c, 1050U + AK_COMBO_HOLD_MS - 1U), "not before 5 s");
+    CHECK(ak_combo_tick(&c, 1050U + AK_COMBO_HOLD_MS), "fires at 5 s");
+    CHECK(!ak_combo_tick(&c, 1050U + AK_COMBO_HOLD_MS + 500U), "fires once");
+    CHECK(ak_combo_key(&c, "k6", AK_INPUT_EVENT_UP, 7000U) == AK_COMBO_SWALLOW, "K6 release swallowed");
+    CHECK(ak_combo_key(&c, "k6", AK_INPUT_EVENT_DOWN, 7100U) == AK_COMBO_SWALLOW,
+          "K6 again while K1 still held: still one combo");
+    CHECK(!ak_combo_tick(&c, 20000U), "no second fire in the same hold");
+    CHECK(ak_combo_key(&c, "k6", AK_INPUT_EVENT_UP, 7200U) == AK_COMBO_SWALLOW, "release swallowed");
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_UP, 7300U) == AK_COMBO_SWALLOW, "last release swallowed");
+    CHECK(!c.active, "both up: combo over");
+    CHECK(ak_combo_key(&c, "k6", AK_INPUT_EVENT_DOWN, 8000U) == AK_COMBO_PASS, "next K6 press is normal");
+    CHECK(ak_combo_key(&c, "k6", AK_INPUT_EVENT_UP, 8100U) == AK_COMBO_PASS, "and its release");
+
+    /* K6 then K1, released early: no fire */
+    CHECK(ak_combo_key(&c, "k6", AK_INPUT_EVENT_DOWN, 10000U) == AK_COMBO_PASS, "K6 first passes");
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_DOWN, 10030U) == AK_COMBO_START, "K1 while K6 held starts");
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_UP, 12000U) == AK_COMBO_SWALLOW, "early release swallowed");
+    CHECK(!ak_combo_tick(&c, 10030U + AK_COMBO_HOLD_MS), "released before 5 s: no fire");
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_DOWN, 13000U) == AK_COMBO_SWALLOW,
+          "K6 still held: K1 again stays in the combo");
+    CHECK(ak_combo_key(&c, "k1", AK_INPUT_EVENT_UP, 13100U) == AK_COMBO_SWALLOW, "swallowed");
+    CHECK(ak_combo_key(&c, "k6", AK_INPUT_EVENT_UP, 13200U) == AK_COMBO_SWALLOW, "swallowed");
+    CHECK(!c.active, "over");
+    CHECK(ak_combo_tick(&c, 0xFFFFFFF0U) == false, "idle never fires");
+}
+
+/* ---- ak_bind: Settings > Bind session flow ---- */
+static void test_bind_flow(void)
+{
+    printf("test_bind_flow\n");
+    ak_bind_t b;
+    uint32_t  t = 1000U;
+
+    ak_bind_init(&b);
+    CHECK(!ak_bind_active(&b), "starts off");
+    CHECK(ak_bind_done(&b, 1, AK_BIND_RESULT_BOUND, t) == AK_BIND_DO_NONE, "bind_done outside the flow ignored");
+
+    ak_bind_open(&b, t);
+    CHECK(b.state == AK_BIND_PICK, "slot page");
+    CHECK(ak_bind_key(&b, 4, t + 9000U) == AK_BIND_DO_NONE, "K5 is only activity");
+    CHECK(ak_bind_tick(&b, t + 18000U) == AK_BIND_DO_NONE, "activity restarts the 10 s");
+    CHECK(ak_bind_tick(&b, t + 19000U) == AK_BIND_DO_SETTINGS && !ak_bind_active(&b), "10 s idle -> settings");
+
+    ak_bind_open(&b, t);
+    CHECK(ak_bind_key(&b, 6, t) == AK_BIND_DO_SETTINGS && b.state == AK_BIND_OFF, "EC11 click -> settings");
+
+    ak_bind_open(&b, t);
+    CHECK(ak_bind_key(&b, 1, t) == AK_BIND_DO_REQUEST && b.slot == 2 && b.state == AK_BIND_WAIT, "K2 -> request B");
+    CHECK(ak_bind_key(&b, 0, t) == AK_BIND_DO_NONE, "keys do nothing while waiting");
+    CHECK(ak_bind_menu_opened(&b, t + 100U) && b.state == AK_BIND_MENU, "instance menu");
+    CHECK(ak_bind_tick(&b, t + 60000U) == AK_BIND_DO_NONE, "no reply timeout while a menu is open");
+    ak_bind_menu_answered(&b, t + 60000U);
+    CHECK(b.state == AK_BIND_WAIT, "answered -> waiting");
+    CHECK(ak_bind_menu_opened(&b, t + 60100U), "session menu");
+    ak_bind_menu_answered(&b, t + 61000U);
+    CHECK(ak_bind_done(&b, 1, AK_BIND_RESULT_BOUND, t + 61100U) == AK_BIND_DO_NONE, "other slot ignored");
+    CHECK(ak_bind_done(&b, 2, AK_BIND_RESULT_BOUND, t + 61100U) == AK_BIND_DO_SETTINGS && !ak_bind_active(&b),
+          "bound -> settings");
+    CHECK(ak_bind_flash_on(&b, t + 61100U) == 2 && ak_bind_flash_on(&b, t + 61350U) == 0 &&
+              ak_bind_flash_on(&b, t + 61600U) == 2,
+          "slot key blinks");
+    (void)ak_bind_tick(&b, t + 61100U + AK_BIND_FLASH_MS);
+    CHECK(!ak_bind_flashing(&b, t + 61100U + AK_BIND_FLASH_MS) && b.flash_slot == 0, "blink ends");
+
+    ak_bind_open(&b, t);
+    (void)ak_bind_key(&b, 0, t);
+    CHECK(ak_bind_done(&b, 1, AK_BIND_RESULT_BACK, t + 10U) == AK_BIND_DO_PICK && b.state == AK_BIND_PICK,
+          "back -> slot page");
+    (void)ak_bind_key(&b, 2, t + 20U);
+    CHECK(ak_bind_done(&b, 3, AK_BIND_RESULT_ERROR, t + 30U) == AK_BIND_DO_PICK, "error -> slot page");
+    (void)ak_bind_key(&b, 2, t + 40U);
+    CHECK(ak_bind_done(&b, 3, AK_BIND_RESULT_CLOSED, t + 50U) == AK_BIND_DO_SETTINGS && b.flash_slot == 0,
+          "closed -> settings, no blink");
+    ak_bind_open(&b, t);
+    (void)ak_bind_key(&b, 0, t);
+    CHECK(ak_bind_tick(&b, t + AK_BIND_REPLY_MS - 1U) == AK_BIND_DO_NONE, "waits for the reply");
+    CHECK(ak_bind_tick(&b, t + AK_BIND_REPLY_MS) == AK_BIND_DO_NO_REPLY && b.state == AK_BIND_PICK,
+          "no reply -> slot page");
+    CHECK(!ak_bind_menu_opened(&b, t), "a menu does not belong to the slot page");
+
+    CHECK(ak_bind_result_from("unbound") == AK_BIND_RESULT_UNBOUND, "result names");
+    CHECK(ak_bind_result_from("Bound") == AK_BIND_RESULT_INVALID && ak_bind_result_from(NULL) == AK_BIND_RESULT_INVALID,
+          "unknown result rejected");
+
+    /* The pickers are user-opened menus (state 5). */
+    ak_menu_t      m;
+    ak_menu_page_t p;
+    ak_menu_init(&m);
+    CHECK(ak_menu_parse("{\"id\":\"bs1\",\"kind\":\"session\",\"items\":[{\"label\":\"@mate\"}]}", &p) &&
+              p.kind == AK_MENU_KIND_SESSION,
+          "session kind parses");
+    (void)ak_menu_on_page(&m, &p, t);
+    CHECK(ak_menu_is_bind(&m) && ak_menu_is_model(&m), "session menu is a bind / user menu");
+    CHECK(ak_menu_parse("{\"id\":\"bi1\",\"kind\":\"instance\",\"items\":[{\"label\":\"Local\"}]}", &p) &&
+              p.kind == AK_MENU_KIND_INSTANCE,
+          "instance kind parses");
 }
 
 int main(void)
@@ -2811,6 +3382,8 @@ int main(void)
     test_rx_attacks();
     test_validate();
     test_provision();
+    test_rebind();
+    test_combo();
     test_window_marker();
     test_byte_ring();
     test_led_power();
@@ -2830,6 +3403,8 @@ int main(void)
     test_menu_multi_and_lifecycle();
     test_menu_lights();
     test_ui_states();
+    test_bind_flow();
+    test_wifi_store();
     if (g_failures == 0) {
         printf("ALL TESTS PASSED\n");
         return 0;

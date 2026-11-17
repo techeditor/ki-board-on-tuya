@@ -1,26 +1,34 @@
 # ST7789 LCD bring-up (v0.3)
 
-Validates the v0.3 12P ST7789P3 panel wiring:
+Tests the v0.3 12-pin LCD (2.8" IPS, ST7789P3) and its wiring.
 
-- SPI0 SCK=P14, MOSI=P16, CS=P15, DC=P17
-- RST=P6, backlight=P8, **TE=P7 (input)**
-- Native resolution 240x320, RGB565, 48 MHz
+- SPI0: SCK=P14, MOSI=P16, CS=P15, DC=P17, 48 MHz
+- RST=P6, backlight=P8 (high = on, through the low-side transistor)
+- TE: FPC pin 7 → R8 10 kΩ → P7. This app does not configure or drive P7 and
+  does not use TE.
+- Panel VDD is tied to 3V3; there is no LCD power switch. (On v0.2 hardware P7
+  was the LCD power enable for the 18-pin panel.)
+- Native 240×320, driven in landscape: 320×240, RGB565, display inversion on
+  (INVON, which this panel needs).
 
-> v0.3 replaced the 18P CL28CK230 panel with a 12P ST7789P3. Panel VDD is now
-> tied directly to 3V3, so the old **LCD_PWR (P7)** power switch is gone; **P7 is
-> reused as TE (tearing-effect) input**. This bring-up configures P7 as an input
-> and does not drive it. The SPI/RST/BL pins are unchanged.
->
-> Doc note: the schematic review (2026-10-01) says TE reaches P7 via R8=10k as a
-> GPIO input, while the change-scope §5 pin table lists TE as NC/floating. Either
-> way the firmware never drives P7; the TE line is not used by this tester.
+The app cycles every two seconds through colour bars and full-screen red,
+green, blue, white and black. Each frame carries orientation labels: `TOP`,
+`BOTTOM`, `L`, `R`, and `ST7789P3 / 320x240 M=A0` in the centre. UART0
+(115200) reports each pattern:
 
-The screen cycles through RGB565 color bars and full-screen red, green, blue,
-white, and black patterns. UART0 reports the current pattern at 115200 baud.
+```json
+{"v":1,"type":"bringup","payload":{"name":"lcd_st7789","status":"ready","width":320,"height":240,"spi_hz":48000000}}
+{"v":1,"type":"bringup","payload":{"name":"lcd_st7789","pattern":"color_bars","result":0}}
+{"v":1,"type":"bringup","payload":{"name":"lcd_st7789","pattern":"red","result":0}}
+```
 
-Verify:
+Pass:
 
-- The entire panel is addressed with no clipped rows or columns.
-- Red, green, and blue are not swapped.
-- Color bars have sharp boundaries without noise.
-- The backlight turns on reliably after reset.
+- The whole panel is covered, with no clipped rows or columns.
+- All labels read upright and unmirrored, each at the edge it names. If not,
+  the MADCTL value in the init table needs to change.
+- Red, green and blue appear as named (not swapped, not inverted).
+- Colour bar edges are sharp, without noise.
+- The backlight comes on reliably after reset.
+
+Build and flash instructions are in the parent [`README.md`](../README.md).

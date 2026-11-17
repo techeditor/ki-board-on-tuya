@@ -10,7 +10,8 @@
 //! the status-sink handoff and the diagnostic logs). No Tauri / Windows deps, so
 //! it `cargo test`s on the Linux host.
 //!
-//! Design ref: `.kiro/specs/feature-probes-kirocrew-local-control/design.md`
+//! Design ref: see git tag `archive/feature-probes`
+//! (`.kiro/specs/feature-probes-kirocrew-local-control/design.md`).
 //! ("Milestone 4 — per-conversation binding").
 
 use std::collections::BTreeMap;
@@ -37,12 +38,6 @@ fn default_chats() -> Vec<u8> {
     vec![0, 0, 0]
 }
 
-/// Default K1-K3 double-click instance switches: Ctrl+1/2/3 =
-/// Local / Remote Crew 1 / Remote Crew 2.
-fn default_instances() -> Vec<u8> {
-    vec![1, 2, 3]
-}
-
 /// Empty persisted aliases mean that the AK displays the defaults A, B, and C.
 fn default_aliases() -> Vec<String> {
     vec![String::new(); SLOT_COUNT]
@@ -51,6 +46,41 @@ fn default_aliases() -> Vec<String> {
 /// Empty session ids mean no observed Crew chat is associated with the slot.
 fn default_sessions() -> Vec<String> {
     vec![String::new(); SLOT_COUNT]
+}
+
+/// Instance id of this machine's Crew in a binding (`local:<slot key>`).
+pub const LOCAL_INSTANCE: &str = "local";
+
+/// The stored form of a session binding: `<instance id>:<slot key>`, the
+/// same string the Crew Hub stamps as `row_identity` on a remote crew's rows,
+/// and `local:<slot key>` for this machine. Older files hold a bare slot key
+/// and Crew hooks report `dashboard:<slot key>`; both mean this machine.
+/// Slot keys never contain `:`, so the first `:` splits the two parts.
+/// shortcut: a remote crew whose id is `local` or `dashboard` would be read as
+/// this machine; Crew derives ids from names, rename such a crew if it occurs.
+pub fn row_identity(id: &str) -> String {
+    let id = id.trim();
+    match id.split_once(':') {
+        _ if id.is_empty() => String::new(),
+        None => format!("{LOCAL_INSTANCE}:{id}"),
+        Some(("dashboard", key)) => format!("{LOCAL_INSTANCE}:{key}"),
+        Some(_) => id.to_string(),
+    }
+}
+
+/// `(instance id, slot key)` of a row identity; `None` when either part is empty.
+pub fn split_row(row: &str) -> Option<(&str, &str)> {
+    row.split_once(':').filter(|(inst, key)| !inst.is_empty() && !key.is_empty())
+}
+
+/// The id the rest of the Companion keys sessions by: the bare slot key for
+/// this machine (Crew API and status events), the row identity for a remote
+/// crew's session.
+pub fn status_id(row: &str) -> String {
+    match split_row(row) {
+        Some((LOCAL_INSTANCE, key)) => key.to_string(),
+        _ => row.to_string(),
+    }
 }
 
 /// The persisted Agent Status and per-key binding store. `chats[i]` is the
@@ -62,16 +92,18 @@ pub struct BindStore {
     /// Index 0..=2 maps K1..=K3 to the A/B/C slots.
     #[serde(default = "default_chats")]
     pub chats: Vec<u8>,
-    /// Index 0..=2: the Crew instance number K1..=K3 double-click switches to
-    /// (Ctrl+N — Kiro Crew "Remote Crews": 1 = Local, 2 = remote crew 1, …).
-    #[serde(default = "default_instances")]
-    pub instances: Vec<u8>,
     /// Optional display aliases; an empty entry falls back to A, B, or C.
     #[serde(default = "default_aliases")]
     pub aliases: Vec<String>,
-    /// Optional stable Crew session ids used only for Companion presentation.
+    /// The Crew session bound to each slot as a row identity
+    /// (`local:<key>` / `<instance id>:<key>`, see [`row_identity`]); empty =
+    /// not bound.
     #[serde(default = "default_sessions")]
     pub sessions: Vec<String>,
+    /// Display name of each bound session (its title when it was bound),
+    /// shown on the keyboard's Bind session page.
+    #[serde(default = "default_sessions")]
+    pub names: Vec<String>,
     /// Optional Agent Status session pinned to the keyboard screen.
     #[serde(default)]
     pub pinned_session: String,
@@ -87,6 +119,9 @@ pub struct BindStore {
     /// typed into the Crew window's composer (keystroke injection).
     #[serde(default)]
     pub voice_inject: bool,
+    /// List Crew Mode / Bot worker sessions in the keyboard's Bind session menu.
+    #[serde(default)]
+    pub show_workers: bool,
 }
 
 fn default_true() -> bool {
@@ -97,13 +132,14 @@ impl Default for BindStore {
     fn default() -> Self {
         Self {
             chats: default_chats(),
-            instances: default_instances(),
             aliases: default_aliases(),
             sessions: default_sessions(),
+            names: default_sessions(),
             pinned_session: String::new(),
             last_models: BTreeMap::new(),
             focus_on_select: true,
             voice_inject: false,
+            show_workers: false,
         }
     }
 }
@@ -134,20 +170,6 @@ impl BindStore {
             }
         }
 
-        let inst_defaults = default_instances();
-        if self.instances.len() < SLOT_COUNT {
-            for i in self.instances.len()..SLOT_COUNT {
-                self.instances.push(inst_defaults[i]);
-            }
-        } else if self.instances.len() > SLOT_COUNT {
-            self.instances.truncate(SLOT_COUNT);
-        }
-        for (i, n) in self.instances.iter_mut().enumerate() {
-            if !(1..=9).contains(n) {
-                *n = inst_defaults[i];
-            }
-        }
-
         self.aliases.resize(SLOT_COUNT, String::new());
         self.aliases.truncate(SLOT_COUNT);
         for alias in &mut self.aliases {
@@ -157,12 +179,22 @@ impl BindStore {
         self.sessions.resize(SLOT_COUNT, String::new());
         self.sessions.truncate(SLOT_COUNT);
         for session in &mut self.sessions {
-            *session = normalize_session_id(session).unwrap_or_default();
+            *session = row_identity(&normalize_session_id(session).unwrap_or_default());
         }
-        self.pinned_session = normalize_session_id(&self.pinned_session).unwrap_or_default();
-        self.last_models.retain(|slot, model| {
-            normalize_session_id(slot).is_ok_and(|s| !s.is_empty() && s == *slot) && valid_model_id(model)
-        });
+        self.names.resize(SLOT_COUNT, String::new());
+        self.names.truncate(SLOT_COUNT);
+        for (name, session) in self.names.iter_mut().zip(&self.sessions) {
+            *name = if session.is_empty() { String::new() } else { normalize_name(name) };
+        }
+        self.pinned_session = row_identity(&normalize_session_id(&self.pinned_session).unwrap_or_default());
+        // Keys move to the row-identity form too (older files: bare slot keys).
+        self.last_models = std::mem::take(&mut self.last_models)
+            .into_iter()
+            .filter(|(slot, model)| {
+                normalize_session_id(slot).is_ok_and(|s| !s.is_empty() && s == *slot) && valid_model_id(model)
+            })
+            .map(|(slot, model)| (row_identity(&slot), model))
+            .collect();
         while self.last_models.len() > LAST_MODELS_MAX {
             let first = self.last_models.keys().next().cloned();
             if let Some(k) = first {
@@ -171,15 +203,40 @@ impl BindStore {
         }
     }
 
-    /// Remember `model` as the last hand-picked model of chat `slot`.
+    /// Remember `model` as the last hand-picked model of chat `slot` (a slot
+    /// key of this machine, or a row identity).
     pub fn set_last_model(&mut self, slot: &str, model: &str) -> Result<(), String> {
         let slot = normalize_session_id(slot)?;
         if slot.is_empty() || !valid_model_id(model) {
             return Err("invalid chat or model id".to_string());
         }
-        self.last_models.insert(slot, model.to_string());
+        self.last_models.insert(row_identity(&slot), model.to_string());
         self.normalize();
         Ok(())
+    }
+
+    /// `last_models` keyed the way the menus key chats ([`status_id`]).
+    pub fn last_models_by_status_id(&self) -> Vec<(String, String)> {
+        self.last_models.iter().map(|(row, model)| (status_id(row), model.clone())).collect()
+    }
+
+    /// The bound sessions in [`status_id`] form (empty = not bound).
+    pub fn status_ids(&self) -> Vec<String> {
+        self.sessions.iter().map(|row| status_id(row)).collect()
+    }
+
+    /// Slot key of the session bound to slot index `i` when it is on this
+    /// machine; `None` when unbound or bound to a remote crew's session.
+    pub fn local_key(&self, i: usize) -> Option<String> {
+        match split_row(self.sessions.get(i)?) {
+            Some((LOCAL_INSTANCE, key)) => Some(key.to_string()),
+            _ => None,
+        }
+    }
+
+    /// The pinned Agent Status session in [`status_id`] form.
+    pub fn pinned_status_id(&self) -> String {
+        status_id(&self.pinned_session)
     }
 
     /// Read the chat number for slot `n` (1-based). Returns `None` for an
@@ -211,15 +268,22 @@ impl BindStore {
     /// Associate an observed Crew session with a slot for Companion display.
     /// This does not alter the physical shortcut; `chats` stays authoritative.
     pub fn set_session(&mut self, n: u8, session_id: &str) -> Result<(), String> {
+        self.set_session_named(n, session_id, "")
+    }
+
+    /// Bind slot `n` to `session_id` (bare local key or row identity) and
+    /// remember its display name.
+    pub fn set_session_named(&mut self, n: u8, session_id: &str, name: &str) -> Result<(), String> {
         let i = idx(n).ok_or_else(|| format!("binding slot must be 1..={SLOT_COUNT}"))?;
-        self.sessions[i] = normalize_session_id(session_id)?;
+        self.sessions[i] = row_identity(&normalize_session_id(session_id)?);
+        self.names[i] = if self.sessions[i].is_empty() { String::new() } else { normalize_name(name) };
         Ok(())
     }
 
     /// Return every 1-based Chat A/B/C slot associated with `session_id`.
     /// Empty and unknown ids intentionally produce no board destination.
     pub fn slots_for_session(&self, session_id: &str) -> Vec<u8> {
-        let session_id = session_id.trim();
+        let session_id = row_identity(session_id);
         if session_id.is_empty() {
             return Vec::new();
         }
@@ -227,7 +291,7 @@ impl BindStore {
             .iter()
             .enumerate()
             .filter_map(|(index, bound)| {
-                (bound == session_id).then_some((index + 1) as u8)
+                (*bound == session_id).then_some((index + 1) as u8)
             })
             .collect()
     }
@@ -240,7 +304,7 @@ impl BindStore {
     /// Persist the Agent Status session watched by the keyboard screen. Empty
     /// input restores the default behavior of following every session.
     pub fn set_pinned_session(&mut self, session_id: &str) -> Result<(), String> {
-        self.pinned_session = normalize_session_id(session_id)?;
+        self.pinned_session = row_identity(&normalize_session_id(session_id)?);
         Ok(())
     }
 
@@ -288,6 +352,12 @@ fn normalize_session_id(session_id: &str) -> Result<String, String> {
         return Err("session id must be at most 512 characters".to_string());
     }
     Ok(session_id.to_string())
+}
+
+/// A session display name: control characters become spaces, at most 64 characters.
+fn normalize_name(name: &str) -> String {
+    let flat: String = name.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    flat.trim().chars().take(64).collect()
 }
 
 /// A Crew model id: 1..=128 printable ASCII characters, no spaces.
@@ -373,9 +443,13 @@ mod tests {
     fn session_association_round_trips_and_clears() {
         let mut s = BindStore::new();
         s.set_session(2, " dashboard:chat-2 ").unwrap();
-        s.set_session(3, "dashboard:chat-2").unwrap();
-        assert_eq!(s.sessions[1], "dashboard:chat-2");
+        s.set_session_named(3, "chat-2", "Plan").unwrap();
+        assert_eq!(s.sessions[1], "local:chat-2", "hook ids are this machine's slots");
+        assert_eq!(s.names[2], "Plan");
+        // Hook id, bare API key and row identity all name the same session.
         assert_eq!(s.slots_for_session(" dashboard:chat-2 "), vec![2, 3]);
+        assert_eq!(s.slots_for_session("chat-2"), vec![2, 3]);
+        assert_eq!(s.slots_for_session("local:chat-2"), vec![2, 3]);
         assert!(s.slots_for_session("").is_empty());
         assert!(s.slots_for_session("unknown").is_empty());
         s.clear_session(2).unwrap();
@@ -417,13 +491,14 @@ mod tests {
         s.set(1, 4);
         s.set(3, 8);
         s.set_alias(1, "Plan").unwrap();
-        s.set_session(1, "dashboard:chat-4").unwrap();
-        s.set_pinned_session("dashboard:chat-4").unwrap();
-        s.set_last_model("dashboard:chat-4", "claude-opus").unwrap();
+        s.set_session_named(1, "chat-4", "Plan it").unwrap();
+        s.set_session(2, "remote1:chat-9").unwrap();
+        s.set_pinned_session("chat-4").unwrap();
+        s.set_last_model("chat-4", "claude-opus").unwrap();
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"chats":[4,0,8],"instances":[1,2,3],"aliases":["Plan","",""],"sessions":["dashboard:chat-4","",""],"pinned_session":"dashboard:chat-4","last_models":{"dashboard:chat-4":"claude-opus"},"focus_on_select":true,"voice_inject":false}"#
+            r#"{"chats":[4,0,8],"aliases":["Plan","",""],"sessions":["local:chat-4","remote1:chat-9",""],"names":["Plan it","",""],"pinned_session":"local:chat-4","last_models":{"local:chat-4":"claude-opus"},"focus_on_select":true,"voice_inject":false,"show_workers":false}"#
         );
         let back: BindStore = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
@@ -458,6 +533,36 @@ mod tests {
     }
 
     #[test]
+    fn old_files_migrate_to_row_identities() {
+        // v0.3 files: bare slot keys, Ctrl+N numbers in `instances` (dropped).
+        let mut old: BindStore = serde_json::from_str(
+            r#"{"instances":[1,2,3],"sessions":["chat-1-17","","dashboard:chat-2-18"],"pinned_session":"chat-1-17","last_models":{"chat-1-17":"m1"}}"#,
+        )
+        .unwrap();
+        old.normalize();
+        assert_eq!(old.sessions, vec!["local:chat-1-17", "", "local:chat-2-18"]);
+        assert_eq!(old.names, vec!["", "", ""]);
+        assert_eq!(old.pinned_session, "local:chat-1-17");
+        assert_eq!(old.last_models["local:chat-1-17"], "m1");
+        assert!(!serde_json::to_string(&old).unwrap().contains("instances"));
+        // The rest of the Companion keeps keying local chats by slot key.
+        assert_eq!(old.status_ids(), vec!["chat-1-17", "", "chat-2-18"]);
+        assert_eq!(old.pinned_status_id(), "chat-1-17");
+        assert_eq!(old.last_models_by_status_id(), vec![("chat-1-17".to_string(), "m1".to_string())]);
+        assert_eq!(old.local_key(0).as_deref(), Some("chat-1-17"));
+        assert_eq!(old.local_key(1), None);
+        // A remote crew's session keeps its row identity everywhere.
+        old.set_session(3, "remote1:chat-9").unwrap();
+        assert_eq!(old.local_key(2), None);
+        assert_eq!(old.status_ids()[2], "remote1:chat-9");
+        assert_eq!(old.slots_for_session("remote1:chat-9"), vec![3]);
+        assert!(old.slots_for_session("chat-9").is_empty(), "a local key never matches a remote binding");
+        assert_eq!(split_row("remote1:chat-9"), Some(("remote1", "chat-9")));
+        assert_eq!(split_row(":chat-9"), None);
+        assert_eq!(row_identity(""), "");
+    }
+
+    #[test]
     fn last_models_are_validated_and_capped() {
         let mut s = BindStore::new();
         assert!(s.set_last_model("", "m").is_err());
@@ -470,7 +575,7 @@ mod tests {
             serde_json::from_str(r#"{"last_models":{"ok":"m1","bad\nkey":"m2","x":""}}"#).unwrap();
         bad.normalize();
         assert_eq!(bad.last_models.len(), 1);
-        assert_eq!(bad.last_models["ok"], "m1");
+        assert_eq!(bad.last_models["local:ok"], "m1");
     }
 
     #[test]

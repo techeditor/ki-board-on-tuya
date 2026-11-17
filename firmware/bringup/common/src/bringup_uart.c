@@ -16,12 +16,10 @@
 
 OPERATE_RET bringup_uart_init(void)
 {
-    OPERATE_RET    rt       = OPRT_OK;
     TAL_UART_CFG_T uart_cfg = {0};
 
-    TUYA_CALL_ERR_RETURN(tkl_io_pinmux_config(AK_UART_RX_PIN, TUYA_UART0_RX));
-    TUYA_CALL_ERR_RETURN(tkl_io_pinmux_config(AK_UART_TX_PIN, TUYA_UART0_TX));
-
+    /* UART0 is fixed to P10/P11; current TuyaOpen-T5AI answers a UART0 pinmux
+     * request with OPRT_NOT_SUPPORTED, so none is made (see ak_uart.c). */
     uart_cfg.base_cfg.baudrate = AK_UART_BAUDRATE;
     uart_cfg.base_cfg.databits = TUYA_UART_DATA_LEN_8BIT;
     uart_cfg.base_cfg.stopbits = TUYA_UART_STOP_LEN_1BIT;

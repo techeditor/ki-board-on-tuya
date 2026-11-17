@@ -1,7 +1,8 @@
-# Ki-board: Agentic Keyboard for Kiro (Tuya T5AI-Core)
+# Ki-board: Agentic Keyboard for Kiro Crew (Tuya T5AI-Core)
 
-A small macro keyboard built on the **Tuya T5AI-Core** board for working with
-Kiro. It sends voice input into Kiro and shows agent status on its own screen.
+A small AI keyboard built on the **Tuya T5AI-Core** board for working with
+Kiro Crew. It sends voice input into Kiro Crew and shows agent status on its
+own screen. Kiro Crew is currently the only supported agent.
 
 *(中文版见 [README.zh-CN.md](README.zh-CN.md))*
 

@@ -2,7 +2,7 @@
 
 > 本文件是**跨固件/上位机共享**的协议权威定义（源）。
 > `docs/protocol.md` 是面向阅读的说明版，内容以本文件为准。
-> 设计参照 ki-board 的 `shared/protocol/serial-protocol.md`，并针对本项目
+> 设计参照外部参考项目（ki-board）的串口协议文档，并针对本项目
 > （T5AI-Core + 6 键 + EC11 编码器 + Windows 上位机，v0.3）做了裁剪与调整。
 
 ## 载体（Transports）
@@ -21,14 +21,14 @@ flowchart LR
   Board[T5AI-Core 板<br/>输入扫描 + 状态机 + LCD]
   Companion[Companion App<br/>Tauri, Windows]
   Host[Windows / Kiro CLI/IDE]
-  ASR[Windows 系统 ASR<br/>阶段1 · WinRT]
+  ASR[电脑识别 PC ASR<br/>豆包 / 阿里云百炼 / 本地 sherpa-onnx]
 
   Board -- BLE HID<br/>仅键盘输出（阶段3） --> Host
   Board <-- UART/USB-CDC · JSONL<br/>配置/状态/事件 --> Companion
   Board <-- BLE GATT · JSONL<br/>配置/状态/事件（阶段2） --> Companion
   Companion -- 麦克风音频 --> ASR
   ASR -- 识别文本 --> Companion
-  Companion -- SendInput 注入 / 粘贴 --> Host
+  Companion -- Crew API 发送 / SendInput 注入 --> Host
 ```
 
 职责划分：
@@ -36,7 +36,7 @@ flowchart LR
 - **BLE HID**：仅负责像键盘一样输出（阶段 3）。
 - **UART/USB-CDC / BLE GATT**：双向 JSONL，负责配置、按键/编码器事件、Agent 状态、
   语音状态、配对/鉴权。
-- **Companion**：拥有 Windows 系统 ASR、按键映射、SendInput 注入 / 剪贴板粘贴。
+- **Companion**：拥有电脑识别（PC ASR，见 `docs/pc-asr.md`）、按键映射、Crew API 发送与 SendInput 注入。
 - **固件**：拥有输入状态机、LCD 渲染。
 
 ## 帧结构
@@ -71,7 +71,7 @@ flowchart LR
   `bindings` 别名）按 UTF-8 字符边界截短。
 - 数值只接受十进制非负整数，超出该字段范围即拒绝（`volume`/`brightness` 0..100，`chat_slot` 1..3）。
 - `wifi`、`license`、`license_read`、`reset_netcfg`、`ble_pair` 只接受整行来自 UART 的帧；BLE 来源一律拒绝。
-  固件升级的 `ota_*` 命令同样只收 UART（见“固件升级（仅 USB）”），但不受配网窗口限制。
+  固件升级的 `ota_*` 命令和 FR-02 的 `prov_open` / `ble_unpair` 同样只收 UART，但不受配网窗口限制（键盘自己弹⑦确认）。
 - 上述五条命令还要求键盘的配网窗口处于打开状态（见下文 `prov_status`）；窗口关闭时 AK 不执行，回 `prov_status`
   并带 `rejected`/`reason`。
 - BLE 上的每一行先经过“BLE 安全通道”（见下文）：未配对、未完成握手或认证失败的 BLE 连接，任何一行都不处理。
@@ -82,14 +82,20 @@ flowchart LR
 Companion 发：
 
 ```json
-{"v":1,"type":"hello","payload":{"client":"companion","version":"0.1.0"}}
+{"v":1,"type":"hello","payload":{"client":"companion","version":"0.1.0","pc_asr":true}}
 ```
+
+- `pc_asr`（可选，布尔）：`true` 表示这个 Companion 会把电脑识别结果用 `input_restore` 送回键盘（见 `voice`）。
+  键盘每次收到 `hello` 时更新；缺省或 `bye` / USB 超时后视为 `false`。
 
 板回：
 
 ```json
 {"v":1,"type":"hello_ack","payload":{"fw":"0.1.0","capabilities":["uart","ble_gatt","keymap","voice_state","device_settings","system_info"]}}
 ```
+
+- 带显示的固件还带 `menu`、`pc_asr_wait` 和 `bind_session`（设置页“绑定会话”，见“绑定会话”）。`pc_asr_wait`：路由为 `system` 时松开语音键后键盘停在 ② 等电脑识别结果，
+  Companion 必须用 `input_restore`（`src:"pc"`）结束这次等待，没有文字时 `text` 为空串。
 
 心跳：
 
@@ -148,7 +154,7 @@ Companion 路由（先 `bind`，再默认规则）：
 | `bind: model_menu` / `model_toggle` / `menu_recall` | 见“LCD 菜单与按键灯光” |
 | `bind: cancel_char` / `cancel_all` / `confirm` | ③ 输入确认：默认（直接发送）不注入，`confirm` 带的 `text` 经 Crew API 发到选中对话；注入模式下 `Backspace` / `Ctrl+A` 后 `Backspace` / `Enter`（见“语音文字的去向”） |
 | 无 bind，K1–K3 `single` | 已连 Crew API 时选中该键对应的 A/B/C 槽位 |
-| 无 bind，K1–K3 `long` | 长按自动绑定：把 Companion 里选中的对话绑定到该键的槽位 |
+| 无 bind，K1–K3 `long` | 不做任何事（保留）。绑定改在键盘设置页“绑定会话”或 Companion 里做 |
 | 无 bind，`enc` `single` | `Enter` |
 | 其他 | 忽略 |
 
@@ -174,7 +180,19 @@ Companion 路由（先 `bind`，再默认规则）：
 ```
 
 - `state`：`start` / `stop`
-- 阶段 1：板发出 `voice:start` 后，Companion 调用 Windows 系统 ASR 听写。
+- `state`：`start` / `stop` / `cancel`。
+- 只在识别路由为 `system`（电脑识别）时发出：语音键按下发 `start`，松开发 `stop`。Companion 在两者之间用电脑麦克风
+  录音并流式识别（豆包 / 阿里云百炼 / 本地 sherpa-onnx，见 `docs/pc-asr.md`），识别结果**不注入**，而是用
+  `input_restore`（`src:"pc"`）送回键盘的 ③（见“语音文字的去向”），与键盘云端识别的文字走同一条确认路径。
+- Companion 的 `hello` 带 `pc_asr:true` 且固件有 `pc_asr_wait` 时：松开后键盘停在 ②，状态栏 `识别中…`；
+  - `input_restore` 带文字 → ③（状态栏绿色，显示 `msg`，如 `电脑识别:豆包`）；
+  - `input_restore` 文字为空 → ①，状态栏橙色显示 `msg`（如 `没听清`、`电脑识别:没有 Key`）；
+  - 15 s 没有结果 → ①，状态栏 `警告：语音识别超时`，并发 `voice` `cancel`；
+  - K1 单击 → ①，状态栏 `已取消输入`，并发 `voice` `cancel`（K1 不再按 keymap 上报）；
+  - 再按住语音键 → 重新录音（Companion 收到新的 `start` 时丢弃上一段）。
+  Companion 收到 `cancel` 后丢弃这段识别，不再发 `input_restore`。
+- 旧 Companion（`hello` 不带 `pc_asr`）：松开后键盘直接回 ①，与以前相同。旧固件（无 `pc_asr_wait`）：
+  Companion 在结果到达时发 `input_restore`（键盘在 ① 时进入 ③），失败时只发 `notice`；旧 Companion 忽略 `cancel`。
 
 ### macro（宏，可选）
 
@@ -235,8 +253,8 @@ Companion 路由（先 `bind`，再默认规则）：
 {"v":1,"type":"config","payload":{"voice_engine":"system"}}
 ```
 
-- `voice_engine`：`system`（Windows 系统 ASR）/ `cloud`（板端 Tuya ASR）
-- 语音模式（ASR / Chat）**不能**通过 `config` 或任何 PC 命令切换，只能在键盘 Settings > Voice mode 切换。
+- `voice_engine`：`system`（电脑识别 PC ASR）/ `cloud`（板端 Tuya ASR）
+- 语音模式（ASR / Chat）不能通过 `config` 切换；在键盘 Settings > Voice mode，或用 `device_settings` 的 `voice_mode`（FR-02，见下）切换。
 
 ### voice_source（AK → Companion）
 
@@ -245,7 +263,8 @@ Companion 路由（先 `bind`，再默认规则）：
 ```
 
 - `source`：当前生效的识别路由 `cloud` / `system`。
-- `mode`：键盘的语音模式，`asr`（识别文字进 Kiro Crew，现有行为）/ `chat`（键盘与涂鸦云 agent 对话）。只读；
+- `mode`：键盘的语音模式，`asr`（识别文字进 Kiro Crew，现有行为）/ `chat`（键盘与涂鸦云 agent 对话）。由
+  `device_settings` 的 `voice_mode` 修改；本帧只报告；
   重启后沿用上次的模式，开机在状态栏提示一次。
 
 ### tuya_chat（Chat 模式对话，AK → Companion，仅 UART0，只显示）
@@ -276,18 +295,18 @@ Companion 下发每键的**手势→动作**绑定，覆盖固件 keymap。固�
 - `enc.long` 保留给设备设置页，固件忽略对它的绑定；`enc.kind` 不能设为 `voice`（否则长按无法进入设置页）。Companion 的 keymap 面板不提供这两项。
 - 固件据此在 `key` 帧里上报手势和 `bind`（见上节）。固件应答 `ack`（带 `seq` 时）。载体 USB / BLE 均可（纯配置）。
 
-### device_settings / device_settings_state（音量、屏幕亮度与界面语言）
+### device_settings / device_settings_state（键盘设置：音量、亮度、语言、语音模式、灯光、字号，FR-02）
 
 Companion 修改当前运行值（字段都可省略，只改带了的）：
 
 ```json
-{"v":1,"type":"device_settings","payload":{"volume":70,"brightness":90,"language":"zh"}}
+{"v":1,"type":"device_settings","payload":{"volume":70,"brightness":90,"language":"zh","voice_mode":"asr","led_power":"auto","led_auto_off_s":300,"font_size":12}}
 ```
 
 AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 
 ```json
-{"v":1,"seq":15,"type":"device_settings_state","payload":{"volume":70,"brightness":90,"led_power":"auto","led_auto_off_s":60,"language":"zh"}}
+{"v":1,"seq":15,"type":"device_settings_state","payload":{"volume":70,"brightness":90,"led_power":"auto","led_auto_off_s":60,"language":"zh","voice_mode":"asr","font_size":12,"license":"present","ble_paired":true}}
 ```
 
 - `volume`：`0..100`；`brightness`：`10..100`，AK 设置页和 Companion 均以 10% 为步进。
@@ -298,12 +317,59 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
   以 AK 回的 `device_settings_state` 为准更新自己的界面语言。其他取值整帧拒绝（不改任何字段）。
   旧固件不回 `language`：Companion 不同步语言，只用自己的界面语言。
 - `led_power`：灯光电源设置 `off` / `on` / `auto`（AK 设置页 LED power，存 KV，重启保留）；`led_auto_off_s`：
-  `auto` 时的空闲断电时长，取值 `30` / `60` / `300` / `900`。目前只读：AK 在本地修改后回报一次，
-  `device_settings` 还不接受这两个字段（以后由 Companion 覆盖时再加，且只经 USB 或已认证的 BLE 安全通道）。
-  旧版 Companion 忽略这两个字段。
-- AK 是当前运行值的权威来源；Companion 只在收到 `device_settings_state` 后更新显示。
-- `device_settings_state` 带 `seq`，Companion 按普通板端事件回 `ack`。
-- 音量与亮度只同步当前运行值，不承诺断电或重启后保留；`language` 与 `led_power` 重启保留。
+  `auto` 时的空闲断电时长，取值 `30` / `60` / `300` / `900`。FR-02 起 `device_settings` 可写这两个字段（USB 或已认证的
+  BLE 安全通道），其他取值整帧拒绝。旧版 Companion 忽略这两个字段。
+- `voice_mode`（FR-02）：`asr` / `chat`，与键盘 Settings > Voice mode 相同（存 KV，重启保留）。可写，USB 或已认证 BLE。
+- `font_size`：键盘 LCD 字号，单位 px，取值 `12`（默认，Fusion Pixel 12，纯 ASCII 文字用 8x8 字体）/ `16`（GNU Unifont 16，
+  全部文字）。与键盘设置页“字号”相同：确认后立即重新排版所有界面，存 KV（`ak_fontsz`，一字节，存 px 值），重启保留。
+  可写，USB 或已认证 BLE；其他取值（含预留的 `14`）整帧拒绝。旧固件不回 `font_size`：Companion 不显示字号项。
+- `license`（只报告）：`present` / `missing`，只说明有没有 License，绝不带 UUID/AuthKey；`ble_paired`（只报告）：键盘是否存有
+  BLE 配对密钥。两者都不能经 `device_settings` 修改（见下表的敏感项）。
+- 一帧里任何一个字段越界或取值未知，整帧拒绝，不部分生效。
+- AK 是当前运行值的权威来源；Companion 只在收到 `device_settings_state` 后更新显示。键盘上任何一项改完（设置页、
+  凭证页清除 BLE 配对、BLE 配对完成）立即发 `device_settings_state`；两边冲突以最后一次修改为准。
+- `device_settings_state` 带 `seq`，Companion 按普通板端事件回 `ack`。整帧约 240 字节，固件用 384 字节缓冲。
+- 音量与亮度只同步当前运行值，不承诺断电或重启后保留；`language`、`voice_mode`、`led_power` 与 `font_size` 重启保留。
+
+#### 键盘设置项清单（FR-02，以固件 `ak_settings.h` 为准）
+
+| 键盘设置页项 | `device_settings` 字段 | 敏感 | 修改通道 | Companion |
+|---|---|---|---|---|
+| 音量 Volume | `volume`（0..100，步进 10） | 否 | USB / 已配对 BLE | Device Bridge 面板 |
+| 亮度 Brightness | `brightness`（10..100，步进 10） | 否 | USB / 已配对 BLE | Device Bridge 面板 |
+| 语音模式 Voice mode | `voice_mode`（`asr` / `chat`） | 否 | USB / 已配对 BLE | 连接页“键盘设置” |
+| 灯光电源 LED power | `led_power`（`off` / `on` / `auto`） | 否 | USB / 已配对 BLE | 连接页“键盘设置” |
+| 自动断电时长 Auto off | `led_auto_off_s`（30 / 60 / 300 / 900） | 否 | USB / 已配对 BLE | 连接页“键盘设置” |
+| 界面语言 Language | `language`（`zh` / `en`） | 否 | USB / 已配对 BLE | 设置菜单里的语言 |
+| 字号 Font size | `font_size`（`12` / `16`） | 否 | USB / 已配对 BLE | 连接页“键盘设置” |
+| 凭证 Credentials：License | 只报告 `license`；写入用 `license` 命令 | 是 | 仅 USB，配网窗口内；已有 License 时还需键盘凭证页 K6 允许覆盖 | 设备页 License 区 |
+| 凭证 Credentials：BLE 配对 | 只报告 `ble_paired`；生成用 `ble_pair`，清除用 `ble_unpair` | 是 | 仅 USB；`ble_pair` 在配网窗口内，`ble_unpair` 键盘弹⑦确认 | 连接页“蓝牙配对” |
+| 配网模式 Pairing mode / 已激活时为“更换 Wi-Fi” Change Wi-Fi | 只报告（`prov_status`）；打开用 `prov_open` | 是 | 仅 USB；键盘弹⑦确认（与设置页相同）。未激活且有 License：确认后重启进窗口（涂鸦 App 可配网）；已激活或无 License：立即开窗口，不重启，已激活设备的涂鸦绑定不变 | 连接页“配网窗口” |
+| 解绑设备 Unbind device（只用于换账号 / 从头配网） | 无 | 是 | 只在键盘上（设置页，或任何界面按住 K1+K6 约 5 s）：已激活时弹⑦（松开 K6 解绑，K6 黄色快闪 / K1 取消，10 s）；未激活时等同“配网模式”；无 License 时状态栏提示“未写 License，只能用 USB 配置” | 不提供 |
+| （无设置页项）Wi-Fi | `wifi` 命令 | 是 | 仅 USB，配网窗口内 | 设备页 Wi-Fi 区 |
+| 已保存的 Wi-Fi Saved Wi-Fi（FR-15） | 列表 `wifi_list` / `wifi_list_state`；删除 `wifi_forget`、`wifi_clear` | 删除是，列表否 | 列表 USB / 已配对 BLE 只读；删除仅 USB，不需窗口，或键盘上 K6 两次 | 连接页“已保存的 Wi-Fi” |
+| （无设置页项）重置配网 | `reset_netcfg` 命令 | 是 | 仅 USB，配网窗口内，键盘弹⑦确认 | 设备页 |
+| 硬件测试 Test | — | — | 只在键盘上 | 不提供 |
+| 退出 Exit | — | — | — | — |
+
+- 敏感项一律需要键盘上的物理确认：`prov_open`、`ble_unpair`、`reset_netcfg` 各自弹⑦（松开 K6 确认 / 按下 K1 取消，10 s 无操作取消）；
+  `wifi`、`license`、`ble_pair` 只能在配网窗口内执行，而窗口本身只能经⑦确认打开。BLE 连接下 Companion 对敏感项只显示状态，
+  按钮置灰并说明原因；固件同样拒绝 BLE 来源（见“传输门控清单”）。
+
+### prov_open / ble_unpair（Companion → 键盘，仅 USB，FR-02）
+
+```json
+{"v":1,"type":"prov_open"}
+{"v":1,"type":"ble_unpair"}
+```
+
+- `prov_open`：键盘打开设置页并定位到 Pairing mode，弹出与设置页相同的确认框（⑦）。之后的行为与在键盘上操作完全一样
+  （有 License 时确认后重启一次再开窗口）。窗口已开：只回 `prov_status`。另一个⑦正在等待、测试页或 OTA 进行中：回
+  `prov_status`（`rejected: prov_open`、`reason: busy`）。
+- `ble_unpair`：键盘弹“清除蓝牙配对？”（⑦，K6 清除 / K1 取消，10 s）。确认后删除 KV 中的配对密钥，当前 BLE 会话立即失效，
+  回 `device_settings_state`（`ble_paired:false`）；取消回 `prov_status`（`rejected: ble_unpair`、`reason: cancelled`）；
+  没有密钥时直接回 `device_settings_state`；忙时回 `reason: busy`；不带 BLE 的固件回 `reason: unsupported`。
+- 两条都只接受 UART 来源（`ak_rx.c` 的 USB-only 清单），不要求配网窗口。
 
 #### 界面语言与 Chat 模式 agent
 
@@ -320,9 +386,15 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 {"v":1,"type":"bindings","payload":{"alias_a":"Plan","alias_b":"","alias_c":"Code"}}
 ```
 
-- Companion 连接 AK 时发送全部三个别名，修改别名后再次发送。
+- Companion 连接 AK 时发送，修改别名或绑定后再次发送。
 - `alias_a` / `alias_b` / `alias_c` 分别对应 K1 / K2 / K3（槽位 A / B / C）。
 - 每个别名最多 7 个可显示 ASCII 字符；空字符串表示在 AK 上使用默认名 A、B 或 C。
+- `name_a` / `name_b` / `name_c`（可选，显示文本，UTF-8 最多 48 字节）：该槽绑定的 Crew 会话名，显示在设置页“绑定会话”的
+  选槽页；空字符串 = 未绑定（显示“未绑定”）。旧固件忽略。
+
+```json
+{"v":1,"type":"bindings","payload":{"alias_a":"Plan","alias_b":"","alias_c":"","name_a":"Ki-board Mate","name_b":"","name_c":"Fix the parser"}}
+```
 
 ### wifi（仅 USB）
 
@@ -336,6 +408,36 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 - 回滚：设备之前连过的网络会被保留。新配置 30 s 内没有连上时，AK 写回旧配置并重连，回 `wifi_status` 的 `restored`（`ssid` 为旧网络）。
 - 对未激活设备，WiFi `connected` 后还必须完成下面的 SmartLife QR 激活；只有收到
   `cloud_ready` 后 activation data 才能在重启时恢复。
+
+### wifi_list / wifi_forget / wifi_clear（已保存的 Wi-Fi，FR-15）
+
+键盘记住连上过的网络，断线后自动换到信号最强的已保存网络。
+
+```json
+{"v":1,"type":"wifi_list"}
+{"v":1,"type":"wifi_forget","payload":{"ssid":"MyAP"}}
+{"v":1,"type":"wifi_clear"}
+```
+
+```json
+{"v":1,"seq":31,"type":"wifi_list_state","payload":{"max":10,"entries":[{"ssid":"MyAP","sec":"wpa2","current":true},{"ssid":"Cafe","sec":"unknown","current":false}]}}
+```
+
+- **记录**：设备拿到 IP 后记下 SSID、密码、安全类型（扫描所得，未知为 `unknown`）和连接序号，同 SSID 只更新密码、
+  安全类型和序号。涂鸦 App 配网写入的网络、Companion 的 `wifi` 命令、自动重连选中的网络都走同一条路径。
+  最多 10 条；满了再记新 SSID 时，替换**最久没连过**的一条（LRU，按最近一次连接成功的序号）。
+- **存储**：TAL KV 键 `ak_wifis`（TAL KV 本身用 AES-128-CBC 加密），一个带版本号（1）、条数和 CRC32 的小二进制块，最大约 1 KB。
+  校验失败（魔数、版本、CRC、长度、重复 SSID）整体丢弃，列表重新开始。
+- **升级迁移**：固件里没有该键或块无效、列表为空，且涂鸦 SDK 的 `netinfo`（升级前唯一的 Wi-Fi 配置）存在时，把它作为第 1 条。
+- **自动重连**：设备已激活、断线满 25 s（先让涂鸦自己重连）后，停掉涂鸦的重连循环，扫描，已保存网络按信号强度（同强度取最近连过的）
+  依次尝试，每个 20 s；全部失败后等 15 / 30 / 60 / 120 / 300 s（之后保持 300 s）再试。扫描里一个都没有时（隐藏 SSID），
+  只盲连最近连过的那一个。配网窗口开着或确认中、OTA、硬件测试页、未激活（涂鸦配网在用无线）、USB 刚下发的 `wifi` 的 30 s 回滚期内，不自动重连。
+- **删除当前连接的网络**：记录和涂鸦 `netinfo` 立即删除，连接保持到断开；断开后不再连它，转而连别的已保存网络。
+- `wifi_list_state`：最近连过的在前；`current` 表示正连着；**没有密码字段**，日志和协议都不出现密码。键盘上删除或连接状态变化后，
+  USB 连着时自动推送。`wifi_forget` / `wifi_clear` 后回 `wifi_list_state` 和 `ack`；SSID 不存在时同样回当前列表。
+- 新增和修改密码仍只有 `wifi` 命令（USB、配网窗口内）。BLE 只能读列表。
+- 键盘设置页“已保存的 Wi-Fi”：旋钮选，K6 删除（黄色快闪等第二次 K6，3 s 内有效），K1 返回；
+  K1、K6 为红，旋钮为蓝，等待第二次确认时 K6 黄色约 4 Hz 快闪。
 
 ### activation_status（AK → Companion，仅 UART0）
 
@@ -367,7 +469,7 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 - 用户在键盘上打开窗口：长按旋钮进入 Settings → `Pairing mode` → 确认框里按 K6（或旋到 Confirm 再按旋钮）。
   确认框默认选中 Cancel，10 s 无操作视为取消。窗口时长 180 s，LCD 状态栏倒计时；收到 `cloud_ready`
   后 5 s 自动关闭；在 Settings 里再次点击 `Pairing mode` 立即关闭。
-- 三连快速上电、或窗口内接受的 `reset_netcfg` 引起的重启之后，开机自动再开 180 s 窗口（这两种重置都已在设备上物理确认）。
+- 设置页「解绑设备」或 K1+K6 组合键（各自经⑦确认）、窗口内接受的 `reset_netcfg`，引起的重启之后开机自动再开 180 s 窗口。
 - 键盘确认打开窗口（Pairing mode 的 K6 或旋钮确认）：有 License 时，键盘先写下开窗标记并重启（LCD 显示 `Restarting into pairing mode`）；启动时读到标记即清除它、开 180 s 窗口，并只在这一次开机启用涂鸦 BLE 与 SoftAP 配网。没有 License 时不重启，窗口直接打开（USB 在窗口内写入 License）。
 - 标记是一次性的：开机读取后立即删除，异常重启不会让窗口永久打开。标记内容为 4 字节 `AKW1`，其他长度或内容一律视为不存在。
 - 窗口关闭（超时、cloud_ready 后 5 s、或手动退出）时，涂鸦 BLE 与 SoftAP 配网同时停止；窗口外涂鸦 BLE 不广播（固件每次循环停止广播，见 `ak_ble_gatt_stop_adv`）。
@@ -413,7 +515,7 @@ AK 在握手、本地调节或应用 Companion 命令后回报实际值：
 {"v":1,"type":"reset_netcfg"}
 ```
 
-- Companion 的「Enter pairing mode」按钮发送该命令，等效于设备端连续三次快速上电重启。
+- Companion 的「Unbind device (new account)」按钮发送该命令，效果与键盘上「解绑设备」（设置页或 K1+K6 按住 5 s）相同，只用于换账号或从头配网；只换 Wi-Fi 用「更换 Wi-Fi」+ `wifi`，不需要它。
 - 仅允许通过物理 USB/UART 发送；AK 固件对 BLE 来源拒绝（与 wifi/license 相同门控）。
 - 还要求配网窗口打开；AK 收到后先在 LCD 弹出“Reset network?”，回 `prov_status`（`reason: confirm_on_device`）。
   用户按 K6 后才执行，K1 或 10 s 未操作则取消（`reason: cancelled`）；与所有系统确认（⑦）一致。
@@ -516,7 +618,7 @@ K6 安装 / K1 取消，默认取消，10 s 无操作视为取消。确认后回
 Companion 把需要用户在键盘上做决定的事（权限审批、回复选项、提问卡、模型、权限模式）发成一个 **菜单**；
 键盘在 LCD 上画出来、接管按键并点亮对应键灯，用户按键后回一帧 `menu_result`。菜单的内容、排队和
 回复 Crew 由 Companion 负责；按键映射、灯光、二次确认、超时和口述作答的确认由键盘本地负责。
-定稿：2026-11-17。
+用户定稿：2026-11-17（内部需求记录“问题记录”）。
 
 能力协商：支持本节的固件在 `hello_ack.capabilities` 里带 `"menu"`。Companion 只向带 `menu` 的键盘发
 `menu` / `menu_close` / `notice` / `menu_parked`；不带时退回只点灯（旧行为）。载体：USB 与 BLE 都允许（BLE 必须已通过
@@ -530,19 +632,19 @@ Companion 把需要用户在键盘上做决定的事（权限审批、回复选�
 | 状态 | 进入 | 离开 | K1 | K2–K5 | K6 | EC11 | 灯光 |
 |---|---|---|---|---|---|---|---|
 | ① 待命 | 开机；其他状态结束 | 按语音键 → ②；菜单到达 → ④/⑤；EC11 长按 → ⑥；系统确认 → ⑦ | keymap（默认 single=chat1、double=instance1） | keymap（K2/K3 同 K1；K4 single：有 ESC 过的请求时 = 重新弹出，否则 keymap；K5 = 语音键） | keymap（single=confirm 只在 ③ 生效、double=model_toggle、long=model_menu） | 旋转 `encoder`；单击 keymap；长按 → ⑥ | K1–K3：对话 `waiting` 黄色呼吸；K4：有 ESC 过或排队的请求时黄色呼吸 |
-| ② 语音输入 | ① 或 ③ 按住语音键；④ 选“口述回答” | 云端识别出文字 → ③；无文字 / 失败 / 超时 / PC 听写松键 → ①（口述作答时留在 ② 可重说）；口述作答按 K1 → ④ | 口述作答：回菜单 | — | — | — | 同 ①（排队时 K4 黄呼吸）；口述作答：K1 红、语音键紫 |
+| ② 语音输入 | ① 或 ③ 按住语音键；④ 选“口述回答” | 云端识别出文字 → ③；电脑识别等待中收到 `input_restore` 文字 → ③；无文字 / 失败 / 超时 → ①（口述作答时留在 ② 可重说）；口述作答按 K1 → ④ | 口述作答：回菜单；电脑识别等待中：取消 → ① | — | — | — | 同 ①（排队时 K4 黄呼吸）；口述作答：K1 红、语音键紫 |
 | ③ 输入确认 | ② 识别出文字（Chat 模式除外）；Companion `input_restore`（直发失败，只从 ①） | K6 确认 / K1 取消 / K4 长按全删或删到空 / 20 s 无操作 → ①；口述作答：K6 发送 → ①，K1 或 20 s → ④ | 取消（上报 `bind:"cancel_all"`）；口述作答：回菜单 | K4 single 删一字、long 全删（键盘上的文字；注入模式下 PC 输入框同步删）；语音键再说一遍（替换文字） | 确认，`key` 帧带 `text`（口述作答：把文字作为答案发出） | — | K4 红呼吸、K6 绿闪；口述作答：K1 红、语音键紫、K6 绿。排队的请求只在状态栏提示（K4 留给删除） |
 | ④ 菜单 | 审批 / 问题卡片 / 回复选项到达且处于 ① | 选中 / ESC / `menu_close` / `timeout_s` → ①；更高优先级菜单替换 → ④ | ESC（请求保留，K4 找回） | 当前页第 1–4 项（见“按键映射”） | 确认高亮项 / 多选提交；审批菜单无效 | 旋转移动高亮并跨页；单击 = 高亮项 | 见“灯光” |
 | ⑤ 模型/模式菜单 | K6 长按（Companion 发 `kind:model`/`mode` 菜单） | 同 ④ | ESC | 同 ④ | 同 ④ | 同 ④ | 同 ④ |
 | ⑥ 设置 / 测试 | ①–③ 时 EC11 长按（结束 ②③） | 设置页 Exit | 设置页自定（见下） | 设置页自定 | 设置页自定 | 设置页导航 | 测试页自控；其余同前一状态 |
-| ⑦ 系统确认 | 配网窗口确认（设置页里）、Companion `reset_netcfg`、固件升级（`ota_begin`，见“固件升级（仅 USB）”） | 确认 / 取消 / 超时 | 取消 | — | 确认 | 配网窗口确认框：旋转选、单击执行 | — |
+| ⑦ 系统确认 | 配网窗口确认（设置页里，或 Companion `prov_open`）、Companion `reset_netcfg` / `ble_unpair`、固件升级（`ota_begin`，见“固件升级（仅 USB）”） | 确认 / 取消 / 超时 | 取消 | — | 确认 | 配网窗口确认框：旋转选、单击执行 | — |
 
 - **排队**：键盘不在 ① 时到达的菜单不抢屏，先挂起（② 时 K4 黄呼吸；③ 时 K4 保持红色删字/取消，只在状态栏显示
   `Request waiting`；K4 黄呼吸只在 ①② 出现），回到 ① 后自动弹出，
   带新的 300 ms 防误触。挂起时新到的菜单替换旧的（Companion 已按优先级排好，只发当前最该显示的一个）。
 - **优先级**：系统确认 > 审批 > 问题卡片 > 回复选项。系统确认由键盘本地判定（⑦ 盖住一切）；后三者由 Companion 排队（见下）。
 - **设置页**：目前只用 EC11（旋转选项/改值、单击进入/确认、Exit 项退出），K1–K6 不起作用；方向键 K2↑ K4← K5↓ K6→
-  预留给设置页，当前设置页只用旋钮。设置页里的“凭证”子页例外：K4 / 单击返回，K6 允许覆盖一次 License，K1 连按两次清除 BLE 配对。
+  预留给设置页，当前设置页只用旋钮。设置页里的“凭证”子页例外：K4 / 单击返回，K6 允许覆盖一次 License，K1 连按两次清除 BLE 配对。“绑定会话”的选槽页也例外：K1–K3 选槽（见“绑定会话”）。
 - Chat 语音模式下没有 ③（回复留在键盘上）；菜单照常显示。
 
 ### 语音文字的去向（③ 之后）
@@ -567,6 +669,10 @@ Companion 把需要用户在键盘上做决定的事（权限审批、回复选�
   直接发送模式下 Companion 提示 `Update keyboard firmware`，不发送。
 - `input_restore`（Companion → 键盘）：`text` 必填（显示文本，键盘按 UTF-8 边界截到 255 字节），`msg` 可选（状态栏，最多 48 字节）。
   只在键盘处于 ① 时生效（进入 ③ 并重新开始 20 s 计时），其他状态忽略。Companion 截短 `text` 使整帧不超过 511 字节。
+  Companion 在两种情况下发它：直接发送失败（`msg` 为失败原因，`src:"retry"`）；电脑识别得到最终文字（`msg` 为引擎名，
+  `src:"pc"`）。
+- `src`（可选）：`pc` = 电脑识别结果，状态栏绿色；还在 ② 等电脑识别时也生效（见 `voice`），`text` 可为空（结束等待，回 ①）。
+  `retry` 或缺省（旧 Companion）= 直接发送失败，状态栏红色，与以前相同；其他值按 `retry` 处理。
   USB 与已认证的 BLE 都允许。
 
 ### menu（Companion → 键盘）
@@ -584,7 +690,7 @@ Companion 把需要用户在键盘上做决定的事（权限审批、回复选�
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `id` | string | 是 | 1..15 字节 `[a-z0-9_]`。Companion 生成，每个菜单实例唯一（内容换了一个请求就换新 `id`）。标识字段，不合规整帧丢弃 |
-| `kind` | string | 是 | `approval` / `options` / `question` / `model` / `mode`。影响 LCD 标题、状态（`model`/`mode` = ⑤）和审批的 K6 规则；未知值按 `options` |
+| `kind` | string | 是 | `approval` / `options` / `question` / `model` / `mode` / `instance` / `session`。影响 LCD 标题、状态（`model`/`mode`/`instance`/`session` = ⑤）和审批的 K6 规则；未知值按 `options`。`instance` / `session` 只用于“绑定会话” |
 | `title` | string | 否 | 标题，显示文本，键盘按 UTF-8 边界截到 40 字节 |
 | `ctx` | string | 否 | 一行短上下文（命令等），显示文本，最多 120 字节，LCD 折行最多 3 行 |
 | `more` | bool | 否 | `true`：完整内容（diff、代码、长问题）只在电脑屏幕上，LCD 显示 `See screen`；缺省 `false` |
@@ -672,6 +778,53 @@ Companion 把需要用户在键盘上做决定的事（权限审批、回复选�
 - 带 `seq`，Companion 按普通板端事件回 `ack`。
 - v0.3.53 的 `menu_voice` 帧已取消（Companion 按未知类型忽略）。
 
+### 绑定会话（设置页 → 绑定会话）
+
+把一个 Kiro Crew 会话（含 Bot 的对话线程、远端实例的会话）绑定到 K1–K3 的槽位 A / B / C。固件带 `bind_session` 能力。
+旧 Companion 不回应 `bind_session`，键盘 5 s 后提示 `Companion 未响应`。
+
+| 步骤 | 键盘 | 按键 | 结束 |
+|---|---|---|---|
+| ① 选槽 | 设置页内的本地页：A / B / C 三行，各显示槽名和 `bindings` 的 `name_*`（空 = 未绑定）；K1–K3 蓝灯 | K1 / K2 / K3 选槽（按下即生效）；旋钮单击返回设置页；其他键、旋转只算操作 | 10 s 无操作回设置页 |
+| ② 选实例 | 只在有远端实例时出现：Companion 发 `menu` `kind:"instance"`，第 1 项本机，其后为远端实例 | 分页直选菜单（K2–K5 选、旋钮翻页、K1 返回 ①） | — |
+| ③ 选会话 | Companion 发 `menu` `kind:"session"`：Bot 一组在最前（标签 `@` 开头），普通会话在后，worker 会话默认不列（Companion 设置可开），最后一项“解除绑定”（红） | 同上；K1 返回 ②（有实例页时）或 ① | — |
+| ④ 完成 | 所选槽的键灯绿色闪烁 1.5 s，回设置页，提示行显示 `msg` | — | — |
+
+- 菜单显示期间键盘关掉设置模态，菜单按 ⑤（用户打开的菜单）显示；两步之间（结果已发、Companion 未答）按键全部无效，
+  5 s 没有回答回到 ① 并提示 `Companion 未响应`。菜单 `timeout_s` 为 60，超时后流程结束回设置页。
+- 流程进行中 Companion 暂停其他菜单（审批、提问、回复选项），结束后再显示。
+
+```json
+{"v":1,"seq":70,"type":"bind_session","payload":{"slot":2}}
+{"v":1,"type":"menu","payload":{"id":"b1","kind":"instance","title":"绑定 B","timeout_s":60,"items":[{"label":"本机","checked":true},{"label":"Remote 1"}]}}
+{"v":1,"type":"menu","payload":{"id":"b2","kind":"session","title":"绑定 B","page":1,"pages":2,"timeout_s":60,"items":[{"label":"@Ki-board Mate"},{"label":"Fix the parser"},{"label":"Plan v0.4"},{"label":"Review"}]}}
+{"v":1,"type":"bind_done","payload":{"slot":2,"result":"bound","msg":"已绑定 Ki-board Mate"}}
+```
+
+**`bind_session`（键盘 → Companion）**：`slot` 1..3，带 `seq`（回 `ack`）。USB 或已认证的 BLE。
+
+**`bind_done`（Companion → 键盘）**：结束一步。
+
+| 字段 | 说明 |
+|---|---|
+| `slot` | 1..3，必须是键盘正在绑定的槽，否则忽略 |
+| `result` | `bound` / `unbound`：已绑定 / 已解除，键灯闪绿后回设置页；`back`：回 ①（实例页或无实例时的会话页按了 K1）；`closed`：回设置页（菜单超时）；`error`：回 ① 并红色提示 `msg`（Crew 离线、取会话列表失败、保存失败）。其他值整帧丢弃 |
+| `msg` | 可选，显示文本，最多 48 字节 |
+
+**Companion 侧**
+
+- 实例列表：`GET /api/instances`（owner-only，`instances.enabled` 关时 403 `instances_disabled` = 没有远端实例）。只列
+  未停用、且已连接或连过的实例，顺序与 dashboard 实例切换器一致（Ctrl+2 起）。
+- 会话列表：本机 `GET /api/chat/slots?crew=all`（默认列表会去掉 Crew Mode worker，Companion 取全部后自己过滤）；远端
+  `GET /api/instances/{id}/chat-slots`（Hub 只转发 key、title、agent、running、pending_approval、needs_input、crew_root）。
+  Bot = `mode:"member"`（远端行没有 `mode`，按派生 key 前缀 `member-` 判断）；worker = 带 `crew_root` 或 `mate_root`
+  （远端行没有 `mate_root`，Bot 派出的远端 worker 不能识别，会照常列出）。最多 47 个会话加“解除绑定”（12 页 × 4 项）。
+- 绑定存 `~/.ak-companion/binds.json` 的 `sessions[i]`：`<实例 id>:<slot key>`，与 Hub 给远端行写的 `row_identity`
+  相同，本机写 `local:<slot key>`。旧文件里的裸 key 和 Hook 的 `dashboard:<key>` 读入时按本机处理；`names[i]` 存会话名。
+  不再存 Ctrl+N 序号（旧的 `instances` 字段读入时丢弃；K1–K3 双击切实例仍由 keymap 的 `instanceN` 决定）。
+- 远端会话第一版只显示状态灯：Companion 每 5 s 读一次有绑定的远端实例的 `chat-slots`，按 running / pending_approval /
+  needs_input 着色。单击该槽只提示 `远端会话：仅显示状态`，不发消息、不审批（Hub 的 `proxy/api/chat` 未实测，以后再做）。
+
 ### 按键映射（FR-08）
 
 菜单显示期间（④⑤）键盘接管 K1–K6 和 EC11：这些输入不再上报 `key`/`encoder`，也不走 keymap 绑定，**K5 不是语音键**。
@@ -706,7 +859,7 @@ LED1..LED6 在 K1..K6 下，LED7 在 EC11。菜单显示时**只点亮当前可�
 | 蓝 | 可选择 | `role:"normal"` 的项：普通选项、问题卡片答案、回复快捷选项、模型名 |
 | 绿 | 确认 | `role:"confirm"` 的项；非审批菜单的 K6 |
 | 红 | 取消 / 拒绝 | K1（ESC）；`role` 为 `cancel`、`danger` 的项 |
-| 黄 | 注意 / 二次确认 / 等待 | `role:"attention"` 常亮；二次确认等待中快闪（约 4 Hz）；等待处理的对话与被 ESC 的请求呼吸（约 0.5 Hz） |
+| 黄 | 注意 / 二次确认 / 等待 | `role:"attention"` 常亮；K1+K6 恢复组合键按住时 K1、K6 常亮；二次确认等待中快闪（约 4 Hz，含解绑确认的 K6）；等待处理的对话与被 ESC 的请求呼吸（约 0.5 Hz） |
 | 紫 | 语音 / 口述 | `role:"voice"` 的项；口述作答中的语音键 |
 
 - K2–K5：当前高亮项（和多选已勾选项）用全亮度，其余项约 40%。LED7 显示 EC11 单击会选中的高亮项的颜色（审批菜单熄灭）。
@@ -773,8 +926,9 @@ Companion 不可用时，回退直连 UART/USB-CDC 写入板子。
 
 ### 传输门控清单（USB-only、窗口与 BLE）
 
-`ak_rx.c` 的 `ak_rx_type_is_sensitive` 列出的五条命令，只接受物理 UART/USB 来源；BLE 来源一律丢弃，即使已认证。
-其中前五条还要求配网窗口打开（`ak_provision_check`，180 s，见 `prov_status`）。
+`ak_rx.c` 的 `ak_rx_type_is_sensitive` 列出的五条命令（前五行）只接受物理 UART/USB 来源，并要求配网窗口打开
+（`ak_provision_check`，180 s，见 `prov_status`）；`ak_rx_type_is_usb_only` 列出的命令同样只接受 UART，但不看窗口，
+由键盘自己弹⑦确认。BLE 来源一律丢弃，即使已认证。
 
 | 命令 | 来源 | 窗口 | 说明 |
 |---|---|---|---|
@@ -783,6 +937,11 @@ Companion 不可用时，回退直连 UART/USB-CDC 写入板子。
 | `license_read` | 仅 USB | 需要 | 仅 debug profile |
 | `reset_netcfg` | 仅 USB | 需要 | 另需设备上 K6 确认 |
 | `ble_pair` | 仅 USB | 需要 | 生成 BLE 配对密钥，K 只经 UART0 回送 |
+| `prov_open` | 仅 USB | 不需要 | 请求打开配网窗口，键盘弹⑦确认（FR-02） |
+| `ble_unpair` | 仅 USB | 不需要 | 请求清除键盘上的 BLE 配对，键盘弹⑦确认（FR-02） |
+| `wifi_list` | USB 或已认证 BLE | 不需要 | 只读，回已保存网络的 SSID 列表，不含密码（FR-15） |
+| `wifi_forget`、`wifi_clear` | 仅 USB | 不需要 | 删除一个 / 全部已保存网络；只删数据，不写入凭据（FR-15） |
+| `ota_*`、`probe_line` | 仅 USB | 不需要 | 固件升级与调试探针，键盘自己要求 K6 确认（docs/ota.md） |
 | `keymap`、`config`（语音路由）、`device_settings`、`bindings`、`led`、`menu`、`menu_close`、`notice`、`display`、`ping`、`bye` | USB 或已认证 BLE | 不需要 | 经 BLE 时必须先通过 BLE 安全通道（见下文） |
 | `hello` | USB 或已认证 BLE | 不需要 | 只有 USB 的 `hello` 锁定本次开机为 USB；BLE 的 `hello` 不点亮 USB 图标 |
 
@@ -795,7 +954,14 @@ License 写入顺序（release 固件没有编译期 UUID/AuthKey）：
 涂鸦 BLE 与 AK BLE 的关系：
 
 - 激活前：涂鸦 BLE 独占回调，AK BLE 不接管。
-- 激活后：AK 接管涂鸦 BLE 的 TAL/TKL 回调，涂鸦 BLE 不再收到 GATT/GAP 事件。涂鸦的 `ble_mgr` 仍会在 IoT 连接/断开时改写并重启广播，固件在 MQTT 连接事件后 4 s 把 AK 的广播数据写回（`ak_ble_gatt_adv_settle`）。
+- 配网窗口开着（含开机由配网模式 / 解绑打开的 180 s 窗口）或其确认框在显示时，AK 一律不接管，即使设备已激活；窗口关闭或超时后再接管。
+  已激活设备的涂鸦 SDK 不会进入取 token 状态，涂鸦 BLE 配网实际不会启动（`ble_mgr` 以已绑定身份广播），所以已激活设备要用 App 重新配网，
+  必须先在键盘上“解绑设备”：清涂鸦绑定和 SDK 里当前那条 Wi-Fi（保留 License 和 FR-15 已保存的 Wi-Fi 列表），重启进入 180 s 窗口。
+- 换 Wi-Fi 与绑定无关：已激活设备经 USB `wifi` 换网络只让 netmgr 用新凭据重连（`netconn_wifi_set` 拷贝凭据并重连；网卡变化时
+  `tuya_iot` 只做 MQTT 重连），激活数据（devId、密钥，存在 tuya_iot 自己的 KV 命名空间）不动，不会重置也不会重新激活。
+  涂鸦 App 对已绑定设备的蓝牙“更换网络”不支持：TuyaOpen 只在取 token（未激活）时注册蓝牙配网通道，`FRM_DATA_TRANS_SUBCMD_SET_WIFI`
+  只有定义，没有处理函数；要支持需改 SDK。
+- 激活后（且窗口已关闭）：AK 接管涂鸦 BLE 的 TAL/TKL 回调，涂鸦 BLE 不再收到 GATT/GAP 事件。涂鸦的 `ble_mgr` 仍会在 IoT 连接/断开时改写并重启广播，固件在 MQTT 连接事件后 4 s 把 AK 的广播数据写回（`ak_ble_gatt_adv_settle`）。
 - 涂鸦 BLE 配网入口只在配网窗口内开放：窗口外不广播，配网通道未启动。键盘确认后经一次重启打开窗口（见上文 `prov_status`）。
 
 ### BLE 安全通道

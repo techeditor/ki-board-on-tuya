@@ -55,6 +55,10 @@ typedef struct {
     uint32_t        overwrite_deadline_ms;
     bool            reset_pending; /* Companion reset_netcfg waits for K6 */
     uint32_t        reset_deadline_ms;
+    bool            unpair_pending; /* Companion ble_unpair waits for K6 */
+    uint32_t        unpair_deadline_ms;
+    bool            rebind_pending; /* Settings "Unbind & re-pair" waits for K6 */
+    uint32_t        rebind_deadline_ms;
 } ak_provision_t;
 
 void ak_provision_init(ak_provision_t *p);
@@ -120,7 +124,56 @@ bool ak_provision_reset_pending(const ak_provision_t *p, uint32_t now_ms);
  */
 bool ak_provision_reset_resolve(ak_provision_t *p, bool confirm, uint32_t now_ms);
 
+/**
+ * Companion `ble_unpair` (USB, FR-02): ask on the device (⑦, K6 / K1, 10 s).
+ * Not tied to the pairing window. False when another system confirm is up.
+ */
+bool ak_provision_unpair_request(ak_provision_t *p, uint32_t now_ms);
+
+/** True while the BLE unpair dialog is up. */
+bool ak_provision_unpair_pending(const ak_provision_t *p, uint32_t now_ms);
+
+/** K6 (true) or K1 (false). True only when the pairing should be cleared now. */
+bool ak_provision_unpair_resolve(ak_provision_t *p, bool confirm, uint32_t now_ms);
+
 /** Wire name of a refusal reason: source / closed ("" for ALLOW). */
 const char *ak_provision_verdict_str(ak_prov_verdict_t verdict);
+
+/* ── Unbind & re-pair (Settings, device-local) ──────────────────────────── */
+
+typedef enum {
+    AK_PAIR_ACTION_NEED_LICENSE = 0, /* no License: only USB can configure; just say so */
+    AK_PAIR_ACTION_PAIRING,          /* not activated: same as Settings > Pairing mode */
+    AK_PAIR_ACTION_REBIND,           /* activated: ask, then clear the Tuya binding */
+} ak_pair_action_t;
+
+/**
+ * Settings > Pairing mode ("Change Wi-Fi" on an activated device), after K6:
+ * restart into a boot window only when Tuya App pairing can run in it
+ * (License present, not activated). An activated device changes Wi-Fi over
+ * USB in a window opened at once: no restart, and the Tuya binding (devId,
+ * keys) is untouched. Without a License the window also opens at once.
+ */
+bool ak_provision_pairing_needs_restart(bool license_present, bool activated);
+
+/** What Settings > "Unbind & re-pair" does for this device. */
+ak_pair_action_t ak_provision_rebind_action(bool license_present, bool activated);
+
+/** Show the unbind confirm (⑦, K6 / K1, 10 s). False when another system
+ *  confirm is up. */
+bool ak_provision_rebind_request(ak_provision_t *p, uint32_t now_ms);
+
+bool ak_provision_rebind_pending(const ak_provision_t *p, uint32_t now_ms);
+
+/** K6 (true) or K1 (false). True only when the unbind should run now. */
+bool ak_provision_rebind_resolve(ak_provision_t *p, bool confirm, uint32_t now_ms);
+
+/**
+ * May AK take the shared BLE callbacks over from Tuya now? Only on an
+ * activated device whose Tuya binding is not in progress, and never while a
+ * pairing window or its confirm is up (FR-12 B): BLE belongs to Tuya netcfg
+ * for the whole window.
+ */
+bool ak_provision_ble_takeover_allowed(const ak_provision_t *p, bool activated, bool tuya_provisioning);
 
 #endif /* AK_PROVISION_H */

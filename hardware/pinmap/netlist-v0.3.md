@@ -5,6 +5,19 @@
 > 供原理图复核、PCB导入和固件联调使用。实际位号对齐已审核的EasyEDA工程。
 >
 > 机器可读引脚源：[pinmap-v0.3.json](pinmap-v0.3.json)
+>
+> **适用范围**：本网表只适用于 **v0.3.0（lite）**。
+> - v0.3.1 low-profile 的位号与本表不同，见 [netlist-v0.3.1-low-profile.md](netlist-v0.3.1-low-profile.md)。**R5–R8 在两版上指向不同器件**：
+>
+>   | 位号 | v0.3.0（本表） | v0.3.1 low-profile |
+>   |---|---|---|
+>   | R5 | 10Ω，LCD 背光 LEDK 限流 | 10kΩ，LCD TE 串阻 |
+>   | R6 | 2.2kΩ，Q1 基极限流 | 10Ω，背光限流 |
+>   | R7 | 10kΩ，Q1 基极下拉 | 2.2kΩ，Q1 基极 |
+>   | R8 | 10kΩ，LCD TE 串阻 | 10kΩ，Q1 基极下拉 |
+>
+>   `check_pins_v0.3.py` 和 `bom-v0.3.md` 按 v0.3.0 的位号写，不能直接用于 v0.3.1。
+> - v0.3.2_standard 的灯链电源开关（P18、Q2、Q3、R9–R12、C15）不在本表，也不在 v0.3.1 中，见 [pinmap-v0.3.md](pinmap-v0.3.md) §5。
 
 ## 1. 元件与位号
 

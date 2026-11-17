@@ -40,6 +40,8 @@
 | 长按阈值 | 800 ms | `AK_FSM_LONG_PRESS_MS` |
 | 双击窗口（第一次松开 → 第二次按下） | 250 ms | `AK_GESTURE_DOUBLE_WINDOW_MS` |
 
+> 注（已核对）：`ak_input_fsm.h` 里的 `AK_DCLICK_WINDOW_MS`（400 ms）和 `dclick_short_press` 属于 v0.2 的 dclick 检测器。v0.3 的手势路径（`ak_gesture_feed` / `ak_gesture_tick`）不调用它，它只在 `test_ak.c` 的单测里出现，上表的 250 ms 才是手势用的窗口。
+
 推论：
 
 - `single` 比松开晚最多 250 ms，这是区分单击和双击的代价。需要零延迟的键应设成 `voice` 或只绑 `long`。

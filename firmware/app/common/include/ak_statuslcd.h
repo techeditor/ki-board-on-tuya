@@ -1,6 +1,6 @@
 /**
  * @file ak_statuslcd.h
- * @brief Shared lightweight status LCD for test firmware (feature-probes + bringup).
+ * @brief Shared lightweight status LCD for test firmware (bringup; feature probes: see git tag archive/feature-probes).
  *
  * Opens the CL28CK230-18A (ST7789) panel in landscape 320x240 via the raw TDD/TDL
  * path (no LVGL) and binds ak_gfx (8x8 font) to a PSRAM frame buffer. Every test

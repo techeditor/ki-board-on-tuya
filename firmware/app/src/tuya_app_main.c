@@ -26,11 +26,13 @@
 #include "ak_text.h"
 #include "ak_asr.h"
 #include "ak_cloud.h"
+#include "ak_combo.h"
 #include "ak_cred.h"
 #include "ak_wifi.h"
 #include "ak_input.h"
 #include "ak_keymap.h"
 #include "ak_menu.h"
+#include "ak_bind.h"
 #include "ak_ui.h"
 #include "ak_icons16.h"
 #include "ak_session_icons.h"
@@ -165,6 +167,9 @@ static char s_asr_tx_frame[ASR_FRAME_BUFFER_SIZE];
  * heartbeat pong) refreshes liveness. A graceful bye or heartbeat timeout
  * clears the link, so an unplug/crash cannot leave the USB icon stuck on. */
 static bool s_pc_connected = false;
+/* The Companion's hello said it returns PC ASR text (`pc_asr`): in the system
+ * route the keyboard then waits in ② after the voice key (docs/pc-asr.md). */
+static bool s_pc_asr_results = false;
 #if AK_TRANSPORT_UART || AK_TRANSPORT_DUAL
 static uint32_t s_usb_last_rx_ms;
 #endif
@@ -187,6 +192,8 @@ static ak_voice_route_t s_voice_route;
 #define AK_VOICE_MODE_KV_KEY "ak_vmode"
 /* Interface language (FR-01), one byte (ak_lang_to_byte), kept in KV. */
 #define AK_LANG_KV_KEY "ak_lang"
+/* LCD font size, one byte: its px (12 / 16, ak_text_size_px), kept in KV. */
+#define AK_FONT_SIZE_KV_KEY "ak_fontsz"
 static ak_voice_mode_t s_voice_mode = AK_VOICE_MODE_ASR;
 /* K5 pressed in Chat mode while the cloud is down: swallow its LONG/UP. */
 static bool s_ptt_chat_blocked;
@@ -241,6 +248,9 @@ static ak_settings_model_t s_settings;
 static bool                s_settings_active;
 static bool                s_settings_confirmed;
 static bool                s_center_long_consumed;
+/* Settings > Bind session (ak_bind.h): the slot page is drawn inside the
+ * settings modal; the instance / session menus run with settings closed. */
+static ak_bind_t           s_bind;
 
 /* LCD menu (shared/protocol/protocol.md "LCD 菜单与按键灯光"). While it owns
  * the keys, K1-K6 / EC11 go to ak_menu instead of the keymap. A key whose
@@ -599,6 +609,17 @@ static volatile bool  s_prov_cloud_ready_pending;
 static uint32_t       s_prov_shown_s;
 static uint32_t       s_prov_reset_seq; /* seq of the reset_netcfg waiting for K6 */
 static bool           s_cred_page;      /* Settings > Credentials is showing */
+#if AK_ENABLE_DISPLAY
+/* Settings > Saved Wi-Fi (FR-15): knob selects, K6 deletes (twice), K1 back. */
+static bool           s_wifi_page;
+static uint8_t        s_wifi_sel;
+static bool           s_wifi_del_armed;
+static char           s_wifi_del_ssid[AK_WIFI_STORE_SSID_MAX + 1U];
+static uint32_t       s_wifi_del_deadline_ms;
+#define AK_WIFI_DEL_CONFIRM_MS 3000U /* same window as the menu double confirm */
+#endif
+static uint32_t       s_wifi_sent_rev = 0xFFFFFFFFU; /* last wifi_list_state pushed */
+static volatile bool  s_wifi_list_dirty;             /* link state changed: "current" may differ */
 #if AK_TRANSPORT_DUAL || AK_TRANSPORT_BLE_GATT
 static bool           s_cred_unpair_armed; /* K1 pressed once on Credentials */
 #endif
@@ -741,8 +762,10 @@ static void restart_after_fatal_init(const char *component, OPERATE_RET rt)
 /* Forward declarations: PTT / voice helpers are defined below but referenced by
  * on_input_event and send_hello_ack above them. */
 static void on_ptt_event(ak_input_event_t event);
+static void send_voice(const char *state);
 static void send_voice_source(void);
 static void ak_language_apply(ak_lang_t lang, bool persist);
+static void ak_font_size_apply(ak_text_size_t size, bool persist);
 #if AK_ENABLE_DISPLAY
 static void send_device_settings(void);
 static void ak_voice_ui_set_state(ak_voice_ui_state_t state);
@@ -756,11 +779,19 @@ static void dispatch_gesture_for_slot(const char *id, ak_gesture_t g);
 static void ak_select_session_key(const char *id);
 static void ak_render_status(void);
 static void ak_settings_draw(void);
+static void ak_bind_draw(uint32_t now_ms);
+static void ak_bind_apply(ak_bind_do_t act, const char *msg, uint16_t color);
+static void ak_lcd_text(const char *utf8, char *out, size_t cap);
 static void ak_chat_scroll(int32_t detents);
 static void ak_voice_mode_apply(ak_voice_mode_t mode, bool persist);
 static void ak_prov_changed(void);
 static void ak_prov_confirm_dialog(void);
 static void ak_prov_reset_resolve(bool confirm);
+static void ak_prov_unpair_resolve(bool confirm);
+static void ak_prov_rebind_resolve(bool confirm);
+#if AK_ENABLE_DISPLAY
+static void ak_rebind_clicked(void);
+#endif
 static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
                                       ak_input_event_t event, uint32_t held_ms);
 /* Returns true when the encoder rotation was consumed by the modal settings UI
@@ -852,7 +883,8 @@ static void ak_status_tmp_set(const char *text, uint16_t color, uint32_t span_ms
 static void ak_ui_sync(uint32_t now)
 {
     bool settings = s_settings_active || s_test_active;
-    bool system   = ak_provision_reset_pending(&s_prov, now) || s_prov.state == AK_PROV_CONFIRMING;
+    bool system   = ak_provision_reset_pending(&s_prov, now) || ak_provision_unpair_pending(&s_prov, now) ||
+                  ak_provision_rebind_pending(&s_prov, now) || s_prov.state == AK_PROV_CONFIRMING;
 #if AK_TRANSPORT_HAS_UART
     system = system || ak_ota_link_busy(); /* ⑦ firmware update: confirm, then progress */
 #endif
@@ -892,6 +924,9 @@ static void ak_menu_handle(const ak_menu_out_t *out)
         }
         PR_NOTICE("menu %s: %s n=%u", s_menu.id, out->kind == AK_MENU_OUT_RESULT ? "result" : out->reason,
                   (unsigned)out->n);
+        if (ak_menu_is_bind(&s_menu)) {
+            ak_bind_menu_answered(&s_bind, now);
+        }
         ak_ui_menu_gone(&s_ui);
         break;
     case AK_MENU_OUT_DICTATE:
@@ -992,6 +1027,11 @@ static void ak_menu_on_frame(const char *type, const char *payload)
             if (s_ui.dictating) {
                 s_asr_for_menu = false; /* the menu being dictated was replaced */
             }
+            if (ak_menu_is_bind(&s_menu) && ak_bind_menu_opened(&s_bind, now)) {
+                s_settings_active = false; /* the flow's menu shows as ⑤ */
+            } else if (ak_bind_active(&s_bind) && !s_settings_active) {
+                ak_bind_init(&s_bind); /* another menu took over between the flow's steps */
+            }
             ak_ui_menu_arrived(&s_ui, ak_menu_is_model(&s_menu));
             /* Hide at once when it must wait (②/③/⑥/⑦), so no key reaches it. */
             ak_menu_set_hidden(&s_menu, !ak_ui_menu_visible(&s_ui), now);
@@ -1012,8 +1052,12 @@ static void ak_menu_on_frame(const char *type, const char *payload)
             return;
         }
         bool was_open = s_menu.state == AK_MENU_OPEN;
+        bool was_bind = ak_menu_is_bind(&s_menu);
         if (!ak_menu_on_close(&s_menu, id)) {
             return; /* not the current menu */
+        }
+        if (was_bind) {
+            ak_bind_menu_answered(&s_bind, now); /* bind_done or the 5 s reply timeout follows */
         }
         if (was_open) {
             if (s_ui.dictating) {
@@ -1051,12 +1095,133 @@ static void ak_menu_on_frame(const char *type, const char *payload)
         ak_render_status();
     }
 }
+
+/* ───────────── Settings > Bind session glue (ak_bind.h) ─────────────
+ * The slot page lives inside the settings modal; while the Companion's
+ * instance / session menu is up, settings is closed so the menu shows as ⑤,
+ * and it reopens when bind_done (or a timeout) ends that step. */
+
+static void ak_bind_apply(ak_bind_do_t act, const char *msg, uint16_t color)
+{
+    switch (act) {
+    case AK_BIND_DO_REQUEST: {
+        char     frame[64];
+        uint32_t sequence;
+        if (transport_begin_sequenced(&sequence)) {
+            transport_end_sequenced(frame, ak_proto_bind_session(frame, sizeof(frame), sequence, s_bind.slot));
+        }
+        PR_NOTICE("bind session: slot %u requested", (unsigned)s_bind.slot);
+        break;
+    }
+    case AK_BIND_DO_SETTINGS:
+    case AK_BIND_DO_PICK:
+    case AK_BIND_DO_NO_REPLY:
+        /* A flow menu still on screen (bind_done arrived early) goes away. */
+        if (s_menu.state == AK_MENU_OPEN && ak_menu_is_bind(&s_menu) && ak_menu_on_close(&s_menu, s_menu.id)) {
+            ak_ui_menu_gone(&s_ui);
+        }
+        s_settings_active    = true;
+        s_settings_confirmed = false;
+        if (act == AK_BIND_DO_NO_REPLY) {
+            msg   = ak_tr(AK_STR_BIND_NO_REPLY);
+            color = AK_COL_RED;
+        }
+        break;
+    default:
+        break;
+    }
+    if (msg != NULL && msg[0] != '\0') {
+        ak_status_tmp_set(msg, color, AK_MENU_NOTICE_MS); /* the settings / slot page shows it */
+    }
+    if (act != AK_BIND_DO_NONE) {
+        ak_ui_sync(tal_system_get_millisecond());
+        ak_render_status();
+    }
+}
+
+/* bind_done {slot, result, msg}: the Companion finished (or left) a step. */
+static void ak_bind_on_done(const char *payload)
+{
+    char     result[12] = "";
+    char     msg[AK_MENU_NOTICE_MAX + 1U] = "";
+    uint32_t slot = 0U;
+    if (ak_json_get_uint(payload, "slot", AK_BIND_SLOTS, &slot) != AK_JSON_OK || slot == 0U ||
+        ak_json_get_str(payload, "result", result, sizeof(result)) != AK_JSON_OK ||
+        ak_json_get_str_clip(payload, "msg", msg, sizeof(msg)) == AK_JSON_INVALID) {
+        PR_WARN("bind_done rejected: malformed");
+        return;
+    }
+    ak_bind_result_t r = ak_bind_result_from(result);
+    if (r == AK_BIND_RESULT_INVALID) {
+        PR_WARN("bind_done rejected: result");
+        return;
+    }
+    char text[AK_MENU_NOTICE_MAX + 1U];
+    ak_lcd_text(msg, text, sizeof(text));
+    if (text[0] == '\0' && (r == AK_BIND_RESULT_BOUND || r == AK_BIND_RESULT_UNBOUND)) {
+        (void)snprintf(text, sizeof(text), "%s", ak_tr(r == AK_BIND_RESULT_BOUND ? AK_STR_BIND_BOUND : AK_STR_BIND_CLEARED));
+    }
+    ak_bind_do_t act = ak_bind_done(&s_bind, (uint8_t)slot, r, tal_system_get_millisecond());
+    PR_NOTICE("bind_done slot %u %s -> %d", (unsigned)slot, result, (int)act);
+    ak_bind_apply(act, text, r == AK_BIND_RESULT_ERROR ? AK_COL_RED : AK_COL_GREEN);
+}
 #endif /* AK_ENABLE_DISPLAY */
 
 /* Input event -> local settings UI or JSONL frame on the active transport.
  * v0.3 stage 乙: VOICE keys run the hold-to-talk edge path; every other key is
  * NORMAL and runs the single/double/long classifier, whose resolved gesture
  * selects the bound action from the keymap. */
+/* K6 confirms a system dialog on release, and only after a press that began
+ * while the dialog was up; K1 cancels on press. So K6 going down a moment
+ * before K1 (the K1 + K6 combo) never confirms anything. True when the
+ * dialog is decided; *confirm says how. */
+static bool s_confirm_k6_down;
+
+static bool ak_confirm_key(const char *id, ak_input_event_t event, bool *confirm)
+{
+    if (strcmp(id, "k1") == 0 && event == AK_INPUT_EVENT_DOWN) {
+        s_confirm_k6_down = false;
+        *confirm          = false;
+        return true;
+    }
+    if (strcmp(id, "k6") == 0) {
+        if (event == AK_INPUT_EVENT_DOWN) {
+            s_confirm_k6_down = true;
+        } else if (event == AK_INPUT_EVENT_UP && s_confirm_k6_down) {
+            s_confirm_k6_down = false;
+            *confirm          = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Recovery combo (K1 + K6, 5 s; ak_combo.h). */
+static ak_combo_t s_combo;
+
+/* The combo began: drop every half-finished use of K1 and K6 so neither key
+ * resolves a gesture, a menu item or a dialog confirm when it is released. */
+static void ak_combo_drop_key_state(void)
+{
+    static const char *const ids[2] = {"k1", "k6"};
+    uint8_t                  mask   = 0U;
+    for (int i = 0; i < 2; i++) {
+        int slot = ak_keymap_slot_for_id(ids[i]);
+        if (slot >= 0) {
+            ak_gesture_init(&s_key_gesture[slot]);
+            mask |= (uint8_t)(1U << slot);
+        }
+    }
+    s_confirm_k6_down = false;
+#if AK_ENABLE_DISPLAY
+    s_menu_swallow &= (uint8_t)~mask;
+    ak_menu_drop_keys(&s_menu, mask);
+#else
+    (void)mask;
+#endif
+    PR_NOTICE("recovery combo: K1 + K6 held; unbind confirm in %u s", (unsigned)(AK_COMBO_HOLD_MS / 1000U));
+}
+
 static void on_input_event(ak_input_kind_t kind, const char *id,
                            ak_input_event_t event, uint32_t held_ms)
 {
@@ -1068,19 +1233,47 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
      * cancels (system confirm ⑦, default cancel after 10 s); during the
      * transfer and the debug UART probe every key is ignored. */
     if (ak_ota_link_busy()) {
-        if (ak_ota_link_confirming() && kind == AK_INPUT_KIND_KEY && event == AK_INPUT_EVENT_DOWN &&
-            (strcmp(id, "k6") == 0 || strcmp(id, "k1") == 0)) {
-            ak_ota_link_confirm(strcmp(id, "k6") == 0, tal_system_get_millisecond());
+        bool confirm = false;
+        if (ak_ota_link_confirming() && kind == AK_INPUT_KIND_KEY && ak_confirm_key(id, event, &confirm)) {
+            ak_ota_link_confirm(confirm, tal_system_get_millisecond());
         }
         return;
     }
 #endif
-    /* The reset confirm dialog is modal (⑦): only K6 (confirm) / K1 (cancel)
-     * act, nothing else reaches the settings page or the Companion. */
+    /* Recovery combo: K1 + K6 held together. Once both are down, neither key
+     * does anything else until both are up (ak_combo.h); the main loop opens
+     * the unbind confirm after 5 s. */
+    if (kind == AK_INPUT_KIND_KEY) {
+        ak_combo_verdict_t cv = ak_combo_key(&s_combo, id, event, tal_system_get_millisecond());
+        if (cv == AK_COMBO_START) {
+            ak_combo_drop_key_state();
+        }
+        if (cv != AK_COMBO_PASS) {
+            return;
+        }
+    }
+    /* The reset confirm dialog is modal (⑦): only K6 (confirm, on release) /
+     * K1 (cancel) act, nothing else reaches the settings page or the Companion. */
     if (ak_provision_reset_pending(&s_prov, tal_system_get_millisecond())) {
-        if (kind == AK_INPUT_KIND_KEY && event == AK_INPUT_EVENT_DOWN &&
-            (strcmp(id, "k6") == 0 || strcmp(id, "k1") == 0)) {
-            ak_prov_reset_resolve(strcmp(id, "k6") == 0);
+        bool confirm = false;
+        if (kind == AK_INPUT_KIND_KEY && ak_confirm_key(id, event, &confirm)) {
+            ak_prov_reset_resolve(confirm);
+        }
+        return;
+    }
+    /* Same for a Companion ble_unpair (FR-02). */
+    if (ak_provision_unpair_pending(&s_prov, tal_system_get_millisecond())) {
+        bool confirm = false;
+        if (kind == AK_INPUT_KIND_KEY && ak_confirm_key(id, event, &confirm)) {
+            ak_prov_unpair_resolve(confirm);
+        }
+        return;
+    }
+    /* Same for Unbind & re-pair (Settings, or the K1 + K6 combo). */
+    if (ak_provision_rebind_pending(&s_prov, tal_system_get_millisecond())) {
+        bool confirm = false;
+        if (kind == AK_INPUT_KIND_KEY && ak_confirm_key(id, event, &confirm)) {
+            ak_prov_rebind_resolve(confirm);
         }
         return;
     }
@@ -1098,6 +1291,11 @@ static void on_input_event(ak_input_kind_t kind, const char *id,
     /* An open LCD menu (④/⑤) takes K1-K6 + EC11 over from the keymap; a
      * dictated answer (②/③ for a menu) keeps them too. */
     if (ak_menu_route_key(id, event) || ak_dictation_route_key(id, event)) {
+        return;
+    }
+    /* Bind session between two steps (menu answered, Companion not done
+     * yet): no key reaches the PC or the work screen. */
+    if (s_bind.state == AK_BIND_WAIT) {
         return;
     }
 #endif
@@ -1163,7 +1361,7 @@ static void dispatch_gesture_for_slot(const char *id, ak_gesture_t g)
     /* Settings is modal: a gesture that resolves after it opened (a pending
      * single timing out) must not reach the PC. Same for an open menu or a
      * dictated answer. */
-    if (s_settings_active || ak_menu_owns_keys(&s_menu) || s_ui.dictating) {
+    if (s_settings_active || ak_menu_owns_keys(&s_menu) || s_ui.dictating || s_bind.state == AK_BIND_WAIT) {
         return;
     }
     /* EC11 long-press opens settings locally (v0.3 interaction §0.1). The
@@ -1185,6 +1383,19 @@ static void dispatch_gesture_for_slot(const char *id, ak_gesture_t g)
     /* Chat mode: the EC11 click stays local, so it cannot become an Enter
      * that submits the Crew composer. */
     if (s_voice_mode == AK_VOICE_MODE_CHAT && strcmp(id, AK_ENC_SW_ID) == 0) {
+        return;
+    }
+    /* ② waiting for the PC ASR text: K1 cancels it (the Companion drops the
+     * utterance on voice:cancel); its double / long do nothing. */
+    if (s_ui.pc_wait && strcmp(id, "k1") == 0) {
+        if (g == AK_GESTURE_SINGLE) {
+            send_voice("cancel");
+            s_voice_ui_state          = AK_VOICE_UI_IDLE;
+            s_voice_ui_state_since_ms = tal_system_get_millisecond();
+            ak_pending_confirm_exit();
+            ak_status_bar_set(ak_tr(AK_STR_ST_INPUT_CANCELLED), AK_COL_ORANGE);
+            ak_render_status();
+        }
         return;
     }
     /* ③: K1 cancels the input (reported as cancel_all so an injecting
@@ -1276,7 +1487,9 @@ static void on_encoder_event(int32_t detents)
         return;
     }
 #endif
-    if (ak_provision_reset_pending(&s_prov, tal_system_get_millisecond())) {
+    if (ak_provision_reset_pending(&s_prov, tal_system_get_millisecond()) ||
+        ak_provision_unpair_pending(&s_prov, tal_system_get_millisecond()) ||
+        ak_provision_rebind_pending(&s_prov, tal_system_get_millisecond())) {
         return;
     }
 #if AK_ENABLE_DISPLAY
@@ -1289,7 +1502,7 @@ static void on_encoder_event(int32_t detents)
         ak_menu_handle(&out);
         return;
     }
-    if (s_ui.dictating) {
+    if (s_ui.dictating || s_bind.state == AK_BIND_WAIT) {
         return; /* a dictated answer: nothing reaches the PC */
     }
     if (s_voice_mode == AK_VOICE_MODE_CHAT) {
@@ -1370,16 +1583,27 @@ static void send_tuya_chat_uart(const char *role, const char *text)
 #if AK_ENABLE_DISPLAY
 static void send_device_settings(void)
 {
-    char     frame[FRAME_BUFFER_SIZE];
+    char     frame[SYSTEM_INFO_FRAME_BUFFER_SIZE]; /* > 192: about 240 bytes with every field */
     uint32_t sequence;
     if (!transport_begin_sequenced(&sequence)) {
         return;
     }
-    transport_end_sequenced(
-        frame, ak_proto_device_settings(frame, sizeof(frame), sequence, s_settings.volume, s_settings.brightness,
-                                        ak_led_mode_wire_str((ak_led_mode_t)s_settings.led_mode),
-                                        ak_led_policy_timeout_ms(s_settings.led_timeout_idx) / 1000U,
-                                        ak_lang_wire_str(ak_lang_get())));
+    ak_proto_settings_t st = {
+        .volume          = s_settings.volume,
+        .brightness      = s_settings.brightness,
+        .led_power       = ak_led_mode_wire_str((ak_led_mode_t)s_settings.led_mode),
+        .led_auto_off_s  = ak_led_policy_timeout_ms(s_settings.led_timeout_idx) / 1000U,
+        .language        = ak_lang_wire_str(ak_lang_get()),
+        .voice_mode      = ak_voice_mode_str(s_voice_mode),
+        .font_size       = ak_text_size_px(ak_text_size_get()),
+        .license_present = ak_license_present(), /* cached after the first read (ak_wifi.c) */
+#if AK_TRANSPORT_DUAL || AK_TRANSPORT_BLE_GATT
+        .ble_paired = s_ble_key_set,
+#else
+        .ble_paired = false,
+#endif
+    };
+    transport_end_sequenced(frame, ak_proto_device_settings(frame, sizeof(frame), sequence, &st));
 }
 #endif
 
@@ -1458,6 +1682,7 @@ static void on_wifi_status(ak_wifi_state_t state, const char *ssid)
 #if AK_ENABLE_DISPLAY
     s_wifi_connected = (state == AK_WIFI_CONNECTED);
     s_wifi_lcd_state = state;
+    s_wifi_list_dirty = true;
     /* Publish dirty last so the app loop reads a complete state update. */
     s_wifi_status_dirty = true;
 #endif
@@ -1517,6 +1742,11 @@ static void on_ptt_event(ak_input_event_t event)
 #endif
         } else {
             send_voice("start");
+#if AK_ENABLE_DISPLAY
+            if (s_pc_asr_results) {
+                ak_voice_ui_set_state(AK_VOICE_UI_LISTENING);
+            }
+#endif
         }
         return;
     }
@@ -1556,9 +1786,16 @@ static void on_ptt_event(ak_input_event_t event)
         } else {
             send_voice("stop");
 #if AK_ENABLE_DISPLAY
-            /* PC dictation: the text goes straight into the PC window. */
-            ak_ui_voice_end(&s_ui, AK_UI_VOICE_NONE, s_voice_mode == AK_VOICE_MODE_CHAT,
-                            tal_system_get_millisecond());
+            if (s_pc_asr_results && ak_ui_pc_wait(&s_ui)) {
+                /* PC ASR: stay in ② until input_restore brings the text;
+                 * ASR_RECOGNIZE_TIMEOUT_MS or K1 end the wait. */
+                ak_voice_ui_set_state(AK_VOICE_UI_RECOGNIZING);
+            } else {
+                /* Older Companion: nothing comes back to the keyboard. */
+                ak_voice_ui_set_state(AK_VOICE_UI_IDLE);
+                ak_ui_voice_end(&s_ui, AK_UI_VOICE_NONE, s_voice_mode == AK_VOICE_MODE_CHAT,
+                                tal_system_get_millisecond());
+            }
             ak_ui_sync(tal_system_get_millisecond());
 #endif
         }
@@ -1590,6 +1827,29 @@ static void send_ack(uint32_t seq)
     transport_write_frame(frame, ak_proto_ack(frame, sizeof(frame), seq));
 }
 
+/* wifi_list_state (FR-15): SSIDs only, most recent first. Never a password. */
+static char s_wifi_list_frame[1536];
+
+static void send_wifi_list(void)
+{
+    ak_wifi_saved_t       saved[AK_WIFI_STORE_MAX];
+    ak_proto_wifi_entry_t entry[AK_WIFI_STORE_MAX];
+    size_t                n = ak_wifi_saved_list(saved);
+    for (size_t i = 0U; i < n; i++) {
+        entry[i].ssid    = saved[i].ssid;
+        entry[i].sec     = saved[i].sec;
+        entry[i].current = saved[i].current;
+    }
+    uint32_t sequence = 0U;
+    if (!transport_begin_sequenced(&sequence)) {
+        return;
+    }
+    transport_end_sequenced_sized(
+        s_wifi_list_frame, sizeof(s_wifi_list_frame),
+        ak_proto_wifi_list(s_wifi_list_frame, sizeof(s_wifi_list_frame), sequence, entry, n, AK_WIFI_STORE_MAX));
+    s_wifi_sent_rev = ak_wifi_saved_revision();
+}
+
 #if AK_ENABLE_DISPLAY
 /* Map a Kiro Crew agent/slot state string to a status color.
  *   purple: unbound / default (empty, "-", "unbound")
@@ -1618,17 +1878,27 @@ static uint16_t ak_status_color(const char *state)
 #define LCD_SIDEBAR_W             64U
 #define LCD_SESSION_ROWS          AK_CHAT_SLOT_COUNT
 #define LCD_SESSION_ROW_H         67U
-#define LCD_SESSION_ALIAS_BYTES   16U /* UTF-8: up to 7 ASCII or 4 CJK characters fit the 60 px label */
+#define LCD_SESSION_ALIAS_BYTES   16U /* UTF-8; the 60 px label shows 7 ASCII, or 4 (12 px) / 3 (16 px) CJK */
 #define LCD_CHAT_X                (LCD_SIDEBAR_W + 6U)
 #define LCD_CHAT_TEXT_COLS      29U
-#define LCD_HISTORY_Y             62U
-#define LCD_HISTORY_LINE_ADVANCE  10U
-#define LCD_HISTORY_PARAGRAPH_GAP 6U
+/* Chat area: two header rows (agent, state) then the wrapped history. Text is
+ * drawn ak_text_dy() above y; ak_text_pick(12 px layout, 16 px layout). */
+#define LCD_CHAT_ROW1_Y           29U
+#define LCD_CHAT_ROW2_Y           ak_text_pick(43U, 46U)
+#define LCD_HISTORY_Y             ak_text_pick(62U, 64U)
+#define LCD_HISTORY_PARAGRAPH_GAP ak_text_pick(6U, 4U)
 #define LCD_HISTORY_CAPACITY      10U
 #define LCD_HISTORY_TEXT_BYTES    128U
 #define LCD_HISTORY_VISIBLE_LINES 16U
-#define LCD_STATUS_BAR_H        16U
-#define LCD_STATUS_BAR_Y        (AK_STATUSLCD_H - LCD_STATUS_BAR_H)
+#define LCD_STATUS_BAR_H        ak_text_pick(16U, 18U) /* 16 px: 1 px rule + 16 px cell + 1 px */
+#define LCD_STATUS_BAR_Y        ((uint16_t)(AK_STATUSLCD_H - LCD_STATUS_BAR_H))
+#define LCD_STATUS_TEXT_Y       ((uint16_t)(LCD_STATUS_BAR_Y + ak_text_pick(4U, 5U)))
+/* Two-line key hint footer on full-screen pages: a 1 px rule, then two text
+ * rows (16 px: cells 205..220 and 221..236). */
+#define LCD_FOOTER_Y            ak_text_pick(207U, 204U)
+#define LCD_FOOTER_H            ((uint16_t)(AK_STATUSLCD_H - LCD_FOOTER_Y))
+#define LCD_HINT1_Y             ak_text_pick(213U, 209U)
+#define LCD_HINT2_Y             ak_text_pick(227U, 225U)
 #define LCD_STATUS_TEXT_BYTES   96U
 #define LCD_SESSION_SELECTED_BG AK_RGB565(0x8EU, 0x48U, 0xFFU)
 #define LCD_AGENT_RESPONSE_BG   AK_RGB565(0x6FU, 0x36U, 0xCCU)
@@ -1648,7 +1918,12 @@ static ak_session_ui_t s_sessions[LCD_SESSION_ROWS] = {
     {.agent = "-", .state = ""},
     {.agent = "-", .state = ""},
 };
-static char     s_session_labels[LCD_SESSION_ROWS][LCD_SESSION_ALIAS_BYTES] = {"A", "B", "C"};
+static char     s_session_aliases[LCD_SESSION_ROWS][LCD_SESSION_ALIAS_BYTES]; /* as received; "" = default */
+static char     s_session_labels[LCD_SESSION_ROWS][LCD_SESSION_ALIAS_BYTES] = {"A", "B", "C"}; /* fitted */
+/* Name of the Crew session bound to each slot (`bindings` name_a..c), shown
+ * on the Bind session page; empty = not bound. */
+#define LCD_SESSION_NAME_BYTES 49U /* 48 bytes UTF-8 */
+static char     s_session_names[LCD_SESSION_ROWS][LCD_SESSION_NAME_BYTES];
 static uint8_t  s_selected_session;
 static char     s_status_bar_text[LCD_STATUS_TEXT_BYTES] = "Starting system...";
 static uint16_t s_status_bar_color = AK_COL_CYAN;
@@ -1726,7 +2001,7 @@ static void ak_status_bar_draw(void)
                      LCD_STATUS_BAR_H, AK_COL_BLACK);
     ak_gfx_fill_rect(0U, LCD_STATUS_BAR_Y, AK_STATUSLCD_W,
                      1U, LCD_SESSION_SELECTED_BG);
-    ak_gfx_text_thin(4U, (uint16_t)(LCD_STATUS_BAR_Y + 4U), text, color, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, LCD_STATUS_TEXT_Y, text, color, AK_COL_BLACK, 1);
 }
 
 /* Keep the ten most recent text updates for each Chat, preserving whether
@@ -1749,8 +2024,9 @@ static void ak_chat_history_add(ak_session_ui_t *session, const char *text, bool
     session->history_count++;
 }
 
-/* One wrapped LCD line. UTF-8: 232 px holds at most 19 CJK characters (57
- * bytes); longer byte runs (4-byte code points drawn as boxes) are cut. */
+/* One wrapped LCD line. UTF-8: 232 px holds at most 19 (12 px) / 14 (16 px)
+ * CJK characters (57 bytes); longer byte runs (4-byte code points drawn as
+ * boxes) are cut. */
 #define LCD_CHAT_TEXT_W        (LCD_CHAT_TEXT_COLS * AK_TEXT_ASCII_W)
 #define LCD_HISTORY_LINE_BYTES 64U
 typedef struct {
@@ -1759,11 +2035,11 @@ typedef struct {
     bool from_agent;
 } ak_history_line_t;
 
-/* Line advance: 10 px for 8x8 ASCII lines, 14 px for lines drawn with the
- * 12 px UI font (Chinese / mixed). */
+/* Line advance: 12 px size: 10 px for 8x8 ASCII lines, 14 px for lines in
+ * the 12 px UI font (Chinese / mixed); 16 px size: one 16 px cell + 2 px. */
 static uint16_t ak_history_line_advance(const ak_history_line_t *line)
 {
-    return ak_text_is_wide(line->text, sizeof(line->text)) ? 14U : LCD_HISTORY_LINE_ADVANCE;
+    return ak_text_pick(ak_text_is_wide(line->text, sizeof(line->text)) ? 14U : 10U, 18U);
 }
 
 static void ak_history_line_push(ak_history_line_t *lines, uint8_t *count, uint8_t capacity,
@@ -1846,10 +2122,10 @@ static void ak_chat_history_draw(const ak_session_ui_t *session)
     }
 
     /* Select the newest suffix that fits above the status bar. Wrapped lines
-     * advance 10 px (14 px with CJK); a new history entry adds another 6 px
-     * paragraph gap. */
+     * advance ak_history_line_advance(); a new history entry adds a paragraph
+     * gap. The newest line needs the part of its cell below y. */
     uint8_t first = (uint8_t)(line_count - 1U);
-    uint16_t used_height = ak_text_is_wide(lines[first].text, sizeof(lines[first].text)) ? 12U : 8U;
+    uint16_t used_height = ak_text_pick(ak_text_is_wide(lines[first].text, sizeof(lines[first].text)) ? 12U : 8U, 12U);
     while (first > 0U) {
         uint16_t advance = ak_history_line_advance(&lines[first - 1U]);
         if (lines[first].paragraph_start) {
@@ -1886,10 +2162,12 @@ static uint16_t          s_chat_scroll; /* lines scrolled up from the newest */
 static uint32_t          s_chat_sent_turn;
 static bool              s_chat_sent_reply;
 
-#define LCD_CHAT_AREA_H ((uint16_t)(LCD_STATUS_BAR_Y - LCD_HISTORY_Y - 4U))
+/* Chat page lines advance from LCD_HISTORY_Y; the last one must clear the
+ * status bar. 12 px: a 4 px margin. 16 px: the 12 px of the last cell below y,
+ * less the 18 px advance the first line does not use. */
+#define LCD_CHAT_AREA_H ((uint16_t)(LCD_STATUS_BAR_Y - LCD_HISTORY_Y - ak_text_pick(4U, 0U) + ak_text_pick(0U, 6U)))
 
-/* First line of the run ending before `end` that fits the Chat area
- * (line heights differ: 10 px ASCII, 14 px CJK). */
+/* First line of the run ending before `end` that fits the Chat area. */
 static uint8_t ak_chat_first_fitting(uint8_t end)
 {
     uint16_t used  = 0U;
@@ -1972,8 +2250,8 @@ static void ak_chat_page_draw(void)
         state = ak_tr(AK_STR_CHAT_REPLYING);
         color = AK_COL_GREEN;
     }
-    ak_gfx_text_thin(LCD_CHAT_X, 29U, ak_tr(AK_STR_CHAT_TITLE), AK_COL_CYAN, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(LCD_CHAT_X, 43U, state, color, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(LCD_CHAT_X, LCD_CHAT_ROW1_Y, ak_tr(AK_STR_CHAT_TITLE), AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(LCD_CHAT_X, LCD_CHAT_ROW2_Y, state, color, AK_COL_BLACK, 1);
 
     uint16_t scroll = s_chat_scroll > ak_chat_max_scroll() ? ak_chat_max_scroll() : s_chat_scroll;
     uint8_t  end    = (uint8_t)(s_chat_line_count - scroll);
@@ -1998,32 +2276,50 @@ static void ak_settings_outline(uint16_t x, uint16_t y, uint16_t w,
     ak_gfx_fill_rect((uint16_t)(x + w - 1U), y, 1U, h, color);
 }
 
-#define LCD_SETTINGS_ROW_Y0 28U
-/* 10 rows must end above the footer at y=207: 28 + 10 * 17 = 198. */
-#define LCD_SETTINGS_ROW_H  17U
-#define LCD_SETTINGS_TEXT_DY 4U /* 8 px font centred in the 15 px row (12 px CJK: 2 px higher) */
+/* ak_text_pick(12 px, 16 px). 12 px: 28 + 10 * 17 = 198 ends above the footer
+ * rule at 207; a 15 px row with a gray outline, 2 px gap. 16 px: 24 + 10 * 18 =
+ * 204; the row background is the full 18 px and the 16 px cell sits 1 px below
+ * its top. Ten rows show at a time; the list scrolls (ak_settings_first_row). */
+#define LCD_SETTINGS_ROW_Y0  ak_text_pick(28U, 24U)
+#define LCD_SETTINGS_ROW_H   ak_text_pick(17U, 18U)
+#define LCD_SETTINGS_ROW_BG  ak_text_pick(15U, 18U)
+#define LCD_SETTINGS_TEXT_DY ak_text_pick(4U, 5U)
+#define LCD_SETTINGS_ROWS    10U
 
 static bool item_value_row(ak_settings_item_t item)
 {
     return item == AK_SETTINGS_ITEM_VOLUME || item == AK_SETTINGS_ITEM_BRIGHTNESS;
 }
 
+/* Top of a visible settings row, or 0 when the list is scrolled past it. */
+static uint16_t ak_settings_row_y(ak_settings_item_t item)
+{
+    unsigned first = ak_settings_first_row(s_settings.selected, LCD_SETTINGS_ROWS);
+    if ((unsigned)item < first || (unsigned)item >= first + LCD_SETTINGS_ROWS) {
+        return 0U;
+    }
+    return (uint16_t)(LCD_SETTINGS_ROW_Y0 + (uint16_t)((unsigned)item - first) * LCD_SETTINGS_ROW_H);
+}
+
 /* One settings row: label on the left, value / state on the right. */
 static void ak_settings_row(ak_settings_item_t item, const char *label, const char *value, uint16_t value_color)
 {
-    uint16_t y        = (uint16_t)(LCD_SETTINGS_ROW_Y0 + (uint16_t)item * LCD_SETTINGS_ROW_H);
+    uint16_t y        = ak_settings_row_y(item);
     bool     selected = s_settings.selected == item;
     bool     editing  = selected && s_settings.editing;
     uint16_t bg       = selected ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
 
-    ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, (uint16_t)(LCD_SETTINGS_ROW_H - 2U), bg);
+    if (y == 0U) {
+        return;
+    }
+    ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, LCD_SETTINGS_ROW_BG, bg);
     if (editing) {
         /* A bright outline signals "rotate now adjusts this value". */
-        ak_settings_outline(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, (uint16_t)(LCD_SETTINGS_ROW_H - 2U),
-                            AK_COL_YELLOW);
-    } else if (!selected) {
-        ak_settings_outline(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, (uint16_t)(LCD_SETTINGS_ROW_H - 2U),
-                            AK_COL_GRAY);
+        ak_settings_outline(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, LCD_SETTINGS_ROW_BG, AK_COL_YELLOW);
+    } else if (!selected && ak_text_size_get() == AK_TEXT_SIZE_12) {
+        /* 16 px has no outline on unselected rows: its CJK fills the cell, so
+         * a frame on every row would touch the glyphs above and below. */
+        ak_settings_outline(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, LCD_SETTINGS_ROW_BG, AK_COL_GRAY);
     }
     ak_gfx_text_thin(24U, (uint16_t)(y + LCD_SETTINGS_TEXT_DY), label, selected ? AK_COL_WHITE : AK_COL_GRAY, bg, 1);
     if (value != NULL && value[0] != '\0') {
@@ -2036,14 +2332,16 @@ static void ak_settings_row(ak_settings_item_t item, const char *label, const ch
  * once a second, so the countdown never costs a full-screen repaint. */
 static void ak_settings_draw_pairing_row(uint32_t now_ms)
 {
+    /* Activated: the row only changes Wi-Fi; Unbind device is the next row. */
+    const char *label = ak_tr(ak_cloud_activated() ? AK_STR_SET_CHANGE_WIFI : AK_STR_SET_PAIRING);
     if (ak_provision_is_open(&s_prov, now_ms)) {
         char     value[24];
         uint32_t left = ak_provision_remaining_s(&s_prov, now_ms);
         (void)snprintf(value, sizeof(value), "%s %u:%02u", ak_tr(AK_STR_SET_OPEN), (unsigned)(left / 60U),
                        (unsigned)(left % 60U));
-        ak_settings_row(AK_SETTINGS_ITEM_PAIRING, ak_tr(AK_STR_SET_PAIRING), value, AK_COL_ORANGE);
+        ak_settings_row(AK_SETTINGS_ITEM_PAIRING, label, value, AK_COL_ORANGE);
     } else {
-        ak_settings_row(AK_SETTINGS_ITEM_PAIRING, ak_tr(AK_STR_SET_PAIRING), ">", AK_COL_GRAY);
+        ak_settings_row(AK_SETTINGS_ITEM_PAIRING, label, ">", AK_COL_GRAY);
     }
 }
 
@@ -2055,11 +2353,38 @@ static void ak_draw_reset_confirm(void)
     ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, AK_COL_RED);
     ak_gfx_text(6U, 7U, ak_tr(AK_STR_RST_TITLE), AK_COL_WHITE, AK_COL_RED, 1);
     ak_gfx_text_thin(16U, 44U, ak_tr(AK_STR_RST_L1), AK_COL_WHITE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(16U, 60U, ak_tr(AK_STR_RST_L2), AK_COL_WHITE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(16U, 76U, ak_tr(AK_STR_RST_L3), AK_COL_WHITE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(16U, 100U, ak_tr(AK_STR_RST_L4), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(60U, 62U), ak_tr(AK_STR_RST_L2), AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(76U, 80U), ak_tr(AK_STR_RST_L3), AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(100U, 106U), ak_tr(AK_STR_RST_L4), AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_gfx_text_thin(16U, 140U, ak_tr(AK_STR_RST_KEYS), AK_COL_ORANGE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(16U, 156U, ak_tr(AK_STR_RST_TIMEOUT), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(156U, 158U), ak_tr(AK_STR_RST_TIMEOUT), AK_COL_GRAY, AK_COL_BLACK, 1);
+}
+
+/* "Clear BLE pairing?" — a Companion ble_unpair waits for K6 (FR-02). */
+static void ak_draw_unpair_confirm(void)
+{
+    ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, LCD_STATUS_BAR_Y, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, AK_COL_RED);
+    ak_gfx_text(6U, 7U, ak_tr(AK_STR_UNPAIR_TITLE), AK_COL_WHITE, AK_COL_RED, 1);
+    ak_gfx_text_thin(16U, 44U, ak_tr(AK_STR_UNPAIR_L1), AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(60U, 62U), ak_tr(AK_STR_UNPAIR_L2), AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, 140U, ak_tr(AK_STR_UNPAIR_KEYS), AK_COL_ORANGE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(156U, 158U), ak_tr(AK_STR_RST_TIMEOUT), AK_COL_GRAY, AK_COL_BLACK, 1);
+}
+
+/* "Unbind and re-pair?" — Settings > Unbind & re-pair on an activated device.
+ * Yellow like every double confirm; K6 also flashes yellow. */
+static void ak_draw_rebind_confirm(void)
+{
+    ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, LCD_STATUS_BAR_Y, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, AK_COL_YELLOW);
+    ak_gfx_text(6U, 7U, ak_tr(AK_STR_REBIND_TITLE), AK_COL_BLACK, AK_COL_YELLOW, 1);
+    ak_gfx_text_thin(16U, 44U, ak_tr(AK_STR_REBIND_L1), AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, 62U, ak_tr(AK_STR_REBIND_L2), AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, 80U, ak_tr(AK_STR_REBIND_L3), AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, 104U, ak_tr(AK_STR_REBIND_L4), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, 140U, ak_tr(AK_STR_REBIND_KEYS), AK_COL_YELLOW, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, 158U, ak_tr(AK_STR_RST_TIMEOUT), AK_COL_GRAY, AK_COL_BLACK, 1);
 }
 
 #if AK_TRANSPORT_HAS_UART
@@ -2075,11 +2400,11 @@ static void ak_draw_ota(const ak_ota_view_t *v)
         (void)snprintf(line, sizeof(line), ak_tr(AK_STR_OTA_INSTALL), v->version);
         ak_gfx_text_thin(16U, 44U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
         (void)snprintf(line, sizeof(line), ak_tr(AK_STR_OTA_RUNNING), APP_FW_VERSION);
-        ak_gfx_text_thin(16U, 60U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
-        ak_gfx_text_thin(16U, 84U, ak_tr(AK_STR_OTA_KEEP_USB), AK_COL_WHITE, AK_COL_BLACK, 1);
-        ak_gfx_text_thin(16U, 100U, ak_tr(AK_STR_OTA_KEPT), AK_COL_GRAY, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(16U, ak_text_pick(60U, 62U), line, AK_COL_WHITE, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(16U, ak_text_pick(84U, 88U), ak_tr(AK_STR_OTA_KEEP_USB), AK_COL_WHITE, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(16U, ak_text_pick(100U, 106U), ak_tr(AK_STR_OTA_KEPT), AK_COL_GRAY, AK_COL_BLACK, 1);
         ak_gfx_text_thin(16U, 140U, ak_tr(AK_STR_OTA_KEYS), AK_COL_ORANGE, AK_COL_BLACK, 1);
-        ak_gfx_text_thin(16U, 156U, ak_tr(AK_STR_RST_TIMEOUT), AK_COL_GRAY, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(16U, ak_text_pick(156U, 158U), ak_tr(AK_STR_RST_TIMEOUT), AK_COL_GRAY, AK_COL_BLACK, 1);
         return;
     }
     if (v->state == AK_OTA_VERIFIED) {
@@ -2090,8 +2415,8 @@ static void ak_draw_ota(const ak_ota_view_t *v)
         (void)snprintf(line, sizeof(line), ak_tr(AK_STR_OTA_RECEIVING), v->version, (unsigned)v->percent);
     }
     ak_gfx_text_thin(16U, 52U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(16U, 84U, ak_tr(AK_STR_OTA_NO_UNPLUG), AK_COL_ORANGE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(16U, 100U, ak_tr(AK_STR_OTA_RESTART), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(84U, 88U), ak_tr(AK_STR_OTA_NO_UNPLUG), AK_COL_ORANGE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(100U, 106U), ak_tr(AK_STR_OTA_RESTART), AK_COL_GRAY, AK_COL_BLACK, 1);
 }
 #endif
 
@@ -2127,21 +2452,85 @@ static void ak_settings_draw_credentials(uint32_t now_ms)
         ak_gfx_text_thin(16U, 150U, ak_tr(AK_STR_CRED_OVERWRITE_K6), AK_COL_CYAN, AK_COL_BLACK, 1);
     } else if (!license) {
         ak_gfx_text_thin(16U, 150U, ak_tr(AK_STR_CRED_NEED_USB), AK_COL_ORANGE, AK_COL_BLACK, 1);
-        ak_gfx_text_thin(16U, 166U, ak_tr(AK_STR_CRED_NEED_USB2), AK_COL_ORANGE, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(16U, ak_text_pick(166U, 168U), ak_tr(AK_STR_CRED_NEED_USB2), AK_COL_ORANGE, AK_COL_BLACK, 1);
     }
 #if AK_TRANSPORT_DUAL || AK_TRANSPORT_BLE_GATT
     ak_gfx_text_thin(24U, 186U, ak_tr(AK_STR_CRED_BLE), AK_COL_WHITE, AK_COL_BLACK, 1);
     ak_gfx_text_thin(184U, 186U, s_ble_key_set ? ak_tr(AK_STR_CRED_SET) : ak_tr(AK_STR_CRED_NOT_SET), s_ble_key_set ? AK_COL_GREEN : AK_COL_ORANGE,
                      AK_COL_BLACK, 1);
 #endif
-    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
-    ak_gfx_text_thin(4U, 213U, ak_tr(AK_STR_CRED_BACK), AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
+    ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(AK_STR_CRED_BACK), AK_COL_CYAN, AK_COL_BLACK, 1);
 #if AK_TRANSPORT_DUAL || AK_TRANSPORT_BLE_GATT
     if (s_ble_key_set) {
-        ak_gfx_text_thin(4U, 227U, s_cred_unpair_armed ? ak_tr(AK_STR_CRED_UNPAIR_ARMED) : ak_tr(AK_STR_CRED_UNPAIR),
+        ak_gfx_text_thin(4U, LCD_HINT2_Y, s_cred_unpair_armed ? ak_tr(AK_STR_CRED_UNPAIR_ARMED) : ak_tr(AK_STR_CRED_UNPAIR),
                          s_cred_unpair_armed ? AK_COL_YELLOW : AK_COL_GRAY, AK_COL_BLACK, 1);
     }
 #endif
+}
+
+/* Settings > Saved Wi-Fi (FR-15): the remembered networks, most recently
+ * connected first. Rows are LCD_SETTINGS_ROW_H apart with no frames, so the
+ * 12 px and 16 px fonts both fit. SSID only; there is no password anywhere. */
+static uint8_t ak_wifi_page_count(ak_wifi_saved_t *list)
+{
+    return (uint8_t)ak_wifi_saved_list(list);
+}
+
+static void ak_wifi_page_disarm(void)
+{
+    s_wifi_del_armed = false;
+}
+
+static void ak_settings_draw_wifi(uint32_t now_ms)
+{
+    ak_wifi_saved_t list[AK_WIFI_STORE_MAX];
+    uint8_t         n = ak_wifi_page_count(list);
+    char            title[48];
+    char            text[AK_WIFI_STORE_SSID_MAX + 1U];
+
+    if (s_wifi_sel >= n) {
+        s_wifi_sel = n > 0U ? (uint8_t)(n - 1U) : 0U;
+    }
+    ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, LCD_SESSION_SELECTED_BG);
+    (void)snprintf(title, sizeof(title), "%s  %u/%u", ak_tr(AK_STR_SET_WIFI), (unsigned)n,
+                   (unsigned)AK_WIFI_STORE_MAX);
+    ak_gfx_text(6U, 7U, title, AK_COL_BLACK, LCD_SESSION_SELECTED_BG, 1);
+
+    if (n == 0U) {
+        ak_gfx_text_thin(24U, LCD_SETTINGS_ROW_Y0 + 8U, ak_tr(AK_STR_WIFI_EMPTY), AK_COL_GRAY, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(24U, (uint16_t)(LCD_SETTINGS_ROW_Y0 + 8U + LCD_SETTINGS_ROW_H), ak_tr(AK_STR_WIFI_ADD_USB),
+                         AK_COL_GRAY, AK_COL_BLACK, 1);
+    }
+    uint8_t first = (uint8_t)ak_settings_first_row(s_wifi_sel, LCD_SETTINGS_ROWS);
+    for (uint8_t i = first; i < n && i < first + LCD_SETTINGS_ROWS; i++) {
+        uint16_t y   = (uint16_t)(LCD_SETTINGS_ROW_Y0 + (uint16_t)(i - first) * LCD_SETTINGS_ROW_H);
+        bool     sel = i == s_wifi_sel;
+        uint16_t bg  = sel ? LCD_SESSION_SELECTED_BG : AK_COL_BLACK;
+        uint16_t max_px = list[i].current ? 190U : 270U;
+        ak_gfx_fill_rect(LCD_SETTINGS_ROW_X, y, LCD_SETTINGS_ROW_W, (uint16_t)(LCD_SETTINGS_ROW_H - 1U), bg);
+        size_t keep = ak_text_wrap(list[i].ssid, max_px);
+        if (keep > sizeof(text) - 1U) {
+            keep = sizeof(text) - 1U;
+        }
+        memcpy(text, list[i].ssid, keep);
+        text[keep] = '\0';
+        ak_gfx_text_thin(24U, (uint16_t)(y + LCD_SETTINGS_TEXT_DY), text, sel ? AK_COL_WHITE : AK_COL_GRAY, bg, 1);
+        if (list[i].current) {
+            ak_gfx_text_thin(220U, (uint16_t)(y + LCD_SETTINGS_TEXT_DY), ak_tr(AK_STR_WIFI_CURRENT),
+                             sel ? AK_COL_WHITE : AK_COL_GREEN, bg, 1);
+        }
+    }
+
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, LCD_FOOTER_H, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
+    if (s_wifi_del_armed && (int32_t)(s_wifi_del_deadline_ms - now_ms) > 0 && n > 0U) {
+        ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(list[s_wifi_sel].current ? AK_STR_WIFI_CONFIRM_CUR : AK_STR_WIFI_CONFIRM),
+                         AK_COL_YELLOW, AK_COL_BLACK, 1);
+    } else {
+        ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(AK_STR_WIFI_HINT1), AK_COL_CYAN, AK_COL_BLACK, 1);
+    }
+    ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_WIFI_HINT2), AK_COL_GRAY, AK_COL_BLACK, 1);
 }
 
 /* "Enter pairing mode?" confirm dialog (Cancel preselected). */
@@ -2149,12 +2538,13 @@ static void ak_settings_draw_pair_confirm(uint32_t now_ms)
 {
     char line[64];
     ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, AK_COL_ORANGE);
-    ak_gfx_text(6U, 7U, ak_tr(AK_STR_PAIR_TITLE), AK_COL_BLACK, AK_COL_ORANGE, 1);
+    ak_gfx_text(6U, 7U, ak_tr(ak_cloud_activated() ? AK_STR_CHWIFI_TITLE : AK_STR_PAIR_TITLE), AK_COL_BLACK,
+                AK_COL_ORANGE, 1);
     ak_gfx_text_thin(16U, 44U, ak_tr(AK_STR_PAIR_L1), AK_COL_WHITE, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), ak_tr(AK_STR_PAIR_L2), (unsigned)(AK_PROV_WINDOW_MS / 1000U));
-    ak_gfx_text_thin(16U, 60U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(16U, 84U, ak_tr(AK_STR_PAIR_L3), AK_COL_GRAY, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(16U, 100U, ak_tr(AK_STR_PAIR_L4), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(60U, 62U), line, AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(84U, 88U), ak_tr(AK_STR_PAIR_L3), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(16U, ak_text_pick(100U, 106U), ak_tr(AK_STR_PAIR_L4), AK_COL_GRAY, AK_COL_BLACK, 1);
 
     bool     confirm = s_prov.choice_confirm;
     uint16_t cbg     = confirm ? AK_COL_BLACK : LCD_SESSION_SELECTED_BG;
@@ -2169,9 +2559,9 @@ static void ak_settings_draw_pair_confirm(uint32_t now_ms)
     (void)snprintf(line, sizeof(line), ak_tr(AK_STR_PAIR_AUTO_CANCEL), (unsigned)ak_provision_remaining_s(&s_prov, now_ms));
     ak_gfx_text_thin(16U, 180U, line, AK_COL_GRAY, AK_COL_BLACK, 1);
 
-    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U, AK_COL_ORANGE);
-    ak_gfx_text_thin(4U, 213U, ak_tr(AK_STR_PAIR_KEYS), AK_COL_ORANGE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(4U, 227U, ak_tr(AK_STR_PAIR_HINT), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, 1U, AK_COL_ORANGE);
+    ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(AK_STR_PAIR_KEYS), AK_COL_ORANGE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_PAIR_HINT), AK_COL_GRAY, AK_COL_BLACK, 1);
 }
 
 /* Drawing writes straight into the PSRAM framebuffer, and ak_statuslcd_flush()
@@ -2222,14 +2612,40 @@ static void ak_settings_draw(void)
         s_lcd_redraw_pending = false;
         return;
     }
+    if (ak_provision_unpair_pending(&s_prov, now_ms)) {
+        ak_draw_unpair_confirm();
+        ak_status_bar_draw();
+        ak_statuslcd_flush();
+        s_lcd_redraw_pending = false;
+        return;
+    }
+    if (ak_provision_rebind_pending(&s_prov, now_ms)) {
+        ak_draw_rebind_confirm();
+        ak_status_bar_draw();
+        ak_statuslcd_flush();
+        s_lcd_redraw_pending = false;
+        return;
+    }
     if (s_cred_page) {
         ak_settings_draw_credentials(now_ms);
         ak_statuslcd_flush();
         s_lcd_redraw_pending = false;
         return;
     }
+    if (s_wifi_page) {
+        ak_settings_draw_wifi(now_ms);
+        ak_statuslcd_flush();
+        s_lcd_redraw_pending = false;
+        return;
+    }
     if (s_prov.state == AK_PROV_CONFIRMING) {
         ak_settings_draw_pair_confirm(now_ms);
+        ak_statuslcd_flush();
+        s_lcd_redraw_pending = false;
+        return;
+    }
+    if (ak_bind_active(&s_bind)) {
+        ak_bind_draw(now_ms);
         ak_statuslcd_flush();
         s_lcd_redraw_pending = false;
         return;
@@ -2260,33 +2676,52 @@ static void ak_settings_draw(void)
     /* Shown in its own language either way, so it can always be found again. */
     (void)snprintf(value, sizeof(value), "< %s >", ak_lang_name((ak_lang_t)s_settings.lang));
     ak_settings_row(AK_SETTINGS_ITEM_LANGUAGE, ak_tr(AK_STR_SET_LANGUAGE), value, AK_COL_CYAN);
+    (void)snprintf(value, sizeof(value), "< %u px >",
+                   (unsigned)ak_text_size_px((ak_text_size_t)s_settings.font_size));
+    ak_settings_row(AK_SETTINGS_ITEM_FONT_SIZE, ak_tr(AK_STR_SET_FONT_SIZE), value, AK_COL_CYAN);
+    ak_settings_row(AK_SETTINGS_ITEM_BIND_SESSION, ak_tr(AK_STR_SET_BIND), ">", AK_COL_GRAY);
+    ak_settings_row(AK_SETTINGS_ITEM_WIFI, ak_tr(AK_STR_SET_WIFI), ">", AK_COL_GRAY);
     ak_settings_row(AK_SETTINGS_ITEM_CREDENTIALS, ak_tr(AK_STR_SET_CREDENTIALS), ">", AK_COL_GRAY);
     ak_settings_draw_pairing_row(now_ms);
+    ak_settings_row(AK_SETTINGS_ITEM_REBIND, ak_tr(AK_STR_SET_REBIND), ">",
+                    ak_cloud_activated() ? AK_COL_GRAY : AK_COL_DKBLUE);
     ak_settings_row(AK_SETTINGS_ITEM_TEST, ak_tr(AK_STR_SET_TEST), ">", AK_COL_GRAY);
     ak_settings_row(AK_SETTINGS_ITEM_EXIT, ak_tr(AK_STR_SET_EXIT), "", AK_COL_GRAY);
-    if (s_settings_confirmed && item_value_row(s_settings.selected)) {
-        uint16_t y = (uint16_t)(LCD_SETTINGS_ROW_Y0 + (uint16_t)s_settings.selected * LCD_SETTINGS_ROW_H);
+    if (s_settings_confirmed && item_value_row(s_settings.selected) && ak_settings_row_y(s_settings.selected) != 0U) {
+        uint16_t y = ak_settings_row_y(s_settings.selected);
         ak_gfx_text_thin(128U, (uint16_t)(y + LCD_SETTINGS_TEXT_DY), ak_tr(AK_STR_SET_APPLIED), AK_COL_WHITE,
                          LCD_SESSION_SELECTED_BG, 1);
     }
+    {
+        /* Scroll position: a thin bar right of the rows (10 rows of AK_SETTINGS_ITEM_COUNT items show). */
+        uint16_t track = (uint16_t)(LCD_SETTINGS_ROWS * LCD_SETTINGS_ROW_H);
+        uint16_t thumb = (uint16_t)(track * LCD_SETTINGS_ROWS / AK_SETTINGS_ITEM_COUNT);
+        uint16_t top   = (uint16_t)((track - thumb) * ak_settings_first_row(s_settings.selected, LCD_SETTINGS_ROWS) /
+                                    (AK_SETTINGS_ITEM_COUNT - LCD_SETTINGS_ROWS));
+        ak_gfx_fill_rect(312U, (uint16_t)(LCD_SETTINGS_ROW_Y0 + top), 2U, thumb, AK_COL_GRAY);
+    }
 
-    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 33U, AK_COL_BLACK);
-    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U,
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, LCD_FOOTER_H, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, 1U,
                      LCD_SESSION_SELECTED_BG);
     if (s_settings.editing) {
-        ak_gfx_text_thin(4U, 213U, ak_tr(AK_STR_SET_HINT_ADJUST),
+        ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(AK_STR_SET_HINT_ADJUST),
                          AK_COL_YELLOW, AK_COL_BLACK, 1);
-        ak_gfx_text_thin(4U, 227U, ak_tr(AK_STR_SET_HINT_COMMIT), AK_COL_GRAY,
+        ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_SET_HINT_COMMIT), AK_COL_GRAY,
                          AK_COL_BLACK, 1);
     } else if (s_settings.selected == AK_SETTINGS_ITEM_PAIRING) {
-        ak_gfx_text_thin(4U, 213U, ak_tr(AK_STR_SET_HINT_PAIRING),
+        ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(AK_STR_SET_HINT_PAIRING),
                          AK_COL_CYAN, AK_COL_BLACK, 1);
-        ak_gfx_text_thin(4U, 227U, ak_tr(AK_STR_SET_HINT_PAIRING2),
+        ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_SET_HINT_PAIRING2),
                          AK_COL_GRAY, AK_COL_BLACK, 1);
+    } else if (s_status_tmp_on && ak_bind_flashing(&s_bind, now_ms)) {
+        /* Just bound: the Companion's message, while the slot key flashes. */
+        ak_gfx_text_thin(4U, LCD_HINT1_Y, s_status_tmp_text, s_status_tmp_color, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_SET_HINT_CLICK), AK_COL_GRAY, AK_COL_BLACK, 1);
     } else {
-        ak_gfx_text_thin(4U, 213U, ak_tr(AK_STR_SET_HINT_SELECT),
+        ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(AK_STR_SET_HINT_SELECT),
                          AK_COL_CYAN, AK_COL_BLACK, 1);
-        ak_gfx_text_thin(4U, 227U, ak_tr(AK_STR_SET_HINT_CLICK),
+        ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_SET_HINT_CLICK),
                          AK_COL_GRAY, AK_COL_BLACK, 1);
     }
     ak_statuslcd_flush();
@@ -2302,6 +2737,35 @@ static OPERATE_RET ak_settings_apply_selected(void)
         return ak_statuslcd_set_brightness(s_settings.brightness);
     }
     return OPRT_OK;
+}
+
+/* Settings > Unbind & re-pair. Activated: ask (⑦, K6 flashes yellow), then
+ * clear the Tuya binding. Not activated: the same as Settings > Pairing mode.
+ * No License: the Tuya app cannot pair this device, so only say so. */
+static void ak_rebind_clicked(void)
+{
+    uint32_t now_ms = tal_system_get_millisecond();
+    switch (ak_provision_rebind_action(ak_cloud_license_usable(), ak_cloud_activated())) {
+    case AK_PAIR_ACTION_NEED_LICENSE:
+        ak_status_bar_set(ak_tr(AK_STR_REBIND_NEED_LICENSE), AK_COL_ORANGE);
+        ak_settings_draw();
+        break;
+    case AK_PAIR_ACTION_REBIND:
+        if (!ak_provision_rebind_request(&s_prov, now_ms)) {
+            ak_status_bar_set(ak_tr(AK_STR_ST_PAIR_REQ_BUSY), AK_COL_ORANGE);
+        }
+        ak_prov_changed();
+        break;
+    case AK_PAIR_ACTION_PAIRING:
+    default:
+        if (ak_provision_is_open(&s_prov, now_ms)) {
+            ak_provision_close(&s_prov);
+        } else {
+            ak_provision_request(&s_prov, now_ms);
+        }
+        ak_prov_changed();
+        break;
+    }
 }
 
 /* The center DOWN edge is delayed: a short release is replayed to the companion,
@@ -2328,6 +2792,27 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
     if (kind != AK_INPUT_KIND_KEY) {
         return true;
     }
+    /* Bind session slot page: K1-K3 pick the slot, an EC11 click goes back,
+     * other keys only count as activity; while the request is out, nothing. */
+    if (ak_bind_active(&s_bind)) {
+        uint32_t now_ms = tal_system_get_millisecond();
+        if (strcmp(id, AK_ENC_SW_ID) == 0) {
+            if (event == AK_INPUT_EVENT_DOWN) {
+                s_center_long_consumed = false;
+            } else if (event == AK_INPUT_EVENT_LONG) {
+                s_center_long_consumed = true;
+            } else if (event == AK_INPUT_EVENT_UP) {
+                if (s_center_long_consumed) {
+                    s_center_long_consumed = false;
+                } else {
+                    ak_bind_apply(ak_bind_key(&s_bind, 6, now_ms), NULL, 0U);
+                }
+            }
+        } else if (event == AK_INPUT_EVENT_DOWN) {
+            ak_bind_apply(ak_bind_key(&s_bind, ak_keymap_slot_for_id(id), now_ms), NULL, 0U);
+        }
+        return true;
+    }
     /* Credentials page: K4 or a knob click goes back; K6 (window open, a
      * License stored) allows exactly one overwrite for 60 s (FW-02). */
     if (s_cred_page) {
@@ -2338,6 +2823,7 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
                 s_cred_unpair_armed = false;
                 ble_key_clear();
                 ak_status_bar_set(ak_tr(AK_STR_ST_BLE_CLEARED), AK_COL_ORANGE);
+                send_device_settings(); /* last change wins: tell the Companion */
             } else {
                 s_cred_unpair_armed = true;
             }
@@ -2365,16 +2851,48 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
         }
         return true;
     }
+    /* Saved Wi-Fi page (FR-15): K1 back, K6 delete (second press within 3 s
+     * confirms), the knob selects. Everything else only disarms. */
+    if (s_wifi_page) {
+        uint32_t now_ms = tal_system_get_millisecond();
+        if (event == AK_INPUT_EVENT_DOWN && strcmp(id, "k1") == 0) {
+            s_wifi_page = false;
+            ak_wifi_page_disarm();
+        } else if (event == AK_INPUT_EVENT_DOWN && strcmp(id, "k6") == 0) {
+            ak_wifi_saved_t list[AK_WIFI_STORE_MAX];
+            uint8_t         n = ak_wifi_page_count(list);
+            if (n > 0U && s_wifi_sel < n) {
+                const char *ssid = list[s_wifi_sel].ssid;
+                if (s_wifi_del_armed && (int32_t)(s_wifi_del_deadline_ms - now_ms) > 0 &&
+                    strcmp(s_wifi_del_ssid, ssid) == 0) {
+                    (void)ak_wifi_saved_forget(ssid);
+                    ak_wifi_page_disarm();
+                    ak_status_bar_set(ak_tr(AK_STR_WIFI_DELETED), AK_COL_ORANGE);
+                    send_wifi_list(); /* last change wins: tell the Companion */
+                } else {
+                    s_wifi_del_armed = true;
+                    (void)snprintf(s_wifi_del_ssid, sizeof(s_wifi_del_ssid), "%s", ssid);
+                    s_wifi_del_deadline_ms = now_ms + AK_WIFI_DEL_CONFIRM_MS;
+                }
+            }
+        } else if (event == AK_INPUT_EVENT_DOWN) {
+            ak_wifi_page_disarm();
+        }
+        ak_settings_draw();
+        return true;
+    }
     /* Pairing confirm dialog (⑦): K6 confirms, K1 cancels (as every system
      * confirm). */
-    if (s_prov.state == AK_PROV_CONFIRMING && event == AK_INPUT_EVENT_DOWN &&
-        (strcmp(id, "k6") == 0 || strcmp(id, "k1") == 0)) {
-        if (strcmp(id, "k6") == 0) {
-            ak_prov_confirm_dialog();
-        } else {
-            ak_provision_close(&s_prov);
+    if (s_prov.state == AK_PROV_CONFIRMING && (strcmp(id, "k6") == 0 || strcmp(id, "k1") == 0)) {
+        bool confirm = false;
+        if (ak_confirm_key(id, event, &confirm)) {
+            if (confirm) {
+                ak_prov_confirm_dialog();
+            } else {
+                ak_provision_close(&s_prov);
+            }
+            ak_prov_changed();
         }
-        ak_prov_changed();
         return true;
     }
     if (strcmp(id, AK_ENC_SW_ID) == 0) {
@@ -2420,6 +2938,19 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
                 s_cred_page = true;
                 ak_settings_draw();
                 break;
+            case AK_SETTINGS_RESULT_BIND_SESSION:
+                ak_bind_open(&s_bind, tal_system_get_millisecond());
+                ak_settings_draw();
+                break;
+            case AK_SETTINGS_RESULT_WIFI:
+                s_wifi_page = true;
+                s_wifi_sel  = 0U;
+                ak_wifi_page_disarm();
+                ak_settings_draw();
+                break;
+            case AK_SETTINGS_RESULT_REBIND:
+                ak_rebind_clicked();
+                break;
             case AK_SETTINGS_RESULT_PAIRING: {
                 /* Closed: ask for confirmation. Open: this is "Exit pairing mode". */
                 uint32_t now_ms = tal_system_get_millisecond();
@@ -2443,6 +2974,9 @@ static bool ak_settings_consume_input(ak_input_kind_t kind, const char *id,
                 }
                 if (result == AK_SETTINGS_RESULT_CONFIRMED && s_settings.selected == AK_SETTINGS_ITEM_LANGUAGE) {
                     ak_language_apply((ak_lang_t)s_settings.lang, true);
+                }
+                if (result == AK_SETTINGS_RESULT_CONFIRMED && s_settings.selected == AK_SETTINGS_ITEM_FONT_SIZE) {
+                    ak_font_size_apply((ak_text_size_t)s_settings.font_size, true);
                 }
                 if (result == AK_SETTINGS_RESULT_CONFIRMED &&
                     (s_settings.selected == AK_SETTINGS_ITEM_LED_POWER ||
@@ -2474,6 +3008,21 @@ static bool ak_settings_consume_encoder(int32_t detents)
         return s_settings_active;
     }
     if (s_cred_page) {
+        return true;
+    }
+    if (ak_bind_active(&s_bind)) {
+        (void)ak_bind_key(&s_bind, -1, tal_system_get_millisecond()); /* activity only */
+        return true;
+    }
+    if (s_wifi_page) {
+        ak_wifi_saved_t list[AK_WIFI_STORE_MAX];
+        uint8_t         n = ak_wifi_page_count(list);
+        if (n > 0U) {
+            int32_t next = (int32_t)s_wifi_sel + (detents > 0 ? 1 : -1);
+            s_wifi_sel   = (uint8_t)(next < 0 ? n - 1 : next >= (int32_t)n ? 0 : next);
+        }
+        ak_wifi_page_disarm();
+        ak_settings_draw();
         return true;
     }
     if (s_prov.state == AK_PROV_CONFIRMING) {
@@ -2568,7 +3117,7 @@ static void ak_test_draw_enc(void)
     if (!ak_lcd_draw_begin()) {
         return;
     }
-    ak_gfx_fill_rect(0U, AK_TEST_Y_ENC, AK_STATUSLCD_W, 14U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, (uint16_t)(AK_TEST_Y_ENC - ak_text_pick(0U, 4U)), AK_STATUSLCD_W, ak_text_pick(14U, 16U), AK_COL_BLACK);
     (void)snprintf(line, sizeof(line), "FX %s  %s %ld  (EC11 %+ld)",
                    s_test_fx_names[s_test_fx],
                    s_test_fx == 0 ? "hue" : "spd",
@@ -2614,10 +3163,10 @@ static void ak_test_draw_frame(void)
     ak_gfx_text_thin(6U, AK_TEST_Y_WIFI, ak_tr(AK_STR_TEST_WIFI_WAIT), AK_COL_WHITE, AK_COL_BLACK, 1);
     ak_gfx_text_thin(6U, AK_TEST_Y_BLE, ak_tr(AK_STR_TEST_BLE_WAIT), AK_COL_WHITE, AK_COL_BLACK, 1);
 
-    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 33U, AK_COL_BLACK);
-    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
-    ak_gfx_text_thin(4U, 213U, ak_tr(AK_STR_TEST_HINT), AK_COL_CYAN, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(4U, 227U, ak_tr(AK_STR_TEST_EXIT), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, LCD_FOOTER_H, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
+    ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(AK_STR_TEST_HINT), AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_TEST_EXIT), AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
 }
 
@@ -2630,7 +3179,7 @@ static void ak_test_draw_slow(void)
         return;
     }
 
-    ak_gfx_fill_rect(0U, AK_TEST_Y_BAT, AK_STATUSLCD_W, 14U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, (uint16_t)(AK_TEST_Y_BAT - ak_text_pick(0U, 4U)), AK_STATUSLCD_W, ak_text_pick(14U, 16U), AK_COL_BLACK);
     if (ak_battery_available()) {
         unsigned          pct = (unsigned)ak_battery_percent();
         ak_battery_info_t bi;
@@ -2644,17 +3193,17 @@ static void ak_test_draw_slow(void)
     }
     ak_gfx_text_thin(6U, AK_TEST_Y_BAT, line, AK_COL_WHITE, AK_COL_BLACK, 1);
 
-    ak_gfx_fill_rect(0U, AK_TEST_Y_UART, AK_STATUSLCD_W, 14U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, (uint16_t)(AK_TEST_Y_UART - ak_text_pick(0U, 4U)), AK_STATUSLCD_W, ak_text_pick(14U, 16U), AK_COL_BLACK);
     (void)snprintf(line, sizeof(line), "UART0 (%s): rx %lu bytes", AK_TRANSPORT_NAME,
                    (unsigned long)s_test_uart_rx);
     ak_gfx_text_thin(6U, AK_TEST_Y_UART, line, AK_COL_WHITE, AK_COL_BLACK, 1);
 
-    ak_gfx_fill_rect(0U, AK_TEST_Y_WIFI, AK_STATUSLCD_W, 14U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, (uint16_t)(AK_TEST_Y_WIFI - ak_text_pick(0U, 4U)), AK_STATUSLCD_W, ak_text_pick(14U, 16U), AK_COL_BLACK);
     (void)snprintf(line, sizeof(line), "WiFi: %s %s",
                    ak_wifi_state_str(ak_wifi_current_state()), ak_wifi_current_ssid());
     ak_gfx_text_thin(6U, AK_TEST_Y_WIFI, line, AK_COL_WHITE, AK_COL_BLACK, 1);
 
-    ak_gfx_fill_rect(0U, AK_TEST_Y_BLE, AK_STATUSLCD_W, 14U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, (uint16_t)(AK_TEST_Y_BLE - ak_text_pick(0U, 4U)), AK_STATUSLCD_W, ak_text_pick(14U, 16U), AK_COL_BLACK);
 #if AK_TRANSPORT_HAS_BLE
     (void)snprintf(line, sizeof(line), "BLE: %s",
                    ak_ble_gatt_link_state_str(ak_ble_gatt_link_state()));
@@ -2780,10 +3329,10 @@ static void ak_test_draw_ledpwr_rows(void)
         return;
     }
     bool high = ak_leds_power_enabled();
-    ak_gfx_fill_rect(0U, AK_TEST_LP_Y_PIN, AK_STATUSLCD_W, 14U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, (uint16_t)(AK_TEST_LP_Y_PIN - ak_text_pick(0U, 4U)), AK_STATUSLCD_W, ak_text_pick(14U, 16U), AK_COL_BLACK);
     (void)snprintf(line, sizeof(line), "P18 LED_PWR_EN: %s", high ? "HIGH" : "LOW");
     ak_gfx_text_thin(6U, AK_TEST_LP_Y_PIN, line, high ? AK_COL_GREEN : AK_COL_GRAY, AK_COL_BLACK, 1);
-    ak_gfx_fill_rect(0U, AK_TEST_LP_Y_CHAIN, AK_STATUSLCD_W, 14U, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, (uint16_t)(AK_TEST_LP_Y_CHAIN - ak_text_pick(0U, 4U)), AK_STATUSLCD_W, ak_text_pick(14U, 16U), AK_COL_BLACK);
     (void)snprintf(line, sizeof(line), "Chain: %s", ak_leds_available() ? ak_leds_power_state_str() : "unavailable");
     ak_gfx_text_thin(6U, AK_TEST_LP_Y_CHAIN, line, AK_COL_WHITE, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
@@ -2799,16 +3348,16 @@ static void ak_test_draw_ledpwr(void)
     ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, LCD_SESSION_SELECTED_BG);
     ak_gfx_text(6U, 7U, ak_tr(AK_STR_SET_LED_POWER), AK_COL_BLACK, LCD_SESSION_SELECTED_BG, 1);
     ak_gfx_text_thin(6U, 84U, "On : P18 high, settle 10 ms, colours", AK_COL_GRAY, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(6U, 98U, "Off: dark frame, DIN low, P18 low", AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(6U, ak_text_pick(98U, 102U), "Off: dark frame, DIN low, P18 low", AK_COL_GRAY, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), "Setting %s / %s: not used here",
                    ak_led_mode_str((ak_led_mode_t)s_settings.led_mode),
                    ak_led_policy_timeout_str(s_settings.led_timeout_idx));
-    ak_gfx_text_thin(6U, 120U, line, AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(6U, ak_text_pick(120U, 124U), line, AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_gfx_text_thin(6U, 150U, ak_tr(AK_STR_TEST_NO_SWITCH1), AK_COL_ORANGE, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(6U, 164U, ak_tr(AK_STR_TEST_NO_SWITCH2), AK_COL_ORANGE, AK_COL_BLACK, 1);
-    ak_gfx_fill_rect(0U, 207U, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
-    ak_gfx_text_thin(4U, 213U, ak_tr(AK_STR_TEST_LP_KEYS), AK_COL_CYAN, AK_COL_BLACK, 1);
-    ak_gfx_text_thin(4U, 227U, ak_tr(AK_STR_TEST_LP_HINT), AK_COL_GRAY, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(6U, ak_text_pick(164U, 168U), ak_tr(AK_STR_TEST_NO_SWITCH2), AK_COL_ORANGE, AK_COL_BLACK, 1);
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
+    ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(AK_STR_TEST_LP_KEYS), AK_COL_CYAN, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_TEST_LP_HINT), AK_COL_GRAY, AK_COL_BLACK, 1);
     ak_statuslcd_flush();
     ak_test_draw_ledpwr_rows();
 }
@@ -3001,14 +3550,16 @@ static void ak_test_run(void)
     ak_settings_draw();
 }
 
+static void ak_session_labels_fit(void);
+
 static void ak_session_label_set(uint8_t slot, const char *alias)
 {
     if (slot >= LCD_SESSION_ROWS) {
         return;
     }
     if (alias == NULL || alias[0] == '\0') {
-        s_session_labels[slot][0] = (char)('A' + slot);
-        s_session_labels[slot][1] = '\0';
+        s_session_aliases[slot][0] = '\0';
+        ak_session_labels_fit();
         return;
     }
 
@@ -3019,8 +3570,8 @@ static void ak_session_label_set(uint8_t slot, const char *alias)
     }
     buf[n] = '\0';
     ak_text_utf8_trim(buf);
-    buf[ak_text_wrap(buf, LCD_SIDEBAR_W - 4U)] = '\0'; /* 7 ASCII or 4 CJK characters */
-    memcpy(s_session_labels[slot], buf, strlen(buf) + 1U);
+    memcpy(s_session_aliases[slot], buf, strlen(buf) + 1U);
+    ak_session_labels_fit();
 }
 
 static void ak_draw_session_sidebar(void)
@@ -3064,14 +3615,18 @@ static void ak_draw_session_sidebar(void)
  * Header: kind + title, queue and page/pages. Then up to 3 context lines,
  * the page's items (direct menus tag each with its key, K2..K5), one hint
  * line, and the status bar. UTF-8 text from the Companion is drawn as is
- * (ak_gfx_text: 8x8 for ASCII, the 12 px UI font for Chinese / mixed) and
- * wrapped / clipped by pixel width. */
+ * (ak_gfx_text: 16 px Unifont) and wrapped / clipped by pixel width. */
 #define LCD_MENU_COLS     38U
 #define LCD_MENU_TEXT_W   (LCD_MENU_COLS * AK_TEXT_ASCII_W) /* 304 px */
 #define LCD_MENU_CTX_Y    28U
-#define LCD_MENU_ITEM_Y   66U
+/* ak_text_pick(12 px, 16 px). Context lines; ③ text lines; items below 3
+ * context lines (16 px: the last cell ends at 75). */
+#define LCD_MENU_LINE_H      ak_text_pick(12U, 18U)
+#define LCD_MENU_TEXT_LINE_H ak_text_pick(14U, 18U)
+#define LCD_MENU_ITEM_Y      ak_text_pick(66U, 80U)
 #define LCD_MENU_ITEM_H   20U
 #define LCD_MENU_HINT_Y   194U
+#define LCD_MENU_TEXT_ROWS ak_text_pick(11U, 9U) /* ③ text lines between the header and the hint */
 
 /* Copy UTF-8 for the LCD: control characters become spaces, a sequence cut
  * by `cap` is dropped. */
@@ -3091,6 +3646,42 @@ static void ak_lcd_clip(char *s, uint16_t max_px)
     if (ak_text_width(s) > max_px) {
         s[ak_text_wrap(s, max_px)] = '\0';
     }
+}
+
+/* Settings > Bind session, slot page: K1-K3 with the slot name and the
+ * session bound to it. Rows are 48 px apart, room for the 12 px and 16 px
+ * fonts. The status message of the flow (no reply, error) replaces the
+ * first hint line while it lasts. */
+static void ak_bind_draw(uint32_t now_ms)
+{
+    ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, LCD_SESSION_SELECTED_BG);
+    ak_gfx_text(6U, 7U, ak_tr(AK_STR_BIND_TITLE), AK_COL_BLACK, LCD_SESSION_SELECTED_BG, 1);
+    bool waiting = s_bind.state != AK_BIND_PICK;
+    for (uint8_t i = 0U; i < LCD_SESSION_ROWS; i++) {
+        uint16_t y      = (uint16_t)(30U + i * 48U);
+        bool     picked = waiting && s_bind.slot == i + 1U;
+        uint16_t bg     = picked ? LCD_AGENT_RESPONSE_BG : AK_COL_BLACK;
+        uint16_t tag    = waiting && !picked ? AK_COL_GRAY : AK_RGB565(0x40U, 0x80U, 0xFFU);
+        char     k[3]   = {'K', (char)('1' + i), '\0'};
+        char     name[LCD_SESSION_NAME_BYTES];
+        ak_gfx_fill_rect(0U, y, AK_STATUSLCD_W, 44U, bg);
+        ak_gfx_fill_rect(6U, (uint16_t)(y + 4U), 28U, 16U, tag);
+        ak_gfx_text(12U, (uint16_t)(y + 8U), k, AK_COL_BLACK, tag, 1);
+        ak_gfx_text(44U, (uint16_t)(y + 8U), s_session_labels[i], AK_COL_WHITE, bg, 1);
+        bool bound = s_session_names[i][0] != '\0';
+        (void)snprintf(name, sizeof(name), "%s", bound ? s_session_names[i] : ak_tr(AK_STR_BIND_UNBOUND));
+        ak_lcd_clip(name, (uint16_t)(AK_STATUSLCD_W - 44U - 6U));
+        ak_gfx_text_thin(44U, (uint16_t)(y + 28U), name, bound ? AK_COL_CYAN : AK_COL_GRAY, bg, 1);
+    }
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, LCD_FOOTER_H, AK_COL_BLACK);
+    ak_gfx_fill_rect(0U, LCD_FOOTER_Y, AK_STATUSLCD_W, 1U, LCD_SESSION_SELECTED_BG);
+    if (s_status_tmp_on && (int32_t)(s_status_tmp_until_ms - now_ms) > 0) {
+        ak_gfx_text_thin(4U, LCD_HINT1_Y, s_status_tmp_text, s_status_tmp_color, AK_COL_BLACK, 1);
+    } else {
+        ak_gfx_text_thin(4U, LCD_HINT1_Y, ak_tr(waiting ? AK_STR_BIND_LOADING : AK_STR_BIND_HINT1), AK_COL_CYAN,
+                         AK_COL_BLACK, 1);
+    }
+    ak_gfx_text_thin(4U, LCD_HINT2_Y, ak_tr(AK_STR_BIND_HINT2), AK_COL_GRAY, AK_COL_BLACK, 1);
 }
 
 /* Draw up to `rows` wrapped lines of `text` from y with `pitch`; the last
@@ -3147,7 +3738,8 @@ static uint16_t ak_menu_role_lcd(uint8_t role)
 static void ak_menu_draw(void)
 {
     static const ak_str_id_t kind_tag[] = {AK_STR_MENU_OPTIONS, AK_STR_MENU_APPROVE, AK_STR_MENU_QUESTION,
-                                           AK_STR_MENU_MODEL, AK_STR_MENU_MODE};
+                                           AK_STR_MENU_MODEL,   AK_STR_MENU_MODE,    AK_STR_MENU_INSTANCE,
+                                           AK_STR_MENU_SESSION};
     const ak_menu_t         *m          = &s_menu;
     const ak_menu_pg_t      *pg         = &m->pg[m->cur_page];
     char                     line[LCD_MENU_COLS * 2U + 8U];
@@ -3160,7 +3752,7 @@ static void ak_menu_draw(void)
                                                              : LCD_SESSION_SELECTED_BG;
     ak_gfx_fill_rect(0U, 0U, AK_STATUSLCD_W, 22U, head_bg);
     ak_lcd_text(head->title, text, sizeof(text));
-    (void)snprintf(line, sizeof(line), "%s %s", ak_tr(kind_tag[(unsigned)head->kind < 5U ? head->kind : 0]), text);
+    (void)snprintf(line, sizeof(line), "%s %s", ak_tr(kind_tag[(unsigned)head->kind < sizeof(kind_tag) / sizeof(kind_tag[0]) ? head->kind : 0]), text);
     ak_text_utf8_trim(line);
     ak_lcd_clip(line, 26U * AK_TEXT_ASCII_W);
     ak_gfx_text(4U, 7U, line, AK_COL_BLACK, head_bg, 1);
@@ -3184,9 +3776,10 @@ static void ak_menu_draw(void)
     /* Context: up to 3 lines, wrapped by width. Long content (diffs, code) is
      * never sent; `more` says it is on the PC screen. */
     ak_lcd_text(m->ctx, text, sizeof(text));
-    uint8_t rows = ak_lcd_wrap_draw(text, LCD_MENU_CTX_Y, 12U, 3U, AK_COL_WHITE);
+    uint8_t rows = ak_lcd_wrap_draw(text, LCD_MENU_CTX_Y, LCD_MENU_LINE_H, 3U, AK_COL_WHITE);
     if (m->more && rows < 3U) {
-        ak_gfx_text_thin(4U, (uint16_t)(LCD_MENU_CTX_Y + rows * 12U), ak_tr(AK_STR_MENU_SEE_SCREEN), AK_COL_YELLOW, AK_COL_BLACK, 1);
+        ak_gfx_text_thin(4U, (uint16_t)(LCD_MENU_CTX_Y + rows * LCD_MENU_LINE_H), ak_tr(AK_STR_MENU_SEE_SCREEN),
+                         AK_COL_YELLOW, AK_COL_BLACK, 1);
     }
 
     if (pg->count == 0U) {
@@ -3200,7 +3793,8 @@ static void ak_menu_draw(void)
         uint16_t              tag = ak_menu_role_lcd(it->role);
         char                  k[3] = {'K', (char)('2' + i), '\0'}; /* item i sits on K(i+2) */
         ak_gfx_fill_rect(0U, y, AK_STATUSLCD_W, (uint16_t)(LCD_MENU_ITEM_H - 2U), bg);
-        ak_gfx_fill_rect(4U, (uint16_t)(y + 2U), 26U, 14U, tag);
+        /* 16 px: the tag covers the same rows as the glyph cell. */
+        ak_gfx_fill_rect(4U, (uint16_t)(y + ak_text_pick(2U, 1U)), 26U, ak_text_pick(14U, 16U), tag);
         ak_gfx_text(9U, (uint16_t)(y + 5U), k, AK_COL_BLACK, tag, 1);
         const char *mark = m->multi ? (ak_menu_item_ticked(m, m->cur_page, i) ? "[x] " : "[ ] ")
                            : ak_menu_item_ticked(m, m->cur_page, i) ? "* "
@@ -3239,7 +3833,7 @@ static void ak_confirm_text_draw(const char *title, uint16_t color, const char *
         return;
     }
     ak_lcd_text(utf8, text, sizeof(text));
-    (void)ak_lcd_wrap_draw(text, LCD_MENU_CTX_Y, 14U, 11U, AK_COL_WHITE);
+    (void)ak_lcd_wrap_draw(text, LCD_MENU_CTX_Y, LCD_MENU_TEXT_LINE_H, LCD_MENU_TEXT_ROWS, AK_COL_WHITE);
 }
 
 /* ③ of a voice input: the text that K6 sends. */
@@ -3256,8 +3850,9 @@ static void ak_dictation_draw(void)
     bool confirm = ak_ui_state(&s_ui) == AK_UI_CONFIRM;
     ak_confirm_text_draw(ak_tr(AK_STR_DICT_TITLE), AK_COL_PURPLE, confirm ? s_dictated : NULL);
     if (!confirm) {
+        /* Scale 2: 32 px cells, so the two lines sit 36 px apart. */
         ak_gfx_text(4U, 80U, ak_tr(AK_STR_DICT_HOLD), AK_COL_WHITE, AK_COL_BLACK, 2);
-        ak_gfx_text(4U, 104U, ak_tr(AK_STR_DICT_SPEAK), AK_COL_WHITE, AK_COL_BLACK, 2);
+        ak_gfx_text(4U, ak_text_pick(104U, 116U), ak_tr(AK_STR_DICT_SPEAK), AK_COL_WHITE, AK_COL_BLACK, 2);
     }
     ak_gfx_text_thin(4U, LCD_MENU_HINT_Y, confirm ? ak_tr(AK_STR_DICT_CONFIRM_HINT) : ak_tr(AK_STR_DICT_BACK_HINT),
                      AK_COL_GRAY, AK_COL_BLACK, 1);
@@ -3297,6 +3892,20 @@ static void ak_render_status(void)
 #endif
     if (ak_provision_reset_pending(&s_prov, now_ms)) {
         ak_draw_reset_confirm();
+        ak_status_bar_draw();
+        ak_statuslcd_flush();
+        s_lcd_redraw_pending = false;
+        return;
+    }
+    if (ak_provision_unpair_pending(&s_prov, now_ms)) {
+        ak_draw_unpair_confirm();
+        ak_status_bar_draw();
+        ak_statuslcd_flush();
+        s_lcd_redraw_pending = false;
+        return;
+    }
+    if (ak_provision_rebind_pending(&s_prov, now_ms)) {
+        ak_draw_rebind_confirm();
         ak_status_bar_draw();
         ak_statuslcd_flush();
         s_lcd_redraw_pending = false;
@@ -3366,10 +3975,10 @@ static void ak_render_status(void)
     (void)snprintf(line, sizeof(line), ak_tr(AK_STR_ST_SESSION),
                    s_session_labels[s_selected_session],
                    session->agent[0] ? session->agent : "-");
-    ak_gfx_text_thin(LCD_CHAT_X, 29U, line, AK_COL_WHITE, AK_COL_BLACK, 1);
+    ak_gfx_text_thin(LCD_CHAT_X, LCD_CHAT_ROW1_Y, line, AK_COL_WHITE, AK_COL_BLACK, 1);
     (void)snprintf(line, sizeof(line), ak_tr(AK_STR_ST_STATUS),
                    session->state[0] ? session->state : "-");
-    ak_gfx_text_thin(LCD_CHAT_X, 43U, line,
+    ak_gfx_text_thin(LCD_CHAT_X, LCD_CHAT_ROW2_Y, line,
                      ak_status_color(session->state), AK_COL_BLACK, 1);
     ak_chat_history_draw(session);
     ak_status_bar_draw();
@@ -3483,13 +4092,51 @@ static void ak_menu_loop_tick(uint32_t now)
         s_status_tmp_on      = false;
         s_lcd_redraw_pending = true;
     }
+    bool bind_flash = ak_bind_flashing(&s_bind, now);
+    ak_bind_apply(ak_bind_tick(&s_bind, now), NULL, 0U);
+    if (bind_flash && !ak_bind_flashing(&s_bind, now) && s_settings_active) {
+        s_lcd_redraw_pending = true; /* the "bound" line goes back to the hints */
+    }
 
     if (!ak_leds_available()) {
         return;
     }
     ak_rgb_t frame[AK_LIGHT_COUNT];
-    if (ak_menu_owns_keys(&s_menu)) {
+    if (ak_provision_rebind_pending(&s_prov, now)) {
+        /* Unbind confirm: K6 flashes yellow (~4 Hz double confirm), K1 red. */
+        memset(frame, 0, sizeof(frame));
+        frame[0] = ak_light_rgb(AK_LIGHT_RED, AK_LIGHT_FULL_PCT);
+        frame[5] = ((now / AK_LIGHT_FLASH_MS) & 1U) != 0U ? ak_light_rgb(AK_LIGHT_YELLOW, AK_LIGHT_FULL_PCT)
+                                                          : (ak_rgb_t){0, 0, 0};
+    } else if (s_combo.active && !s_combo.fired) {
+        /* K1 + K6 held: both glow yellow until the confirm appears (5 s). */
+        memset(frame, 0, sizeof(frame));
+        frame[0] = ak_light_rgb(AK_LIGHT_YELLOW, AK_LIGHT_FULL_PCT);
+        frame[5] = ak_light_rgb(AK_LIGHT_YELLOW, AK_LIGHT_FULL_PCT);
+    } else if (ak_menu_owns_keys(&s_menu)) {
         ak_menu_lights(&s_menu, now, frame);
+    } else if (s_settings_active && s_wifi_page) {
+        /* Saved Wi-Fi: K1 back (red), the knob selects (blue), K6 deletes
+         * (red); K6 flashes yellow ~4 Hz while the second press is awaited. */
+        memset(frame, 0, sizeof(frame));
+        ak_wifi_saved_t unused[AK_WIFI_STORE_MAX];
+        bool            any = ak_wifi_page_count(unused) > 0U;
+        frame[0]            = ak_light_rgb(AK_LIGHT_RED, AK_LIGHT_FULL_PCT);
+        frame[6]            = ak_light_rgb(AK_LIGHT_BLUE, AK_LIGHT_FULL_PCT);
+        if (any && s_wifi_del_armed && (int32_t)(s_wifi_del_deadline_ms - now) > 0) {
+            frame[5] = ((now / AK_LIGHT_FLASH_MS) & 1U) != 0U ? ak_light_rgb(AK_LIGHT_YELLOW, AK_LIGHT_FULL_PCT)
+                                                              : (ak_rgb_t){0, 0, 0};
+        } else if (any) {
+            frame[5] = ak_light_rgb(AK_LIGHT_RED, AK_LIGHT_FULL_PCT);
+        }
+    } else if (s_settings_active && ak_bind_active(&s_bind)) {
+        /* Bind session slot page: K1-K3 blue; once picked only that slot. */
+        memset(frame, 0, sizeof(frame));
+        for (uint8_t i = 0U; i < AK_BIND_SLOTS; i++) {
+            if (s_bind.state == AK_BIND_PICK || s_bind.slot == i + 1U) {
+                frame[i] = ak_light_rgb(AK_LIGHT_BLUE, AK_LIGHT_FULL_PCT);
+            }
+        }
     } else if (s_ui.dictating) {
         ak_dictation_lights(frame);
     } else {
@@ -3501,6 +4148,12 @@ static void ak_menu_loop_tick(uint32_t now)
         }
         ak_session_lights(waiting, ak_ui_k4_waiting(&s_ui, s_menu_parked), ak_input_confirm(), now - s_ui.confirm_ms,
                           now, frame);
+    }
+    if (ak_bind_flashing(&s_bind, now) && !ak_menu_owns_keys(&s_menu)) {
+        /* Just bound / unbound: that slot key blinks green. */
+        uint8_t slot    = s_bind.flash_slot;
+        uint8_t on      = ak_bind_flash_on(&s_bind, now);
+        frame[slot - 1U] = on != 0U ? ak_light_rgb(AK_LIGHT_GREEN, AK_LIGHT_FULL_PCT) : (ak_rgb_t){0, 0, 0};
     }
     if (s_lights_valid && memcmp(frame, s_lights_shown, sizeof(frame)) == 0) {
         return;
@@ -3566,6 +4219,9 @@ static void ak_voice_ui_tick(uint32_t now_ms)
         s_voice_ui_state = AK_VOICE_UI_IDLE;
         s_voice_ui_state_since_ms = now_ms;
         s_asr_for_menu            = false;
+        if (s_ui.pc_wait) {
+            send_voice("cancel"); /* a late PC result must not open ③ */
+        }
         ak_ui_voice_end(&s_ui, AK_UI_VOICE_ERROR, s_voice_mode == AK_VOICE_MODE_CHAT, now_ms);
         ak_ui_sync(now_ms);
         ak_status_bar_set(ak_tr(AK_STR_ST_ASR_TIMEOUT), AK_COL_ORANGE);
@@ -3699,7 +4355,10 @@ static void ak_prov_confirm_dialog(void)
 {
     uint32_t now_ms = tal_system_get_millisecond();
 
-    if (!ak_license_present()) {
+    /* Activated ("Change Wi-Fi"): open now. A new network written over USB
+     * only reconnects netmgr; tuya_iot keeps devId and keys and just
+     * reconnects MQTT, so no restart and no new activation are needed. */
+    if (!ak_provision_pairing_needs_restart(ak_license_present(), ak_cloud_activated())) {
         (void)ak_provision_confirm(&s_prov, now_ms);
         return;
     }
@@ -3773,6 +4432,11 @@ static void ak_voice_mode_apply(ak_voice_mode_t mode, bool persist)
     }
     PR_NOTICE("voice mode -> %s", ak_voice_mode_str(mode));
     send_voice_source();
+#if AK_ENABLE_DISPLAY
+    if (persist) {
+        send_device_settings(); /* last change wins: tell the Companion at once */
+    }
+#endif
 }
 
 /* FR-01: one interface language for the LCD, the Companion and the Chat-mode
@@ -3819,6 +4483,79 @@ static void ak_language_load(void)
         ak_kv_free(blob);
     }
     ak_language_apply(lang, false);
+}
+
+#if AK_ENABLE_DISPLAY
+/* Re-fit the sidebar labels to the current font size (aliases are kept as received). */
+static void ak_session_labels_fit(void)
+{
+    for (uint8_t slot = 0U; slot < LCD_SESSION_ROWS; slot++) {
+        char *label = s_session_labels[slot];
+        if (s_session_aliases[slot][0] == '\0') {
+            label[0] = (char)('A' + slot);
+            label[1] = '\0';
+            continue;
+        }
+        memcpy(label, s_session_aliases[slot], sizeof(s_session_aliases[slot]));
+        label[ak_text_wrap(label, LCD_SIDEBAR_W - 4U)] = '\0'; /* 7 ASCII, or 4 (12 px) / 3 (16 px) CJK */
+    }
+}
+#endif
+
+/* LCD font size (Settings > Font size, Companion device_settings font_size).
+ * Called from the Settings commit, a Companion frame and the boot-time KV
+ * restore (persist=false). Every layout reads the size when it draws, so
+ * the change shows at once; text wrapped earlier (sidebar labels, the Chat
+ * page) is wrapped again. The last change wins on both sides. */
+static void ak_font_size_apply(ak_text_size_t size, bool persist)
+{
+    ak_text_size_t before = ak_text_size_get();
+    ak_text_size_set(size);
+    s_settings.font_size = (uint8_t)ak_text_size_get();
+    if (persist && before != ak_text_size_get()) {
+        uint8_t b = ak_text_size_px(ak_text_size_get());
+        if (ak_kv_set(AK_FONT_SIZE_KV_KEY, &b, 1U) != OPRT_OK) {
+            PR_WARN("font size: KV write failed (applied until reboot)");
+        }
+    }
+    PR_NOTICE("font size -> %u px", (unsigned)ak_text_size_px(ak_text_size_get()));
+#if AK_ENABLE_DISPLAY
+    ak_session_labels_fit();
+    if (before != ak_text_size_get()) {
+        ak_chat_rebuild_lines();
+        s_chat_scroll = 0U;
+    }
+    if (persist) {
+        send_device_settings(); /* also the echo for a Companion request */
+    }
+    if (persist && before != ak_text_size_get()) {
+        char note[32];
+        (void)snprintf(note, sizeof(note), ak_tr(AK_STR_NOTE_FONT_SIZE),
+                       (unsigned)ak_text_size_px(ak_text_size_get()));
+        ak_status_bar_set(note, AK_COL_CYAN);
+        if (s_settings_active) {
+            ak_settings_draw();
+        } else {
+            ak_render_status();
+        }
+    }
+#endif
+}
+
+static void ak_font_size_load(void)
+{
+    uint8_t       *blob = NULL;
+    size_t         len  = 0;
+    ak_text_size_t size = AK_TEXT_SIZE_DEFAULT;
+    if (ak_kv_get(AK_FONT_SIZE_KV_KEY, &blob, &len) == OPRT_OK &&
+        (len != 1U || blob == NULL || !ak_text_size_from_px(blob[0], &size))) {
+        PR_WARN("font size: invalid KV value; using %u px", (unsigned)ak_text_size_px(AK_TEXT_SIZE_DEFAULT));
+        size = AK_TEXT_SIZE_DEFAULT;
+    }
+    if (blob != NULL) {
+        ak_kv_free(blob);
+    }
+    ak_font_size_apply(size, false);
 }
 
 /* Poll the Chat turn: refresh the page and mirror each finished utterance /
@@ -3899,6 +4636,7 @@ static void ble_pair_over_uart(uint32_t seq)
 #if AK_ENABLE_DISPLAY
     ak_status_bar_set(ak_tr(AK_STR_ST_BLE_PAIRED), AK_COL_GREEN);
     ak_prov_refresh_countdown(tal_system_get_millisecond());
+    send_device_settings(); /* ble_paired: true */
 #endif
 #else
     (void)seq; /* BLE pairing needs the USB link of the DUAL profile */
@@ -3907,6 +4645,69 @@ static void ble_pair_over_uart(uint32_t seq)
 }
 
 /* K6 / K4 on the "Reset network?" dialog. */
+/* Companion ble_unpair answered on the device (FR-02). */
+static void ak_prov_unpair_resolve(bool confirm)
+{
+    if (!ak_provision_unpair_resolve(&s_prov, confirm, tal_system_get_millisecond())) {
+        PR_NOTICE("ble_unpair: cancelled on the device");
+        send_prov_status_uart("ble_unpair", "cancelled");
+    } else {
+#if AK_TRANSPORT_DUAL || AK_TRANSPORT_BLE_GATT
+        ble_key_clear();
+        ak_status_bar_set(ak_tr(AK_STR_ST_BLE_CLEARED), AK_COL_ORANGE);
+#endif
+        send_device_settings(); /* ble_paired: false */
+    }
+    ak_prov_changed();
+}
+
+/* Settings > Unbind & re-pair confirmed with K6: clear Wi-Fi and the Tuya
+ * binding (License and the FR-15 saved networks stay), then reboot into the
+ * pairing window so the Tuya app can pair over BLE. Same SDK path as a
+ * Companion reset_netcfg: tuya_iot_reset -> RESET_COMPLETE -> reboot. */
+static void ak_prov_rebind_resolve(bool confirm)
+{
+    if (!ak_provision_rebind_resolve(&s_prov, confirm, tal_system_get_millisecond())) {
+        PR_NOTICE("rebind: cancelled on the device");
+        ak_prov_changed();
+        return;
+    }
+    if (ak_reset_netcfg_mark_reopen() != OPRT_OK) {
+#if AK_ENABLE_DISPLAY
+        ak_status_bar_set(ak_tr(AK_STR_ST_PAIRING_STORAGE), AK_COL_RED);
+#endif
+        ak_prov_changed();
+        return;
+    }
+    if (!ak_cloud_activated()) {
+        /* Nothing to unbind (never activated, or a binding already cleared):
+         * restart straight into the pairing window, as Settings > Pairing
+         * mode does. tuya_iot_reset would not reboot an unactivated client. */
+        PR_NOTICE("rebind: not activated; restarting into the pairing window");
+#if AK_ENABLE_DISPLAY
+        ak_status_bar_set(ak_tr(AK_STR_ST_PAIRING_RESTART), AK_COL_ORANGE);
+#endif
+        ak_prov_changed();
+        tal_system_sleep(1500U); /* let the LCD show the message before the reset */
+        tal_system_reset();
+        return;
+    }
+    OPERATE_RET rr = ak_cloud_enter_pairing();
+    if (rr != OPRT_OK) {
+        (void)ak_reset_netcfg_take_reopen(); /* no reboot follows: drop the marker */
+        PR_WARN("rebind: unbind failed or unsupported: %d", rr);
+#if AK_ENABLE_DISPLAY
+        ak_status_bar_set(ak_tr(AK_STR_REBIND_FAILED), AK_COL_RED);
+#endif
+    } else {
+        PR_NOTICE("rebind: Tuya binding cleared (License kept); reboot into the pairing window follows");
+#if AK_ENABLE_DISPLAY
+        ak_status_bar_set(ak_tr(AK_STR_REBIND_RUNNING), AK_COL_ORANGE);
+#endif
+    }
+    ak_prov_changed();
+}
+
 static void ak_prov_reset_resolve(bool confirm)
 {
     if (!ak_provision_reset_resolve(&s_prov, confirm, tal_system_get_millisecond())) {
@@ -4165,6 +4966,8 @@ static void on_rx_frame(const char *line, ak_rx_source_t source)
     }
 
     if (strcmp(type, "hello") == 0) {
+        bool pc_asr = false;
+        s_pc_asr_results = ak_json_get_bool(payload, "pc_asr", &pc_asr) == AK_JSON_OK && pc_asr;
         /* Only a greeting received over UART proves the USB companion link is
          * up. In DUAL mode a BLE hello must not light the USB icon. */
         if (from_uart) {
@@ -4204,6 +5007,7 @@ static void on_rx_frame(const char *line, ak_rx_source_t source)
         /* The PC companion is disconnecting gracefully. Plain UART gives no
          * hardware disconnect edge, so this frame is how the board learns the
          * link is going down -> flip the header to "USB Disconnected". */
+        s_pc_asr_results = false;
         if (from_uart && s_pc_connected) {
             s_pc_connected = false;
             ak_transport_feedback(AK_STR_ST_USB_DISCONNECTED, AK_COL_ORANGE);
@@ -4278,21 +5082,58 @@ static void on_rx_frame(const char *line, ak_rx_source_t source)
 #if AK_ENABLE_DISPLAY
         uint32_t     volume     = 0U;
         uint32_t     brightness = 0U;
+        uint32_t     off_s      = 0U;
         ak_json_rc_t vol_rc     = ak_json_get_uint(payload, "volume", 100U, &volume);
         ak_json_rc_t bri_rc     = ak_json_get_uint(payload, "brightness", 100U, &brightness);
+        ak_json_rc_t off_rc     = ak_json_get_uint(payload, "led_auto_off_s", 3600U, &off_s);
+        uint32_t     font_px    = 0U;
+        ak_json_rc_t font_rc    = ak_json_get_uint(payload, "font_size", 64U, &font_px);
+        ak_text_size_t font     = AK_TEXT_SIZE_DEFAULT;
         char         lang_str[8];
+        char         voice_str[8];
+        char         led_str[8];
         ak_json_rc_t lang_rc    = ak_json_get_str(payload, "language", lang_str, sizeof(lang_str));
+        ak_json_rc_t voice_rc   = ak_json_get_str(payload, "voice_mode", voice_str, sizeof(voice_str));
+        ak_json_rc_t led_rc     = ak_json_get_str(payload, "led_power", led_str, sizeof(led_str));
         ak_lang_t    lang       = AK_LANG_DEFAULT;
+        ak_voice_mode_t voice   = AK_VOICE_MODE_ASR;
+        ak_led_mode_t   led     = AK_LED_MODE_AUTO;
+        uint8_t         off_idx = s_settings.led_timeout_idx;
         bool         changed    = false;
 
-        if (vol_rc == AK_JSON_INVALID || bri_rc == AK_JSON_INVALID ||
-            (lang_rc == AK_JSON_OK && !ak_lang_from_wire(lang_str, &lang)) || lang_rc == AK_JSON_INVALID) {
-            PR_WARN("device settings rejected: volume/brightness 0..100, language zh/en");
+        /* Any present field out of range rejects the whole frame (no partial apply). */
+        if (vol_rc == AK_JSON_INVALID || bri_rc == AK_JSON_INVALID || off_rc == AK_JSON_INVALID ||
+            lang_rc == AK_JSON_INVALID || voice_rc == AK_JSON_INVALID || led_rc == AK_JSON_INVALID ||
+            font_rc == AK_JSON_INVALID || (font_rc == AK_JSON_OK && !ak_text_size_from_px(font_px, &font)) ||
+            (lang_rc == AK_JSON_OK && !ak_lang_from_wire(lang_str, &lang)) ||
+            (voice_rc == AK_JSON_OK && !ak_voice_mode_from_wire(voice_str, &voice)) ||
+            (led_rc == AK_JSON_OK && !ak_led_mode_from_wire(led_str, &led)) ||
+            (off_rc == AK_JSON_OK && !ak_led_policy_timeout_from_s(off_s, &off_idx))) {
+            PR_WARN("device settings rejected: a field is out of range");
             return;
+        }
+        if (voice_rc == AK_JSON_OK && voice != s_voice_mode) {
+            /* Same path as Settings > Voice mode; reports the new state. */
+            ak_voice_mode_apply(voice, true);
+            ak_status_bar_set(ak_tr(voice == AK_VOICE_MODE_CHAT ? AK_STR_NOTE_CHAT : AK_STR_NOTE_ASR), AK_COL_CYAN);
+            changed = true;
+        }
+        if ((led_rc == AK_JSON_OK && (uint8_t)led != s_settings.led_mode) ||
+            (off_rc == AK_JSON_OK && off_idx != s_settings.led_timeout_idx)) {
+            if (led_rc == AK_JSON_OK) {
+                s_settings.led_mode = (uint8_t)led;
+            }
+            s_settings.led_timeout_idx = off_idx;
+            ak_led_setting_commit(); /* applies and stores, as the Settings commit does */
+            changed = true;
         }
         if (lang_rc == AK_JSON_OK) {
             /* Last change wins; ak_language_apply reports the state and redraws. */
             ak_language_apply(lang, true);
+        }
+        if (font_rc == AK_JSON_OK) {
+            /* Same as the language: reports the state and redraws. */
+            ak_font_size_apply(font, true);
         }
         if (vol_rc == AK_JSON_OK) {
             if (ak_asr_set_volume((uint8_t)volume) == OPRT_OK) {
@@ -4321,7 +5162,7 @@ static void on_rx_frame(const char *line, ak_rx_source_t source)
                 ak_render_status();
             }
         }
-        if (vol_rc == AK_JSON_OK || bri_rc == AK_JSON_OK) {
+        if (vol_rc == AK_JSON_OK || bri_rc == AK_JSON_OK || led_rc == AK_JSON_OK || off_rc == AK_JSON_OK) {
             send_device_settings();
         }
 #endif
@@ -4330,12 +5171,18 @@ static void on_rx_frame(const char *line, ak_rx_source_t source)
         static const char *fields[LCD_SESSION_ROWS] = {
             "alias_a", "alias_b", "alias_c"
         };
+        static const char *name_fields[LCD_SESSION_ROWS] = {"name_a", "name_b", "name_c"};
         bool changed = false;
         for (uint8_t i = 0U; i < LCD_SESSION_ROWS; i++) {
             char alias[LCD_SESSION_ALIAS_BYTES] = "";
+            char name[LCD_SESSION_NAME_BYTES]   = "";
             /* Display-only label: clip to the LCD buffer at a UTF-8 boundary. */
             if (ak_json_get_str_clip(payload, fields[i], alias, sizeof(alias)) == AK_JSON_OK) {
                 ak_session_label_set(i, alias);
+                changed = true;
+            }
+            if (ak_json_get_str_clip(payload, name_fields[i], name, sizeof(name)) == AK_JSON_OK) {
+                ak_lcd_text(name, s_session_names[i], sizeof(s_session_names[i]));
                 changed = true;
             }
         }
@@ -4364,6 +5211,25 @@ static void on_rx_frame(const char *line, ak_rx_source_t source)
         }
         PR_NOTICE("wifi config: ssid=%s (pass %u chars)", ssid, (unsigned)strlen(pass));
         ak_wifi_connect(ssid, pass);
+        send_ack(seq);
+    } else if (strcmp(type, "wifi_list") == 0) {
+        /* FR-15: read-only, SSIDs without passwords, so any authenticated
+         * source may ask (USB or the paired BLE channel). */
+        send_wifi_list();
+    } else if (strcmp(type, "wifi_forget") == 0) {
+        /* FR-15: delete one remembered network. USB only (ak_rx.c), no window:
+         * it removes data and never adds a credential. */
+        char ssid[AK_WIFI_SSID_MAX + 1U] = "";
+        if (ak_json_get_str(payload, "ssid", ssid, sizeof(ssid)) != AK_JSON_OK || ssid[0] == '\0') {
+            PR_WARN("wifi_forget rejected: ssid missing or too long");
+            return;
+        }
+        (void)ak_wifi_saved_forget(ssid);
+        send_wifi_list();
+        send_ack(seq);
+    } else if (strcmp(type, "wifi_clear") == 0) {
+        ak_wifi_saved_clear();
+        send_wifi_list();
         send_ack(seq);
     } else if (strcmp(type, "license") == 0) {
         /* PC provisions the device license: {"type":"license","payload":
@@ -4417,6 +5283,56 @@ static void on_rx_frame(const char *line, ak_rx_source_t source)
         s_prov_reset_seq = seq;
         send_prov_status_uart(type, ak_provision_verdict_str(AK_PROV_NEEDS_DEVICE_CONFIRM));
         ak_prov_changed();
+    } else if (strcmp(type, "prov_open") == 0) {
+        /* FR-02: the Companion asks for the pairing window. USB only (ak_rx
+         * gate). Same ⑦ as Settings > Pairing mode: the settings page opens on
+         * the Pairing row with its K6 / K1 confirm; nothing opens without K6. */
+        uint32_t now = tal_system_get_millisecond();
+        if (ak_provision_is_open(&s_prov, now)) {
+            ak_prov_changed(); /* already open: re-report prov_status */
+        } else if (s_prov.state == AK_PROV_CONFIRMING || ak_provision_reset_pending(&s_prov, now) ||
+                   ak_provision_unpair_pending(&s_prov, now) || ak_provision_rebind_pending(&s_prov, now) ||
+                   s_test_active
+#if AK_TRANSPORT_HAS_UART
+                   || ak_ota_link_busy()
+#endif
+        ) {
+            send_prov_status_uart(type, "busy");
+            ak_status_bar_set(ak_tr(AK_STR_ST_PAIR_REQ_BUSY), AK_COL_ORANGE);
+        } else {
+            ak_pending_confirm_exit(); /* settings ends ② / ③ */
+            s_settings_active    = true;
+            s_settings_confirmed = false;
+            s_cred_page          = false;
+            s_wifi_page          = false;
+            s_settings.editing   = false;
+            s_settings.selected  = AK_SETTINGS_ITEM_PAIRING;
+            ak_provision_request(&s_prov, now);
+            send_prov_status_uart(type, ak_provision_verdict_str(AK_PROV_NEEDS_DEVICE_CONFIRM));
+            ak_prov_changed();
+            ak_settings_draw();
+        }
+    } else if (strcmp(type, "ble_unpair") == 0) {
+        /* FR-02: clear the keyboard's BLE pairing key. USB only (ak_rx gate);
+         * the device asks first (⑦, K6 / K1, 10 s). */
+#if AK_TRANSPORT_DUAL || AK_TRANSPORT_BLE_GATT
+        if (!s_ble_key_set) {
+            send_device_settings(); /* nothing to clear: report ble_paired false */
+        } else if (s_test_active ||
+#if AK_TRANSPORT_HAS_UART
+                   ak_ota_link_busy() ||
+#endif
+                   !ak_provision_unpair_request(&s_prov, tal_system_get_millisecond())) {
+            send_prov_status_uart(type, "busy");
+            ak_status_bar_set(ak_tr(AK_STR_ST_PAIR_REQ_BUSY), AK_COL_ORANGE);
+        } else {
+            ak_leds_activity();
+            send_prov_status_uart(type, ak_provision_verdict_str(AK_PROV_NEEDS_DEVICE_CONFIRM));
+            ak_prov_changed();
+        }
+#else
+        send_prov_status_uart(type, "unsupported");
+#endif
     } else if (strcmp(type, "menu") == 0 || strcmp(type, "menu_close") == 0 || strcmp(type, "notice") == 0 ||
                strcmp(type, "menu_parked") == 0) {
         /* LCD menu frames: USB, or BLE after the secure channel (on_rx_line
@@ -4424,25 +5340,56 @@ static void on_rx_frame(const char *line, ak_rx_source_t source)
 #if AK_ENABLE_DISPLAY
         ak_menu_on_frame(type, payload);
 #endif
+    } else if (strcmp(type, "bind_done") == 0) {
+        /* Settings > Bind session: the Companion's answer to bind_session. */
+#if AK_ENABLE_DISPLAY
+        ak_bind_on_done(payload);
+#endif
     } else if (strcmp(type, "input_restore") == 0) {
         /* A direct send of the ③ text failed on the PC: back to ③ with it so
          * it can be sent again or cancelled. Only from standby (①). */
 #if AK_ENABLE_DISPLAY
+        /* `src`: "pc" = PC ASR text (normal colour; ② -> ③, or an empty text
+         * ends the wait); "retry" or absent (older Companion) = a failed send
+         * (red). */
         char     text[ASR_TRANSCRIPT_MAX];
         char     msg[AK_MENU_NOTICE_MAX + 1U] = "";
+        char     src[8]                       = "";
         uint32_t now = tal_system_get_millisecond();
-        if (ak_json_get_str_clip(payload, "text", text, sizeof(text)) != AK_JSON_OK || text[0] == '\0') {
+        (void)ak_json_get_str_clip(payload, "src", src, sizeof(src));
+        bool pc = strcmp(src, "pc") == 0;
+        if (ak_json_get_str_clip(payload, "text", text, sizeof(text)) != AK_JSON_OK) {
             PR_WARN("input_restore rejected: no text");
             return;
         }
         (void)ak_json_get_str_clip(payload, "msg", msg, sizeof(msg));
-        if (!ak_ui_input_restore(&s_ui, now)) {
-            PR_WARN("input_restore ignored: not in standby");
+        if (text[0] == '\0') {
+            if (pc && s_ui.pc_wait) {
+                /* Nothing recognised / PC ASR failed: ② -> ① with the reason. */
+                s_voice_ui_state          = AK_VOICE_UI_IDLE;
+                s_voice_ui_state_since_ms = now;
+                ak_ui_voice_end(&s_ui, AK_UI_VOICE_ERROR, false, now);
+                ak_status_bar_set(msg[0] != '\0' ? msg : ak_tr(AK_STR_ST_NO_SPEECH), AK_COL_ORANGE);
+                ak_ui_sync(now);
+                ak_render_status();
+            } else {
+                PR_WARN("input_restore rejected: no text");
+            }
             return;
         }
+        if (!ak_ui_input_restore(&s_ui, now)) {
+            PR_WARN("input_restore ignored: not in standby or waiting for PC ASR");
+            return;
+        }
+        s_voice_ui_state          = AK_VOICE_UI_IDLE; /* no ASR timeout in ③ */
+        s_voice_ui_state_since_ms = now;
         (void)snprintf(s_input_text, sizeof(s_input_text), "%s", text);
         ak_leds_activity();
-        ak_status_bar_set(msg[0] != '\0' ? msg : ak_tr(AK_STR_ST_INPUT_NOT_SENT), AK_COL_RED);
+        if (pc) {
+            ak_status_bar_set(msg[0] != '\0' ? msg : ak_tr(AK_STR_ST_CONFIRM_HINT), AK_COL_GREEN);
+        } else {
+            ak_status_bar_set(msg[0] != '\0' ? msg : ak_tr(AK_STR_ST_INPUT_NOT_SENT), AK_COL_RED);
+        }
         ak_ui_sync(now);
         ak_render_status();
 #endif
@@ -4516,6 +5463,70 @@ static void on_rx_line(const char *line, ak_rx_source_t source)
     on_rx_frame(line, source);
 }
 
+/* FR-15 once per loop: tell the roamer whether it may use the radio, push a
+ * changed list to the Companion, and keep the Saved Wi-Fi page current. */
+static void ak_wifi_poll(uint32_t now)
+{
+    /* Not while the pairing window / its confirm is up (FR-12 B: Tuya or the
+     * Companion owns the radio then), during an OTA, or on the test page. */
+    bool allowed = s_prov.state == AK_PROV_CLOSED;
+#if AK_TRANSPORT_HAS_UART
+    allowed = allowed && !ak_ota_link_busy();
+#endif
+#if AK_ENABLE_DISPLAY
+    allowed = allowed && !s_test_active;
+#endif
+    ak_wifi_set_roam_allowed(allowed);
+    if (s_pc_connected && (s_wifi_list_dirty || ak_wifi_saved_revision() != s_wifi_sent_rev)) {
+        s_wifi_list_dirty = false;
+        send_wifi_list();
+    }
+#if AK_ENABLE_DISPLAY
+    if (s_settings_active && s_wifi_page) {
+        static uint32_t s_page_rev = 0xFFFFFFFFU;
+        bool            expired    = s_wifi_del_armed && (int32_t)(now - s_wifi_del_deadline_ms) >= 0;
+        if (expired) {
+            ak_wifi_page_disarm();
+        }
+        if (expired || s_page_rev != ak_wifi_saved_revision()) {
+            s_page_rev = ak_wifi_saved_revision();
+            ak_settings_draw();
+        }
+    }
+#else
+    (void)now;
+#endif
+}
+
+/* K1 + K6 held 5 s (any screen): the same confirm as Settings > Unbind &
+ * re-pair. Not while a firmware update or another system confirm runs. */
+static void ak_recovery_combo_fired(uint32_t now)
+{
+#if AK_TRANSPORT_HAS_UART
+    if (ak_ota_link_busy()) {
+        return;
+    }
+#endif
+    if (ak_provision_rebind_action(ak_cloud_license_usable(), ak_cloud_activated()) == AK_PAIR_ACTION_NEED_LICENSE) {
+        PR_WARN("recovery combo: no License; configure over USB");
+#if AK_ENABLE_DISPLAY
+        ak_status_bar_set(ak_tr(AK_STR_REBIND_NEED_LICENSE), AK_COL_ORANGE);
+        ak_render_status();
+#endif
+        return;
+    }
+    if (s_prov.state == AK_PROV_CONFIRMING) {
+        ak_provision_close(&s_prov); /* the recovery confirm replaces the pairing-mode one */
+    }
+    if (!ak_provision_rebind_request(&s_prov, now)) {
+        PR_WARN("recovery combo: another confirm is up; ignored");
+        return;
+    }
+    PR_NOTICE("recovery combo: unbind confirm (K6 release = unbind, K1 = cancel, %u s)",
+              (unsigned)(AK_PROV_RESET_CONFIRM_MS / 1000U));
+    ak_prov_changed();
+}
+
 static void user_main(void)
 {
     OPERATE_RET rt;
@@ -4528,6 +5539,7 @@ static void user_main(void)
      * ak_kv_* then fails cleanly and settings use their defaults. */
     (void)ak_kv_init();
     ak_language_load(); /* FR-01: before the first LCD draw; needs ak_kv_init */
+    ak_font_size_load(); /* likewise: every layout depends on it */
 
     PR_NOTICE("======== Agentic Keyboard for Kiro: product fw %s ========", APP_FW_VERSION);
     PR_NOTICE("Board: expansion baseboard v0.3 (WS2812=P%u/SPI1 x%u, LCD_BL=P%u)",
@@ -4654,11 +5666,15 @@ static void user_main(void)
      * Wi-Fi/MQTT availability is deliberately not part of this decision. */
     OPERATE_RET ble_rt = OPRT_OK;
 #if AK_ASR_BOARD_CLOUD
-    if (cloud_rt != OPRT_OK || !ak_cloud_network_ready() || !ak_cloud_activated()) {
-        /* Unactivated, or the cloud stack did not come up: Tuya BLE (or nothing)
-         * owns the radio. Taking the callbacks here would silently block the
-         * phone app. The runtime path below takes over once activation completes. */
-        PR_NOTICE("dual: AK BLE deferred until activation; Tuya BLE/SoftAP provisioning owns the radio (UART0 available)");
+    if (cloud_rt != OPRT_OK || !ak_cloud_network_ready() || !ak_cloud_activated() || ak_cloud_boot_window()) {
+        /* Unactivated, the cloud stack did not come up, or this boot opens the
+         * pairing window: Tuya BLE (or nothing) owns the radio. Taking the
+         * callbacks here would silently block the phone app. The runtime path
+         * below takes over once activation completes and the window closed
+         * (ak_provision_ble_takeover_allowed). 0.3.63 took over at boot on an
+         * activated device even in a pairing-window boot. */
+        PR_NOTICE("dual: AK BLE deferred (activated %d, pairing window at boot %d); Tuya owns BLE, UART0 available",
+                  (int)ak_cloud_activated(), (int)ak_cloud_boot_window());
     } else {
         ble_rt = ak_ble_gatt_takeover();
         s_ak_ble_active = (ble_rt == OPRT_OK);
@@ -4852,8 +5868,8 @@ static void user_main(void)
         }
 
 #if AK_TRANSPORT_DUAL && AK_ASR_BOARD_CLOUD
-        if (!s_ak_ble_active && !s_usb_selected &&
-            ak_cloud_network_ready() && ak_cloud_activated() &&
+        if (!s_ak_ble_active && !s_usb_selected && ak_cloud_network_ready() &&
+            ak_provision_ble_takeover_allowed(&s_prov, ak_cloud_activated(), ak_cloud_provisioning()) &&
             (s_ak_ble_retry_at_ms == 0U ||
              (int32_t)(now - s_ak_ble_retry_at_ms) >= 0)) {
             OPERATE_RET takeover_rt = ak_ble_gatt_takeover();
@@ -4941,6 +5957,10 @@ static void user_main(void)
         ak_leds_tick(now);
 
         ak_wifi_tick(now);
+        ak_wifi_poll(now);
+        if (ak_combo_tick(&s_combo, now)) {
+            ak_recovery_combo_fired(now);
+        }
         ak_chat_poll();
 
         /* Pairing window: cloud_ready shortens it, then it expires on time. */
@@ -4997,6 +6017,7 @@ static void user_main(void)
         if (s_pc_connected &&
             (uint32_t)(now - s_usb_last_rx_ms) >= USB_LINK_TIMEOUT_MS) {
             s_pc_connected = false;
+            s_pc_asr_results = false;
             PR_NOTICE("USB companion timed out; marking link disconnected");
             ak_transport_feedback(AK_STR_ST_USB_TIMEOUT, AK_COL_ORANGE);
             send_system_info_uart();

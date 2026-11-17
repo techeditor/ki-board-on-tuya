@@ -29,17 +29,34 @@ python3 tools/gen_font_data.py --fusion fusion-pixel-12px-monospaced-zh_hans.ttf
 
 Also in the firmware: `common/include/ak_font8x8.h` (font8x8 by Daniel Hepper, public domain).
 
-## Interface font (`common/src/ak_font_ui_data.c`)
+## Interface fonts (`common/src/ak_font_ui12_data.c`, `common/src/ak_font_ui16_data.c`)
 
-The LCD interface font for Chinese / mixed text (FR-01) is Fusion Pixel Font
-12px monospaced zh_hans (same file, licence and rules as above), 1bpp, about
-4000 glyphs: ASCII, the characters in `tools/charset/` (Tongyong Guifan Hanzi
-Biao level 1, GB2312 level 1, CJK punctuation; character lists, not font data)
-and every character used in `common/src/ak_i18n.c`. About 97 KB of flash.
-Regenerate it, or swap in another pixel font, with:
+The LCD draws its interface text in one of two font sizes, chosen on the
+keyboard (Settings > Font size) or in the Companion (`device_settings`
+`font_size`). Both tables are always in the firmware. Characters outside a
+set, for example a rare character in a chat reply, are drawn as the box glyph.
+
+- **12 px (default)**: Fusion Pixel Font 12px monospaced zh_hans (same file,
+  licence and rules as above), 1bpp, 4022 glyphs: ASCII (6 x 12), Tongyong
+  Guifan Hanzi Biao level 1, GB2312 level 1, the CJK punctuation in
+  `tools/charset/punct.txt` (12 x 12) and every character used in
+  `common/src/ak_i18n.c`. 71,532 bytes of bitmaps plus 28,154 bytes of index
+  tables (99,686 bytes). At this size pure-ASCII text uses the 8x8 font.
+- **16 px**: GNU Unifont 16px (18.0.01, same licence and rules as above; used
+  under the SIL OFL 1.1), 1bpp, 3648 glyphs: ASCII (8 x 16), Tongyong level 1
+  (16 x 16), the CJK punctuation and every character used in
+  `common/src/ak_i18n.c`. 115,024 bytes of bitmaps plus 25,536 bytes of index
+  tables (140,560 bytes). Source file and checksum: `unifont/README.md`.
+
+The character lists in `tools/charset/` are not font data. Regenerate a table,
+or swap in another pixel font, with (the 12 px one needs its options, see the
+script's docstring):
 
 ```
-python3.12 tools/gen_font_ui.py --font fusion-pixel-12px-monospaced-zh_hans.ttf
+python3.12 tools/gen_font_ui.py --font unifont-18.0.01.otf
+python3.12 tools/gen_font_ui.py --font fusion-pixel-12px-monospaced-zh_hans.ttf --px 12 --baseline 10 \
+    --name "Fusion Pixel 12px 1bpp" --symbol ak_font_ui12 --out common/src/ak_font_ui12_data.c \
+    --charset tongyong_level1.txt --charset gb2312_level1.txt --charset punct.txt
 ```
 
 Not used on purpose: Zpix (commercial use is a paid licence) and WenQuanYi bitmap

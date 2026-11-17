@@ -161,6 +161,8 @@ pub struct MenuBoard {
     /// Per chat: the model last picked by hand (target of the Auto toggle).
     /// Seeded from the Companion config file; the app layer persists changes.
     last_models: HashMap<String, String>,
+    /// The keyboard's Bind session flow owns the menu: show nothing new.
+    hold: bool,
 }
 
 fn letter_prefix(letter: char) -> String {
@@ -193,7 +195,18 @@ impl MenuBoard {
             parked_sent: Some(0),
             voice_ok: false,
             last_models: HashMap::new(),
+            hold: false,
         }
+    }
+
+    /// Bind session (`bind_flow`) took the keyboard's menu over (`true`), or
+    /// gave it back. Taking over forgets the shown menu: the flow's menu
+    /// replaced it on the keyboard, so the next reconcile shows it again.
+    pub fn set_hold(&mut self, hold: bool) {
+        if hold && !self.hold {
+            self.active = None;
+        }
+        self.hold = hold;
     }
 
     /// Set the in-scope chats: `bound` = slot keys of K1..K3 (empty = unbound),
@@ -365,6 +378,9 @@ impl MenuBoard {
 
     /// Re-evaluate what the keyboard should show. Returns frames to write.
     pub fn reconcile(&mut self, now: u64) -> Vec<Value> {
+        if self.hold {
+            return Vec::new();
+        }
         let mut frames = Vec::new();
         let cands = self.candidates(now);
         let showable = self.showable(&cands);

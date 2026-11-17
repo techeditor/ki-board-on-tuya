@@ -65,6 +65,8 @@ typedef enum {
     AK_MENU_KIND_QUESTION,
     AK_MENU_KIND_MODEL,
     AK_MENU_KIND_MODE,
+    AK_MENU_KIND_INSTANCE, /* Bind session: pick the Crew instance (user-opened, like model) */
+    AK_MENU_KIND_SESSION,  /* Bind session: pick the session (user-opened, like model) */
 } ak_menu_kind_t;
 
 typedef enum {
@@ -197,8 +199,12 @@ bool ak_menu_owns_keys(const ak_menu_t *m);
 /** Take the menu off / back on screen; showing again restarts the 300 ms guard. */
 void ak_menu_set_hidden(ak_menu_t *m, bool hidden, uint32_t now_ms);
 
-/** True for model / mode menus (opened by the user, state ⑤). */
+/** True for menus the user opened (state ⑤): model / mode, and the Bind
+ *  session instance / session pickers. */
 bool ak_menu_is_model(const ak_menu_t *m);
+
+/** True for the Bind session pickers (kind instance / session). */
+bool ak_menu_is_bind(const ak_menu_t *m);
 
 /** Global index of (page, idx), or -1 while an earlier page is missing. */
 int ak_menu_global_index(const ak_menu_t *m, uint8_t page, uint8_t idx);
@@ -217,6 +223,10 @@ void ak_menu_key(ak_menu_t *m, int key, bool down, uint32_t now_ms, ak_menu_out_
 
 /** EC11 rotation (positive = clockwise = down), crossing pages. */
 void ak_menu_encoder(ak_menu_t *m, int32_t detents, uint32_t now_ms, ak_menu_out_t *out);
+
+/** Forget the presses of the keys in `mask` (bit = key index): their release
+ *  selects nothing. Used when K1 + K6 become the recovery combo. */
+void ak_menu_drop_keys(ak_menu_t *m, uint8_t mask);
 
 /** Dictated answer confirmed with K6: menu_result for the voice item + text. */
 void ak_menu_dictated(ak_menu_t *m, const char *text, uint32_t now_ms, ak_menu_out_t *out);

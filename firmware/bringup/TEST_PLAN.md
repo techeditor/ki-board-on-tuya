@@ -62,7 +62,7 @@ The flash baud is 460800. UART0 application monitoring defaults to 115200.
 | 7 (v0.3.2 only) | `led_power` | See "Step 7 detail" below. Skip on lite / v0.3.1 (no power switch; P18 not connected) |
 
 Record the COM port, board revision, observed result, and any
-scope/logic-analyzer measurements for each step. Firmware
+scope/logic-analyzer measurements for each step in the internal test records. Firmware
 SHA-256 is optional during bring-up; capture it for release/OTA builds.
 
 ## Step 0 detail - power-off visual inspection
@@ -108,11 +108,11 @@ current meter on the 5 V input. Commands are UART0 bytes or keys; see
 | 7g stress | `s` (50) and `S` (500) | Every cycle shows the correct pattern and goes fully dark; `driver_errors` = 0 |
 | 7h settle sweep | `w` | Record which waits (0/1/3/5/10/20 ms) give a correct first frame; 10 ms (firmware value) must be correct |
 
-Record the result of each sub-step.
+Record each sub-step in the internal test records (table "v0.3.2 LED power switch").
 
 ## Known diagnostic boundary
 
 WS2812 data is driven from P4 (SPI1_MOSI) through the official SPI driver, so
 step 5 timing is produced by the SPI peripheral, not CPU bit-banging. If step 5
 fails, measure the P4 / level-shifter output waveform before changing software
-or hardware. (The v1.0 P13 GPIO bit-bang path is gone.)
+or hardware. (The v1.0 P13 GPIO bit-bang path is gone; see the internal bring-up summary.)

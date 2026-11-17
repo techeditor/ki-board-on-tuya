@@ -23,6 +23,7 @@
 #ifndef AK_WIFI_H
 #define AK_WIFI_H
 
+#include "ak_wifi_store.h"
 #include "tuya_cloud_types.h"
 
 /** Wi-Fi provisioning state, mirrored to the companion as a wifi_status frame. */
@@ -64,6 +65,43 @@ void ak_wifi_connect(const char *ssid, const char *pass);
 /** Call from the app loop: restores the previous Wi-Fi when the new one did
  *  not link up in time. */
 void ak_wifi_tick(uint32_t now_ms);
+
+/* ── Remembered networks and automatic reconnect (FR-15) ───────────────────
+ * Every network that got an IP address is remembered (at most 10, the least
+ * recently connected one is replaced; see ak_wifi_store.h). That includes
+ * the network the Tuya provisioning wrote, since it is read back from the
+ * netmgr after link-up. When the link is down for AK_WIFI_ROAM_GRACE_MS (the
+ * Tuya reconnect gets that long first), the app scans and tries the
+ * remembered networks in range, strongest signal first, AK_WIFI_TRY_TIMEOUT_MS
+ * each; when all fail it waits (growing back-off) and starts over.
+ * Passwords never leave ak_wifi.c. */
+#define AK_WIFI_ROAM_GRACE_MS  25000U
+#define AK_WIFI_TRY_TIMEOUT_MS 20000U
+
+typedef struct {
+    char    ssid[AK_WIFI_STORE_SSID_MAX + 1U];
+    uint8_t sec;     /* AK_WIFI_SEC_UNKNOWN or a scan security value */
+    bool    current; /* linked to this network right now */
+} ak_wifi_saved_t;
+
+/** Remembered networks, most recently connected first. Returns the count. */
+size_t ak_wifi_saved_list(ak_wifi_saved_t out[AK_WIFI_STORE_MAX]);
+
+/** Bumps whenever the list changes (UI refresh, Companion push). */
+uint32_t ak_wifi_saved_revision(void);
+
+/** Forget one network (device keys or USB only; the caller enforces that).
+ *  Forgetting the network the device is linked to keeps the link until it
+ *  drops; after that the device does not rejoin it. True when it was stored. */
+bool ak_wifi_saved_forget(const char *ssid);
+
+/** Forget every network, with the same rule for the current one. */
+void ak_wifi_saved_clear(void);
+
+/** The app tells the roamer whether it may touch the radio. Pass false while
+ *  the pairing window is open / confirming, during an OTA, and in any state
+ *  where Tuya provisioning owns the radio. Cleared every loop by the caller. */
+void ak_wifi_set_roam_allowed(bool allowed);
 
 /* ── Device license (UUID/AuthKey) provisioning ────────────────────────────
  * Written to persistent storage via tuya_authorize_write; survives reboot. The

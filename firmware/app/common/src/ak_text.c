@@ -10,6 +10,66 @@
 #include "ak_font.h"
 #include "ak_font_ui.h"
 
+static ak_text_size_t s_size = AK_TEXT_SIZE_DEFAULT;
+
+void ak_text_size_set(ak_text_size_t size)
+{
+    if ((unsigned)size < (unsigned)AK_TEXT_SIZE_COUNT) {
+        s_size = size;
+    }
+}
+
+ak_text_size_t ak_text_size_get(void)
+{
+    return s_size;
+}
+
+uint8_t ak_text_size_px(ak_text_size_t size)
+{
+    return size == AK_TEXT_SIZE_16 ? 16U : 12U;
+}
+
+bool ak_text_size_from_px(uint32_t px, ak_text_size_t *out)
+{
+    if (out == NULL || (px != 12U && px != 16U)) {
+        return false;
+    }
+    *out = px == 16U ? AK_TEXT_SIZE_16 : AK_TEXT_SIZE_12;
+    return true;
+}
+
+ak_text_size_t ak_text_size_next(ak_text_size_t size, bool forward)
+{
+    unsigned n = (unsigned)AK_TEXT_SIZE_COUNT;
+    unsigned i = (unsigned)size < n ? (unsigned)size : 0U;
+    return (ak_text_size_t)((i + (forward ? 1U : n - 1U)) % n);
+}
+
+const ak_font_t *ak_text_font(void)
+{
+    return s_size == AK_TEXT_SIZE_16 ? &ak_font_ui16 : &ak_font_ui12;
+}
+
+uint16_t ak_text_dy(void)
+{
+    return s_size == AK_TEXT_SIZE_16 ? 4U : 2U;
+}
+
+uint16_t ak_text_line_h(void)
+{
+    return ak_text_font()->px;
+}
+
+uint16_t ak_text_pick(uint16_t at12, uint16_t at16)
+{
+    return s_size == AK_TEXT_SIZE_16 ? at16 : at12;
+}
+
+bool ak_text_uses_font(const char *s, size_t n)
+{
+    return s_size == AK_TEXT_SIZE_16 || ak_text_is_wide(s, n);
+}
+
 bool ak_text_is_wide(const char *s, size_t n)
 {
     for (size_t i = 0U; s != NULL && i < n && s[i] != '\0'; i++) {
@@ -29,9 +89,10 @@ uint16_t ak_text_width_n(const char *s, size_t n)
     while (len < n && s[len] != '\0') {
         len++;
     }
-    if (!ak_text_is_wide(s, len)) {
+    if (!ak_text_uses_font(s, len)) {
         return (uint16_t)(len * AK_TEXT_ASCII_W);
     }
+    const ak_font_t *font = ak_text_font();
     uint32_t    w   = 0U;
     const char *p   = s;
     const char *end = s + len;
@@ -40,9 +101,9 @@ uint16_t ak_text_width_n(const char *s, size_t n)
         if (cp == 0U || p > end) { /* a sequence running past n is not counted */
             break;
         }
-        int idx = ak_font_find(&ak_font_ui, cp);
+        int idx = ak_font_find(font, cp);
         if (idx >= 0) {
-            w += ak_font_ui.adv[idx];
+            w += font->adv[idx];
         }
     }
     return (uint16_t)(w > 0xFFFFU ? 0xFFFFU : w);

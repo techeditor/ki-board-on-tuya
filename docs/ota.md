@@ -2,6 +2,7 @@
 
 > 状态：批 1（签名工具与发布流程）+ 批 2（固件接收端，协议见 `shared/protocol/protocol.md`「固件升级（仅 USB）」）。
 > Companion 发送端见批 3。不经 Companion 发包：`firmware/app/tools/ota_send.py`。
+> 设计依据：内部 OTA 设计记录（2026-11-17 定案：只走 USB，不走涂鸦云 OTA）。
 
 ## 1. 规则
 
@@ -11,8 +12,9 @@
 - debug 固件不可经 OTA 发给用户：正式（release）公钥只签 release profile 的构建；
   debug profile 的固件只认测试公钥，测试公钥签的包 release 固件一律拒绝。
   也就是说：debug 板子之间可以用测试包做 OTA 试验，但 debug 镜像永远到不了 release 设备。
-  `AK_DEBUG_PROBES` / `AK_OTA_TEST_KEY` / `AK_LICENSE_DEBUG_READ` 任一打开的构建都算 debug。
+  `CONFIG_AK_DEBUG_PROBES` / `CONFIG_AK_OTA_TEST_KEY` / `CONFIG_AK_LICENSE_DEBUG_READ` 任一为 `y` 的构建都算 debug（`ota_pack.py` 的 `profile_of` 按这三个 Kconfig 名判断）。
 - 开始升级前必须在键盘上确认（K6 确认 / K1 取消，默认取消，10 s 超时）。
+- 开始升级前和写完、重启前都要满足供电条件：USB 供电，或电量读数可信且不低于 30%（`AK_OTA_MIN_BATTERY_PERCENT`）。不满足时报 `power`，不写入 KV、不重启。
 - KV（License、激活数据、BLE 配对密钥、keymap、设置）全部保留。
 - 涂鸦控制台**永远不建固件升级任务**（SDK 里的云 OTA 代码没有删，见设计报告 §1）。
 
@@ -137,3 +139,20 @@ python3 firmware/app/tools/ota_pack.py pubkey-header --kind test --pub <临时�
 | `firmware/app/tools/test_ota_pack.py` | 单元测试（`firmware/app/test/run_host_tests.sh` 会跑；没装 `cryptography` 时跳过并提示） |
 | `firmware/app/common/include/ak_ota_key_release.h` | 正式公钥（当前占位） |
 | `firmware/app/common/include/ak_ota_key_test.h` | 测试公钥 |
+
+## 7. ota_status 原因码
+
+固件 `ak_ota.c` 的 `ota_status` 失败原因（`reason` 字段）：
+
+| 原因 | 含义 |
+|---|---|
+| `no_key` | 正式公钥仍是占位，拒绝所有包 |
+| `bad_sig` | 签名校验失败 |
+| `downgrade` | 版本不高于当前版本或 `ak_ota_hi` |
+| `power` | 供电条件不满足（§1） |
+| `busy` | 已有升级会话 |
+| `flash` | 写入失败，包压到管理块等（§2） |
+| `hash` | UG 数据 SHA-256 不符 |
+| `timeout` / `cancelled` | 确认超时（10 s）或键盘上取消 |
+| `sequence` / `incomplete` / `aborted` / `state` | 数据序号、中途不完整、中止、状态机错误 |
+

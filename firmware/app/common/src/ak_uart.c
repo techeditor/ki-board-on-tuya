@@ -27,11 +27,11 @@ static OPERATE_RET ak_uart_open(uint32_t baud)
 
 OPERATE_RET ak_uart_init(void)
 {
-    OPERATE_RET rt = OPRT_OK;
-
-    TUYA_CALL_ERR_RETURN(tkl_io_pinmux_config(AK_UART_RX_PIN, TUYA_UART0_RX));
-    TUYA_CALL_ERR_RETURN(tkl_io_pinmux_config(AK_UART_TX_PIN, TUYA_UART0_TX));
-
+    /* UART0 is hard-wired to P10 (RX) / P11 (TX) on the T5; there is no pin
+     * mux for it. Older TuyaOpen-T5AI ignored a UART0 tkl_io_pinmux_config()
+     * and returned OK; since platform commit 0100a442 (2026-08) it returns
+     * OPRT_NOT_SUPPORTED (-4), which aborted this init and left the USB link
+     * dead in every profile. So do not call it. */
     return ak_uart_open(AK_UART_BAUDRATE);
 }
 

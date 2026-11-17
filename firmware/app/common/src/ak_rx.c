@@ -637,12 +637,17 @@ bool ak_rx_type_is_sensitive(const char *type)
     return false;
 }
 
-/* Firmware update (docs/ota.md) and its debug probes: USB only, but not tied
- * to the pairing window (the device asks for its own K6 confirmation). */
+/* Firmware update (docs/ota.md), its debug probes, and the FR-02 Companion
+ * requests that open a system confirm (prov_open, ble_unpair): USB only, but
+ * not tied to the pairing window (the device asks for its own K6 confirm).
+ * wifi_forget / wifi_clear (FR-15) are USB only and need no window: they only
+ * remove remembered networks. wifi_list is read-only (no password) and is
+ * accepted from any source. */
 static bool ak_rx_type_is_usb_only(const char *type)
 {
     static const char *const usb_only[] = {"ota_begin", "ota_data", "ota_end", "ota_abort", "ota_probe",
-                                           "probe_line"};
+                                           "probe_line", "prov_open", "ble_unpair", "wifi_forget",
+                                           "wifi_clear"};
     for (size_t i = 0; i < sizeof(usb_only) / sizeof(usb_only[0]); i++) {
         if (strcmp(type, usb_only[i]) == 0) {
             return true;

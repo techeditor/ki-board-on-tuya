@@ -93,6 +93,411 @@ static uint32_t            s_rollback_deadline_ms;
  * does not declare it in netconn_wifi.h. Use the SDK-owned implementation so
  * its "netinfo" storage format and factory-reset behavior stay aligned. */
 extern OPERATE_RET __netconn_wifi_info_set(netconn_wifi_info_t *info);
+extern OPERATE_RET __netconn_wifi_info_get(netconn_wifi_info_t *info);
+
+/* ── FR-15: remembered networks + automatic reconnect ─────────────────────── */
+#define AK_WIFI_KV_KEY      "ak_wifis"
+#define AK_WIFI_SCAN_MAX    24U
+#define AK_WIFI_STOP_MS     2500U /* let the Tuya reconnect loop stop before scanning */
+#define AK_WIFI_SCAN_MAX_MS 15000U
+
+typedef enum {
+    ROAM_IDLE = 0, /* linked, or waiting out the grace period */
+    ROAM_STOPPING, /* Tuya reconnect loop closed, radio settling */
+    ROAM_SCANNING,
+    ROAM_TRYING,  /* one remembered network is being joined */
+    ROAM_BACKOFF, /* every candidate failed */
+} roam_state_t;
+
+static ak_wifi_store_t  s_store;
+static bool             s_store_loaded;
+static uint32_t         s_revision;
+static uint8_t          s_blob[AK_WIFI_STORE_BLOB_MAX];
+static char             s_forgotten[AK_WIFI_STORE_SSID_MAX + 1U]; /* deleted, still linked */
+static volatile bool    s_record_pending;
+static uint32_t         s_record_deadline_ms;
+static volatile bool    s_roam_allowed;
+static roam_state_t     s_roam;
+static uint32_t         s_roam_deadline_ms;
+static uint32_t         s_down_since_ms;
+static bool             s_down_timing;
+static uint16_t         s_tried;
+static uint8_t          s_round;
+static int              s_try_idx;
+static ak_wifi_scan_t   s_scan[AK_WIFI_SCAN_MAX];
+static volatile uint8_t s_scan_n;
+static volatile uint8_t s_scan_state; /* 0 idle, 1 running, 2 done */
+static bool             s_sec_lookup_pending;
+static bool             s_sec_scan_started;
+
+static void store_save(void)
+{
+    size_t      n  = ak_wifi_store_serialize(&s_store, s_blob, sizeof(s_blob));
+    OPERATE_RET rt = n > 0U ? ak_kv_set(AK_WIFI_KV_KEY, s_blob, n) : OPRT_COM_ERROR;
+    memset(s_blob, 0, sizeof(s_blob));
+    if (rt != OPRT_OK) {
+        PR_WARN("ak_wifi: saving the network list failed: %d", rt);
+    }
+    s_revision++;
+}
+
+/* Load the list once the KV is up. A list that fails its version or CRC check
+ * is dropped as a whole; the single configuration the SDK stored (pre-FR-15
+ * firmware, or the fallback after a bad list) then becomes record 1. */
+static void store_load(void)
+{
+    if (s_store_loaded || !ak_kv_ready()) {
+        return;
+    }
+    s_store_loaded = true;
+    ak_wifi_store_init(&s_store);
+    uint8_t *blob = NULL;
+    size_t   len  = 0U;
+    if (ak_kv_get(AK_WIFI_KV_KEY, &blob, &len) == OPRT_OK && blob != NULL) {
+        ak_wifi_blob_result_t r = ak_wifi_store_parse(&s_store, blob, len);
+        if (r != AK_WIFI_BLOB_OK) {
+            PR_WARN("ak_wifi: saved network list is invalid (%d); starting empty", (int)r);
+        }
+        ak_kv_free(blob);
+    }
+    if (s_store.count == 0U) {
+        netconn_wifi_info_t legacy;
+        memset(&legacy, 0, sizeof(legacy));
+        if (__netconn_wifi_info_get(&legacy) == OPRT_OK &&
+            ak_wifi_store_migrate_legacy(&s_store, legacy.ssid, legacy.pswd)) {
+            PR_NOTICE("ak_wifi: stored network \"%s\" is now saved network 1", legacy.ssid);
+            store_save();
+        }
+        memset(&legacy, 0, sizeof(legacy));
+    }
+}
+
+static void scan_job(void *arg)
+{
+    (void)arg;
+    AP_IF_S *aps = NULL;
+    uint32_t num = 0U;
+    uint8_t  n   = 0U;
+    if (tal_wifi_all_ap_scan(&aps, &num) == OPRT_OK && aps != NULL) {
+        for (uint32_t i = 0U; i < num && n < AK_WIFI_SCAN_MAX; i++) {
+            size_t len = aps[i].s_len;
+            if (len == 0U || len > AK_WIFI_STORE_SSID_MAX) {
+                continue;
+            }
+            memset(&s_scan[n], 0, sizeof(s_scan[n]));
+            memcpy(s_scan[n].ssid, aps[i].ssid, len);
+            s_scan[n].rssi = aps[i].rssi;
+            s_scan[n].sec  = aps[i].security;
+            n++;
+        }
+        (void)tal_wifi_release_ap(aps);
+    }
+    s_scan_n     = n;
+    s_scan_state = 2U;
+}
+
+static void scan_start(void)
+{
+    if (s_scan_state == 1U) {
+        return;
+    }
+    s_scan_n     = 0U;
+    s_scan_state = 1U;
+    if (tal_workq_schedule(WORKQ_SYSTEM, scan_job, NULL) != OPRT_OK) {
+        s_scan_state = 2U; /* nothing found; the caller handles an empty scan */
+    }
+}
+
+/* Remember the network the device is linked to. Reads the netmgr's current
+ * configuration, so networks written by the Companion, by Tuya provisioning
+ * and by the reconnect logic are all covered. Needs an IP address. */
+static void record_current_link(uint32_t now_ms)
+{
+    netconn_wifi_info_t info;
+    NW_IP_S             ip;
+    memset(&info, 0, sizeof(info));
+    memset(&ip, 0, sizeof(ip));
+    if (netmgr_conn_get(NETCONN_WIFI, NETCONN_CMD_SSID_PSWD, &info) != OPRT_OK || info.ssid[0] == '\0') {
+        s_record_pending = false;
+        return;
+    }
+    if (netmgr_conn_get(NETCONN_WIFI, NETCONN_CMD_IP, &ip) != OPRT_OK || ip.nwipstr[0] == '\0' ||
+        strcmp(ip.nwipstr, "0.0.0.0") == 0) {
+        if ((int32_t)(now_ms - s_record_deadline_ms) >= 0) {
+            s_record_pending = false; /* never got an address: not a working network */
+        }
+        return;
+    }
+    s_record_pending = false;
+    if (s_forgotten[0] != '\0') {
+        if (strcmp(s_forgotten, info.ssid) == 0) {
+            memset(&info, 0, sizeof(info));
+            return; /* deleted by the user; stays linked only until it drops */
+        }
+        s_forgotten[0] = '\0';
+    }
+    int     idx = ak_wifi_store_find(&s_store, info.ssid);
+    uint8_t sec = AK_WIFI_SEC_UNKNOWN;
+    for (uint8_t i = 0U; i < s_scan_n; i++) {
+        if (strcmp(s_scan[i].ssid, info.ssid) == 0) {
+            sec = s_scan[i].sec;
+        }
+    }
+    if (idx >= 0 && s_store.rec[idx].seq == s_store.next_seq && strcmp(s_store.rec[idx].pass, info.pswd) == 0) {
+        memset(&info, 0, sizeof(info));
+        return; /* already the most recent record: no flash write */
+    }
+    char                   dropped[AK_WIFI_STORE_SSID_MAX + 1U];
+    ak_wifi_store_result_t r = ak_wifi_store_touch(&s_store, info.ssid, info.pswd, sec, dropped);
+    if (r != AK_WIFI_STORE_INVALID) {
+        store_save();
+        PR_NOTICE("ak_wifi: saved network \"%s\" (%s)%s%s", info.ssid, r == AK_WIFI_STORE_ADDED ? "new" : "updated",
+                  r == AK_WIFI_STORE_REPLACED ? ", replaced " : "", r == AK_WIFI_STORE_REPLACED ? dropped : "");
+        int at = ak_wifi_store_find(&s_store, info.ssid);
+        if (at >= 0 && s_store.rec[at].sec == AK_WIFI_SEC_UNKNOWN) {
+            s_sec_lookup_pending = true;
+            s_sec_scan_started   = false;
+        }
+    }
+    memset(&info, 0, sizeof(info));
+}
+
+/* One background scan after a link-up fills in the security type. */
+static void sec_lookup_tick(void)
+{
+    if (!s_sec_scan_started) {
+        if (s_scan_state != 1U) {
+            scan_start();
+            s_sec_scan_started = true;
+        }
+        return;
+    }
+    if (s_scan_state != 2U) {
+        return;
+    }
+    s_sec_lookup_pending = false;
+    s_sec_scan_started   = false;
+    s_scan_state         = 0U;
+    int idx              = ak_wifi_store_find(&s_store, s_current_ssid);
+    if (idx < 0 || s_store.rec[idx].sec != AK_WIFI_SEC_UNKNOWN) {
+        return;
+    }
+    for (uint8_t i = 0U; i < s_scan_n; i++) {
+        if (strcmp(s_scan[i].ssid, s_current_ssid) == 0) {
+            s_store.rec[idx].sec = s_scan[i].sec;
+            store_save();
+            return;
+        }
+    }
+}
+
+static void roam_reset(void)
+{
+    s_roam        = ROAM_IDLE;
+    s_down_timing = false;
+    s_tried       = 0U;
+    s_round       = 0U;
+}
+
+static bool roam_possible(void)
+{
+    tuya_iot_client_t *client = tuya_iot_client_get();
+    return s_roam_allowed && client != NULL && client->is_activated && s_store.count > 0U && !s_rollback_armed &&
+           !s_config_disconnect_pending;
+}
+
+static void roam_apply(int idx)
+{
+    netconn_wifi_info_t info;
+    memset(&info, 0, sizeof(info));
+    memcpy(info.ssid, s_store.rec[idx].ssid, sizeof(info.ssid) - 1U);
+    memcpy(info.pswd, s_store.rec[idx].pass, sizeof(info.pswd) - 1U);
+    (void)__netconn_wifi_info_set(&info); /* a reboot resumes with the last tried network */
+    PR_NOTICE("ak_wifi: trying saved network \"%s\"", info.ssid);
+    report_status(AK_WIFI_CONNECTING, info.ssid);
+    OPERATE_RET rt = netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_SSID_PSWD, &info);
+    if (rt != OPRT_OK) {
+        PR_ERR("ak_wifi: reconnect set failed: %d", rt);
+    }
+    memset(&info, 0, sizeof(info));
+}
+
+/* Pick the next candidate from the scan, or start the back-off. */
+static void roam_next(uint32_t now_ms)
+{
+    uint8_t plan[AK_WIFI_STORE_MAX];
+    int     idx = -1;
+    if (ak_wifi_store_plan(&s_store, s_scan, s_scan_n, s_tried, plan, sizeof(plan)) > 0U) {
+        idx = plan[0];
+    } else if (s_tried == 0U) {
+        /* No stored network in the scan (hidden SSID, scan failure): try the
+         * most recent one once, blind. shortcut: other hidden networks are
+         * never tried; they only work when they are the most recent one. */
+        idx = ak_wifi_store_mru(&s_store, 0U);
+    }
+    if (idx >= 0) {
+        s_try_idx          = idx;
+        s_roam             = ROAM_TRYING;
+        s_roam_deadline_ms = now_ms + AK_WIFI_TRY_TIMEOUT_MS;
+        roam_apply(idx);
+        return;
+    }
+    s_roam             = ROAM_BACKOFF;
+    s_roam_deadline_ms = now_ms + ak_wifi_roam_backoff_ms(s_round);
+    PR_NOTICE("ak_wifi: no saved network could be joined; next try in %u s",
+              (unsigned)(ak_wifi_roam_backoff_ms(s_round) / 1000U));
+    if (s_round < 250U) {
+        s_round++;
+    }
+    s_tried = 0U;
+    report_status(AK_WIFI_DISCONNECTED, s_current_ssid);
+}
+
+static void roam_tick(uint32_t now_ms)
+{
+    store_load();
+    if (s_record_pending) {
+        record_current_link(now_ms);
+    }
+    bool linked = s_current_state == AK_WIFI_CONNECTED;
+    if (s_sec_lookup_pending && linked) {
+        sec_lookup_tick();
+    }
+    /* A network deleted while linked: once the link drops, stop the Tuya
+     * reconnect loop (it would rejoin the deleted network) and move on. */
+    if (s_forgotten[0] != '\0' && !linked) {
+        s_forgotten[0] = '\0';
+        (void)netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_CLOSE, NULL);
+        roam_reset();
+        s_down_timing   = true;
+        s_down_since_ms = now_ms - AK_WIFI_ROAM_GRACE_MS;
+    }
+    if (linked) {
+        if (s_roam != ROAM_IDLE || s_down_timing) {
+            roam_reset();
+        }
+        return;
+    }
+    if (!roam_possible()) {
+        if (s_roam != ROAM_IDLE || s_down_timing) {
+            roam_reset();
+        }
+        return;
+    }
+    switch (s_roam) {
+    case ROAM_IDLE:
+        if (!s_down_timing) {
+            s_down_timing   = true;
+            s_down_since_ms = now_ms;
+        } else if ((int32_t)(now_ms - s_down_since_ms) >= (int32_t)AK_WIFI_ROAM_GRACE_MS) {
+            PR_NOTICE("ak_wifi: link is down; trying the saved networks");
+            (void)netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_CLOSE, NULL);
+            s_roam             = ROAM_STOPPING;
+            s_roam_deadline_ms = now_ms + AK_WIFI_STOP_MS;
+            s_tried            = 0U;
+        }
+        break;
+    case ROAM_STOPPING:
+        if ((int32_t)(now_ms - s_roam_deadline_ms) >= 0 && s_scan_state != 1U) {
+            scan_start();
+            s_roam             = ROAM_SCANNING;
+            s_roam_deadline_ms = now_ms + AK_WIFI_SCAN_MAX_MS;
+        }
+        break;
+    case ROAM_SCANNING:
+        if (s_scan_state == 2U || (int32_t)(now_ms - s_roam_deadline_ms) >= 0) {
+            if (s_scan_state != 2U) {
+                s_scan_n = 0U; /* scan never returned: fall back to the most recent network */
+            }
+            s_scan_state = 0U;
+            roam_next(now_ms);
+        }
+        break;
+    case ROAM_TRYING:
+        if ((int32_t)(now_ms - s_roam_deadline_ms) >= 0) {
+            PR_NOTICE("ak_wifi: saved network \"%s\" did not link up", s_store.rec[s_try_idx].ssid);
+            s_tried |= (uint16_t)(1U << s_try_idx);
+            roam_next(now_ms);
+        }
+        break;
+    case ROAM_BACKOFF:
+        if ((int32_t)(now_ms - s_roam_deadline_ms) >= 0 && s_scan_state != 1U) {
+            scan_start();
+            s_roam             = ROAM_SCANNING;
+            s_roam_deadline_ms = now_ms + AK_WIFI_SCAN_MAX_MS;
+        }
+        break;
+    default:
+        roam_reset();
+        break;
+    }
+}
+
+void ak_wifi_set_roam_allowed(bool allowed)
+{
+    s_roam_allowed = allowed;
+}
+
+size_t ak_wifi_saved_list(ak_wifi_saved_t out[AK_WIFI_STORE_MAX])
+{
+    store_load();
+    uint8_t order[AK_WIFI_STORE_MAX];
+    size_t  n = ak_wifi_store_by_recency(&s_store, order);
+    for (size_t i = 0U; i < n; i++) {
+        const ak_wifi_rec_t *r = &s_store.rec[order[i]];
+        memset(&out[i], 0, sizeof(out[i]));
+        memcpy(out[i].ssid, r->ssid, sizeof(out[i].ssid));
+        out[i].sec     = r->sec;
+        out[i].current = s_current_state == AK_WIFI_CONNECTED && strcmp(r->ssid, s_current_ssid) == 0;
+    }
+    return n;
+}
+
+uint32_t ak_wifi_saved_revision(void)
+{
+    return s_revision;
+}
+
+/* The deleted network is the one in use: remove the SDK's copy too, so a
+ * reboot does not bring it back, and keep the link until it drops. */
+static void forget_link(const char *ssid)
+{
+    if (strcmp(ssid, s_current_ssid) != 0) {
+        return;
+    }
+    (void)ak_kv_del("netinfo");
+    if (s_current_state == AK_WIFI_CONNECTED) {
+        (void)snprintf(s_forgotten, sizeof(s_forgotten), "%s", ssid);
+    } else {
+        (void)netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_CLOSE, NULL);
+        roam_reset();
+        s_down_timing   = true;
+        s_down_since_ms = tal_system_get_millisecond() - AK_WIFI_ROAM_GRACE_MS;
+    }
+}
+
+bool ak_wifi_saved_forget(const char *ssid)
+{
+    store_load();
+    if (ssid == NULL || !ak_wifi_store_remove(&s_store, ssid)) {
+        return false;
+    }
+    store_save();
+    forget_link(ssid);
+    PR_NOTICE("ak_wifi: forgot saved network \"%s\"", ssid);
+    return true;
+}
+
+void ak_wifi_saved_clear(void)
+{
+    store_load();
+    char cur[AK_WIFI_STORE_SSID_MAX + 1U];
+    (void)snprintf(cur, sizeof(cur), "%s", s_current_ssid);
+    ak_wifi_store_clear(&s_store);
+    store_save();
+    forget_link(cur);
+    PR_NOTICE("ak_wifi: forgot all saved networks");
+}
 
 static void __netmgr_status_cb(netmgr_type_e type, netmgr_status_e status)
 {
@@ -102,6 +507,8 @@ static void __netmgr_status_cb(netmgr_type_e type, netmgr_status_e status)
     case NETMGR_LINK_UP_SWITH:
         s_config_disconnect_pending = false;
         s_rollback_armed            = false;
+        s_record_deadline_ms        = tal_system_get_millisecond() + 10000U;
+        s_record_pending            = true; /* recorded from the app loop, not from this callback */
         report_status(AK_WIFI_CONNECTED, s_current_ssid);
         break;
     case NETMGR_LINK_DOWN:
@@ -176,6 +583,11 @@ void ak_wifi_connect(const char *ssid, const char *pass)
     }
     (void)netmgr_conn_get(NETCONN_WIFI, NETCONN_CMD_STATUS, &status_before);
 
+    /* A command from the user ends any automatic reconnect round, and
+     * re-adding a network that was deleted while linked makes it a normal one. */
+    roam_reset();
+    s_forgotten[0] = '\0';
+
     /* Keep the current configuration so a wrong password cannot strand the
      * device offline. Only a previously used network is worth restoring. */
     s_rollback_armed = false;
@@ -235,7 +647,7 @@ void ak_wifi_connect(const char *ssid, const char *pass)
      * real failure is reported as disconnected, and LINK_UP reports connected. */
 }
 
-void ak_wifi_tick(uint32_t now_ms)
+static void rollback_tick(uint32_t now_ms)
 {
     if (!s_rollback_armed || (int32_t)(s_rollback_deadline_ms - now_ms) > 0) {
         return;
@@ -258,6 +670,12 @@ void ak_wifi_tick(uint32_t now_ms)
         report_status(AK_WIFI_FAILED, s_current_ssid);
     }
     memset(&s_rollback_info, 0, sizeof(s_rollback_info));
+}
+
+void ak_wifi_tick(uint32_t now_ms)
+{
+    rollback_tick(now_ms);
+    roam_tick(now_ms);
 }
 
 ak_cred_status_t ak_cred_read_status(void)
@@ -381,6 +799,33 @@ void ak_wifi_connect(const char *ssid, const char *pass)
 void ak_wifi_tick(uint32_t now_ms)
 {
     (void)now_ms;
+}
+
+/* No Wi-Fi stack in this profile: nothing is remembered or reconnected. */
+void ak_wifi_set_roam_allowed(bool allowed)
+{
+    (void)allowed;
+}
+
+size_t ak_wifi_saved_list(ak_wifi_saved_t out[AK_WIFI_STORE_MAX])
+{
+    (void)out;
+    return 0U;
+}
+
+uint32_t ak_wifi_saved_revision(void)
+{
+    return 0U;
+}
+
+bool ak_wifi_saved_forget(const char *ssid)
+{
+    (void)ssid;
+    return false;
+}
+
+void ak_wifi_saved_clear(void)
+{
 }
 
 ak_cred_status_t ak_cred_read_status(void)

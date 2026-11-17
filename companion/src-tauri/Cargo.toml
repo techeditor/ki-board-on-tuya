@@ -63,9 +63,26 @@ base64 = "0.22"
 # Local OTA (docs/ota.md): verify the ECDSA P-256 package signature on the PC
 # before sending it (the keyboard verifies again). RustCrypto, verify only.
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+# PC streaming ASR (docs/pc-asr.md). The local engine loads the sherpa-onnx
+# C API at run time from DLLs downloaded with the model, so nothing native is
+# linked or bundled (ISC).
+libloading = "0.9"
+# The sherpa-onnx runtime ships as .tar.bz2; default bzip2 backend is the
+# pure-Rust libbz2-rs-sys (no C build). MIT/Apache-2.0 (+ bzip2-1.0.6).
+bzip2 = "0.6"
+tar = { version = "0.4", default-features = false }
+# Doubao frames may be gzip-compressed. Already in the tree; MIT/Apache-2.0.
+flate2 = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri = { version = "2", features = [] }
+# PC ASR on Windows only: TLS for the cloud WebSockets and the model
+# download (SChannel, no OpenSSL), the Credential Manager for API keys, and
+# WASAPI microphone capture. native-tls/keyring MIT/Apache-2.0, cpal Apache-2.0.
+native-tls = "0.2"
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+cpal = "0.18"
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "native-tls"] }
 
 [dev-dependencies]
 env_logger = "0.11"

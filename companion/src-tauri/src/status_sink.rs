@@ -20,7 +20,8 @@
 //!   `companion --hook` process can find the sink (see [`handoff_path`] /
 //!   [`write_handoff`] / [`read_handoff`]).
 //!
-//! Design ref: `.kiro/specs/feature-probes-kirocrew-local-control/design.md`
+//! Design ref: see git tag `archive/feature-probes`
+//! (`.kiro/specs/feature-probes-kirocrew-local-control/design.md`).
 //! (Decision 2: the hook is a mode of the companion binary, `companion --hook`,
 //! not a separate shell script — see `Handoff` below).
 

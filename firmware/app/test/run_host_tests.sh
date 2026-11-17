@@ -45,7 +45,8 @@ gcc -std=c11 -Wall -Wextra -Werror \
     "${app}/common/src/ak_validate.c" \
     "${app}/common/src/ak_font.c" \
     "${app}/common/src/ak_font_data.c" \
-    "${app}/common/src/ak_font_ui_data.c" \
+    "${app}/common/src/ak_font_ui12_data.c" \
+    "${app}/common/src/ak_font_ui16_data.c" \
     "${app}/common/src/ak_text.c" \
     "${app}/common/src/ak_i18n.c" \
     "${app}/common/src/ak_provision.c" \
@@ -57,8 +58,11 @@ gcc -std=c11 -Wall -Wextra -Werror \
     "${app}/common/src/ak_led_policy.c" \
     "${app}/common/src/ak_ble_sec.c" \
     "${app}/common/src/ak_window_marker.c" \
+    "${app}/common/src/ak_wifi_store.c" \
+    "${app}/common/src/ak_combo.c" \
     "${app}/common/src/ak_menu.c" \
     "${app}/common/src/ak_ui.c" \
+    "${app}/common/src/ak_bind.c" \
     "${here}/test_ak.c" \
     "${out}"/mbed_*.o \
     -o "${out}/test_ak"

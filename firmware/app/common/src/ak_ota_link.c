@@ -331,7 +331,7 @@ static void on_end(void)
     commit_and_reboot();
 }
 
-/* ── debug probes (ota-real-board-tests.md) ──────────────────────────────── */
+/* ── debug probes ────────────────────────────────────────────────── */
 
 #if AK_ENABLE_DEBUG_PROBES
 static uint32_t s_probe_baud_until;

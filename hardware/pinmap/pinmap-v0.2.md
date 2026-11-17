@@ -46,7 +46,7 @@
 > P0/P1 为 UART1 日志口，官方不建议占用；本设计一并回避。
 > ⚠️ **P13/P12 是 UART0 的 CTS/RTS（硬件流控）复用脚**（见官方引脚复用表）。本项目 UART0
 > **仅用 TX/RX(P11/P10)，不启用硬件流控**（CH340C 的自动复位走的是桥片自身的 DTR/RTS 引脚 →
-> S8050 → T5_RST，并非 T5 的 UART0 流控脚）。P12 空闲。**v1.2：WS2812_DIN 已从 P13 改到 P4（SPI1_MOSI），P13 释放为 NC**（P13 GPIO 位拆时序不达标）。
+> S8050 → T5_RST，并非 T5 的 UART0 流控脚）。P12 空闲。**v1.2：WS2812_DIN 已从 P13 改到 P4（SPI1_MOSI），P13 释放为 NC**（P13 GPIO 位拆时序不达标，见内部 bring-up 测试总结）。
 
 ## 3. LCD 连接（沿用官方接线，固件零改动）
 
@@ -123,6 +123,7 @@ TuyaOpen chatbot demo 现成，固件仅需把分辨率改为 320×240。
 > WS2812 改板即采用此方案：**数据源 P13 → P4（SPI1_MOSI）**，用官方 SPI WS2812 驱动（独立于 LCD 的 SPI0）。
 > 注意 SDK `tkl_spi_init(SPI1)` 会**整组 pinmux 含 MISO=P5**（`tkl_spi.c` 宏 `TKL_SPI_SET_PIN`），
 > 故 P5 必须先让位，这也是"WS2812→P4 + LCD_BL→P8"双改缺一不可的原因。
+> 详见内部 bring-up 测试总结第四节。
 
 ### 5× 机械键（CPG151101 系列）
 
@@ -261,7 +262,7 @@ CH340C 复用 UART0（P10/P11，开发板占用），自动复位接 T5_RST（J2
 
 - 3 颗 WS2812（库存款，见 BOM）**单线菊花链**：数据源 → LED1.DIN，LED1.DOUT → LED2.DIN → LED3.DIN，1 根数据线控 3 颗。
 - 数据脚 **P4（排针 J2.20，SPI1_MOSI）**，输出（v1.2：由 P13 迁入）。用官方 **SPI WS2812 驱动**（波形由 SPI 外设产生，独立于 LCD 的 SPI0）。
-  > ⚠️ v1.0 曾用 **P13（J1.16）GPIO 位拆**，因双核 + PM 下纳秒级时序不达标而放弃；P13 已释放为空闲/NC。
+  > ⚠️ v1.0 曾用 **P13（J1.16）GPIO 位拆**，因双核 + PM 下纳秒级时序不达标而放弃（见内部 bring-up 测试总结）；P13 已释放为空闲/NC。
   > 注意 SDK `tkl_spi_init(SPI1)` 会整组 pinmux（含 MISO=P5），故 P5 必须先从 LCD_BL 让位（v1.2 已把 LCD_BL 移到 P8），SPI1 组 P2/P3/P4/P5 才可用。
 - **电平转换**：T5 GPIO 是 3.3V，WS2812 用 **5V** 供电时 DIN 阈值可能不足 → 经
   **SN74LV1T34（SOT-23-5，单门 3.3→5V 电平转换，库存 C100024 有）**：P4(3.3V) → SN74LV1T34 → LED1.DIN(5V)。
@@ -270,7 +271,7 @@ CH340C 复用 UART0（P10/P11，开发板占用），自动复位接 T5_RST（J2
 
 ## 7. 已确认（原待确认项，均已由资料核实）
 
-1. ✅ **44P 排针逐脚位号**：来自 `tuya-kb/datasheets/t5-ai-core/T5AI-Core_V101-SCH.pdf`。
+1. ✅ **44P 排针逐脚位号**：来自 内部资料（未公开）。
    44P = **两个 1×22 单排 J1 + J2**。完整映射见 §8。
 2. ✅ **CL28CK230-18A 的 18P FPC 逐脚定义**：来自 `datasheets/CL28CK230-18A.../接线图.pdf`，见 §3。
 3. ✅ **WS-1002 摇杆 6 脚序**：来自规格书电路图，见 §4（①A ②Center ③B ④D ⑤Com ⑥C）。

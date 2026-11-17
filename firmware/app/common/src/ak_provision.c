@@ -22,6 +22,10 @@ void ak_provision_init(ak_provision_t *p)
     p->overwrite_deadline_ms = 0U;
     p->reset_pending         = false;
     p->reset_deadline_ms     = 0U;
+    p->unpair_pending        = false;
+    p->unpair_deadline_ms    = 0U;
+    p->rebind_pending        = false;
+    p->rebind_deadline_ms    = 0U;
 }
 
 void ak_provision_request(ak_provision_t *p, uint32_t now_ms)
@@ -97,6 +101,14 @@ bool ak_provision_tick(ak_provision_t *p, uint32_t now_ms)
         p->reset_pending = false;
         changed          = true;
     }
+    if (p->unpair_pending && !before(now_ms, p->unpair_deadline_ms)) {
+        p->unpair_pending = false;
+        changed           = true;
+    }
+    if (p->rebind_pending && !before(now_ms, p->rebind_deadline_ms)) {
+        p->rebind_pending = false;
+        changed           = true;
+    }
     return changed;
 }
 
@@ -138,9 +150,75 @@ bool ak_provision_reset_resolve(ak_provision_t *p, bool confirm, uint32_t now_ms
     return run;
 }
 
+bool ak_provision_unpair_request(ak_provision_t *p, uint32_t now_ms)
+{
+    if (ak_provision_unpair_pending(p, now_ms) || ak_provision_reset_pending(p, now_ms) ||
+        ak_provision_rebind_pending(p, now_ms) || p->state == AK_PROV_CONFIRMING) {
+        return false; /* one system confirm at a time */
+    }
+    p->unpair_pending     = true;
+    p->unpair_deadline_ms = now_ms + AK_PROV_RESET_CONFIRM_MS;
+    return true;
+}
+
+bool ak_provision_unpair_pending(const ak_provision_t *p, uint32_t now_ms)
+{
+    return p->unpair_pending && before(now_ms, p->unpair_deadline_ms);
+}
+
+bool ak_provision_unpair_resolve(ak_provision_t *p, bool confirm, uint32_t now_ms)
+{
+    bool run          = confirm && ak_provision_unpair_pending(p, now_ms);
+    p->unpair_pending = false;
+    return run;
+}
+
 bool ak_provision_is_open(const ak_provision_t *p, uint32_t now_ms)
 {
     return p->state == AK_PROV_OPEN && before(now_ms, p->deadline_ms);
+}
+
+bool ak_provision_pairing_needs_restart(bool license_present, bool activated)
+{
+    return license_present && !activated;
+}
+
+ak_pair_action_t ak_provision_rebind_action(bool license_present, bool activated)
+{
+    if (!license_present) {
+        return AK_PAIR_ACTION_NEED_LICENSE;
+    }
+    return activated ? AK_PAIR_ACTION_REBIND : AK_PAIR_ACTION_PAIRING;
+}
+
+bool ak_provision_rebind_request(ak_provision_t *p, uint32_t now_ms)
+{
+    if (ak_provision_rebind_pending(p, now_ms) || ak_provision_unpair_pending(p, now_ms) ||
+        ak_provision_reset_pending(p, now_ms) || p->state == AK_PROV_CONFIRMING) {
+        return false; /* one system confirm at a time */
+    }
+    p->rebind_pending     = true;
+    p->rebind_deadline_ms = now_ms + AK_PROV_RESET_CONFIRM_MS;
+    return true;
+}
+
+bool ak_provision_rebind_pending(const ak_provision_t *p, uint32_t now_ms)
+{
+    return p->rebind_pending && before(now_ms, p->rebind_deadline_ms);
+}
+
+bool ak_provision_rebind_resolve(ak_provision_t *p, bool confirm, uint32_t now_ms)
+{
+    bool run          = confirm && ak_provision_rebind_pending(p, now_ms);
+    p->rebind_pending = false;
+    return run;
+}
+
+bool ak_provision_ble_takeover_allowed(const ak_provision_t *p, bool activated, bool tuya_provisioning)
+{
+    /* While a pairing window (or its confirm) is up, BLE stays with Tuya's
+     * netcfg; AK takes it once the window has closed or run out. */
+    return activated && !tuya_provisioning && (p == NULL || p->state == AK_PROV_CLOSED);
 }
 
 uint32_t ak_provision_remaining_s(const ak_provision_t *p, uint32_t now_ms)

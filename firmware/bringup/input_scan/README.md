@@ -12,8 +12,8 @@ baseboard. All inputs are active-low with internal pull-ups.
 
 ## UART protocol
 
-Stable transitions are emitted as protocol-v1 JSONL frames over UART0 at 115200
-baud:
+Stable transitions are sent as JSON lines over UART0 at 115200 baud (the
+T5AI-Core USB port), with an `alive` heartbeat every two seconds:
 
 ```json
 {"v":1,"type":"bringup","payload":{"name":"input_scan","status":"ready","keys":6,"encoder":1,"inputs":8,"key_debounce_ms":20}}
@@ -26,6 +26,10 @@ baud:
 
 - `key` : one of `k1`..`k6` or `enc_sw`, with `down`/`up` and `held_ms`.
 - `enc` : one frame **per detent**, `dir` = `cw` or `ccw`, `steps` = 1.
+
+These frame shapes belong to this bring-up app only. The product firmware
+reports the knob as `encoder` frames with a signed `detents` count and the
+knob push as key `enc` (see `shared/protocol/protocol.md`).
 
 ## Encoder decoding
 

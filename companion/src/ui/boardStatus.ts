@@ -33,6 +33,33 @@ export interface BoardStatus {
   blePairing: BlePairing;
   /** FR-01 interface language from device_settings_state ("zh" / "en"); "" until reported. */
   language: string;
+  /** FR-02 keyboard settings from device_settings_state; null until reported
+   * (or from firmware older than FR-02). */
+  keyboard: KeyboardSettings | null;
+  /** FR-15 remembered networks from wifi_list_state; null until reported. */
+  savedWifi: SavedWifiList | null;
+}
+
+/** Normal keyboard settings plus sensitive-item status (FR-02). */
+export interface KeyboardSettings {
+  voice_mode?: string; // "asr" / "chat"
+  led_power?: string; // "off" / "on" / "auto"
+  led_auto_off_s?: number;
+  font_size?: number; // LCD font size in px: 12 / 16 (absent on older firmware)
+  license?: string; // "present" / "missing"
+  ble_paired?: boolean; // the keyboard's copy of the pairing key
+}
+
+/** One remembered Wi-Fi network (FR-15). The keyboard never reports a password. */
+export interface SavedWifi {
+  ssid: string;
+  sec: string; // "open" / "wep" / "wpa" / "wpa2" / "wpa_wpa2" / "wpa3" / "unknown"
+  current: boolean;
+}
+
+export interface SavedWifiList {
+  max: number;
+  entries: SavedWifi[];
 }
 
 export interface BlePairing {
@@ -55,6 +82,8 @@ export function useBoardStatus(): BoardStatus {
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [blePairing, setBlePairing] = useState<BlePairing>({ paired: false, key_id: "" });
   const [language, setLanguage] = useState("");
+  const [keyboard, setKeyboard] = useState<KeyboardSettings | null>(null);
+  const [savedWifi, setSavedWifi] = useState<SavedWifiList | null>(null);
 
   useEffect(() => {
     if (!tauriAvailable()) return;
@@ -78,7 +107,23 @@ export function useBoardStatus(): BoardStatus {
         }
       }),
       listen<string>("voice-mode", (e) => setVoiceMode(e.payload)),
-      listen<{ language?: string }>("device-settings", (e) => setLanguage(e.payload.language ?? "")),
+      listen<SavedWifiList>("wifi-saved", (e) => setSavedWifi(e.payload)),
+      listen<{ language?: string } & KeyboardSettings>("device-settings", (e) => {
+        setLanguage(e.payload.language ?? "");
+        const p = e.payload;
+        if (p.voice_mode !== undefined || p.led_power !== undefined || p.font_size !== undefined) {
+          setKeyboard({
+            voice_mode: p.voice_mode,
+            led_power: p.led_power,
+            led_auto_off_s: p.led_auto_off_s,
+            font_size: p.font_size,
+            license: p.license,
+            ble_paired: p.ble_paired,
+          });
+          if (p.voice_mode) setVoiceMode(p.voice_mode);
+          if (p.license) setLicense(p.license);
+        }
+      }),
       listen<ChatTurn>("tuya-chat", (e) => {
         const { role, text } = e.payload;
         setChatTurns((turns) => [...turns, { role, text }].slice(-MAX_TURNS));
@@ -96,7 +141,7 @@ export function useBoardStatus(): BoardStatus {
     return () => window.clearInterval(timer);
   }, [provUntilMs]);
 
-  return { provUntilMs, nowMs, rejection, license, voiceMode, chatTurns, blePairing, language };
+  return { provUntilMs, nowMs, rejection, license, voiceMode, chatTurns, blePairing, language, keyboard, savedWifi };
 }
 
 /** Seconds left in the pairing window, 0 when closed. */

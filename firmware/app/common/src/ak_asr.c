@@ -15,7 +15,7 @@ static uint8_t s_volume = AK_ASR_DEFAULT_VOLUME;
 #if AK_ASR_BOARD_CLOUD
 
 /* ── Real backend (Tuya cloud ASR) ──────────────────────────────────────────
- * Ported from firmware/feature-probes/tuya_cloud_asr (ai_chat HOLD mode + Tuya
+ * Ported from the tuya_cloud_asr probe, see git tag archive/feature-probes (ai_chat HOLD mode + Tuya
  * AI agent). Requires ENABLE_AI_COMPONENTS, Wi-Fi provisioning and a PID bound
  * to an AI agent.
  *

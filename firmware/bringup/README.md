@@ -89,3 +89,4 @@ Only connect one of the two Type-C UART bridges at a time. UART0 uses
 All eight applications build with the TuyaOpen T5AI SDK (each built with the
 same `config choice` + `build` steps as `build_all.sh`). The complete
 sequential physical hardware acceptance procedure is in `TEST_PLAN.md`.
+Bench results and the bring-up summary are kept in internal test records.

@@ -34,6 +34,9 @@ pub enum MenuKind {
     Question,
     Model,
     Mode,
+    /// Bind session: pick the Crew instance / the session (user-opened).
+    Instance,
+    Session,
 }
 
 impl MenuKind {
@@ -44,6 +47,8 @@ impl MenuKind {
             MenuKind::Question => "question",
             MenuKind::Model => "model",
             MenuKind::Mode => "mode",
+            MenuKind::Instance => "instance",
+            MenuKind::Session => "session",
         }
     }
 }

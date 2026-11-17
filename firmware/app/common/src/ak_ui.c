@@ -104,6 +104,10 @@ bool ak_ui_voice_start(ak_ui_t *ui)
         ui->base = AK_UI_VOICE;
         return true;
     case AK_UI_VOICE:
+        if (ui->pc_wait) {
+            ui->pc_wait = false; /* speaking again while the PC recognises */
+            return true;
+        }
         return ui->dictating; /* waiting for the dictated answer */
     default:
         return false; /* in a menu K5 is an item key */
@@ -115,6 +119,7 @@ void ak_ui_voice_end(ak_ui_t *ui, ak_ui_voice_t result, bool chat, uint32_t now_
     if (ui->base != AK_UI_VOICE) {
         return;
     }
+    ui->pc_wait = false;
     if (result == AK_UI_VOICE_TEXT && (!chat || ui->dictating)) {
         ui->base       = AK_UI_CONFIRM;
         ui->confirm_ms = now_ms;
@@ -126,11 +131,23 @@ void ak_ui_voice_end(ak_ui_t *ui, ak_ui_voice_t result, bool chat, uint32_t now_
     }
 }
 
-bool ak_ui_input_restore(ak_ui_t *ui, uint32_t now_ms)
+bool ak_ui_pc_wait(ak_ui_t *ui)
 {
-    if (ak_ui_state(ui) != AK_UI_STANDBY || ui->dictating) {
+    if (ui->base != AK_UI_VOICE || ui->dictating) {
         return false;
     }
+    ui->pc_wait = true;
+    return true;
+}
+
+bool ak_ui_input_restore(ak_ui_t *ui, uint32_t now_ms)
+{
+    ak_ui_state_t s = ak_ui_state(ui);
+    bool          ok = (s == AK_UI_STANDBY && !ui->dictating) || (s == AK_UI_VOICE && ui->pc_wait);
+    if (!ok) {
+        return false;
+    }
+    ui->pc_wait    = false;
     ui->base       = AK_UI_CONFIRM;
     ui->confirm_ms = now_ms;
     return true;
@@ -161,6 +178,7 @@ void ak_ui_confirm_done(ak_ui_t *ui)
 
 void ak_ui_voice_abort(ak_ui_t *ui)
 {
+    ui->pc_wait = false;
     if (ui->dictating) {
         ak_ui_dictate_back(ui);
     } else if (ui->base == AK_UI_VOICE || ui->base == AK_UI_CONFIRM) {

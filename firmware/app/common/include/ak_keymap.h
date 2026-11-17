@@ -17,7 +17,7 @@
  * Companion `keymap` frame (Companion is the config authority); the resolved
  * table is cached in TAL KV so a disconnected board keeps the last map.
  *
- * See docs/agentic-keyboard-interaction-design.md §0 and the redesign spec §5.5.
+ * See docs/interaction.md.
  */
 
 #ifndef AK_KEYMAP_H

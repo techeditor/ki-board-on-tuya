@@ -19,7 +19,7 @@ encoded as 8 SPI bits @6.5 MHz: 0=0xC0, 1=0xF0), so it is immune to CPU and
 interrupt jitter.
 
 > v1.0 used a P13 GPIO bit-bang driver (P13 has no SPI MOSI route). It could not
-> hold the nanosecond timing on the dual-core + PM platform and was dropped.
+> hold the nanosecond timing on the dual-core + PM platform and was dropped (see the internal bring-up summary).
 
 > **v0.3.2 power switch (P18).** With the build option `BRINGUP_LED_PWR_AUTO`
 > = 1 (default, `common/include/bringup_led_power.h`) the app powers the chain
