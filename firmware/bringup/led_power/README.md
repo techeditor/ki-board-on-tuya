@@ -9,8 +9,7 @@ VDD_5V -> Q2 -> VDD_LED -> U2.VCC, C1, LED1..LED7
 P4 (SPI1_MOSI) -> U2 -> series resistor -> LED1 DIN
 ```
 
-Design and timing: `hardware/eda/ws2812-power-reduction-study.md`. P18 high =
-chain powered; R9 holds it off while P18 floats during reset.
+P18 high = chain powered; R9 holds it off while P18 floats during reset.
 
 > **Board revision.** Only v0.3.2 has the switch. On lite / v0.3.1 boards P18 is
 > not connected: the chain is always powered and the P18 steps do nothing. The
@@ -78,10 +77,10 @@ tos.py build
 
 ## Flash
 
-From the repository's `scripts` directory on the Windows host (dev-board Type-C):
+Flash `dist/<version>/led_power_QIO_<version>.bin` from the Windows host (dev-board Type-C) with tyutool (or `tos.py flash`):
 
 ```powershell
-.\flash.ps1 -Port COM5 -App "firmware/bringup/led_power" -Build -Monitor
+tyutool_cli write -d t5ai -p COMx -b 460800 -f <app>_QIO_<version>.bin   # see tyutool_cli --help
 ```
 
 UART0 is 115200 8N1. Every JSON line carries `t_ms` (ms since boot), so the

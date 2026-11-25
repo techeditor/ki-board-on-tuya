@@ -24,6 +24,7 @@ pub const DOUBAO_RESOURCES: [&str; 4] = [
 /// directly (as context); Paraformer needs a vocabulary id created first.
 pub const ALIYUN_MODELS: [&str; 2] = ["fun-asr-realtime", "paraformer-realtime-v2"];
 
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AsrSettings {
@@ -134,6 +135,7 @@ mod tests {
         many.normalize();
         assert_eq!(many.hotwords.len(), HOTWORDS_MAX);
     }
+
 
     #[test]
     fn no_key_field_can_exist() {

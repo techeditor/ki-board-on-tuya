@@ -26,15 +26,15 @@ ak_text_size_t ak_text_size_get(void)
 
 uint8_t ak_text_size_px(ak_text_size_t size)
 {
-    return size == AK_TEXT_SIZE_16 ? 16U : 12U;
+    return size == AK_TEXT_SIZE_16 ? 16U : size == AK_TEXT_SIZE_14 ? 14U : 12U;
 }
 
 bool ak_text_size_from_px(uint32_t px, ak_text_size_t *out)
 {
-    if (out == NULL || (px != 12U && px != 16U)) {
+    if (out == NULL || (px != 12U && px != 14U && px != 16U)) {
         return false;
     }
-    *out = px == 16U ? AK_TEXT_SIZE_16 : AK_TEXT_SIZE_12;
+    *out = px == 16U ? AK_TEXT_SIZE_16 : px == 14U ? AK_TEXT_SIZE_14 : AK_TEXT_SIZE_12;
     return true;
 }
 
@@ -47,12 +47,12 @@ ak_text_size_t ak_text_size_next(ak_text_size_t size, bool forward)
 
 const ak_font_t *ak_text_font(void)
 {
-    return s_size == AK_TEXT_SIZE_16 ? &ak_font_ui16 : &ak_font_ui12;
+    return s_size == AK_TEXT_SIZE_16 ? &ak_font_ui16 : s_size == AK_TEXT_SIZE_14 ? &ak_font_ui14 : &ak_font_ui12;
 }
 
 uint16_t ak_text_dy(void)
 {
-    return s_size == AK_TEXT_SIZE_16 ? 4U : 2U;
+    return ak_text_pick(2U, 3U, 4U);
 }
 
 uint16_t ak_text_line_h(void)
@@ -60,14 +60,88 @@ uint16_t ak_text_line_h(void)
     return ak_text_font()->px;
 }
 
-uint16_t ak_text_pick(uint16_t at12, uint16_t at16)
+uint16_t ak_text_pick(uint16_t at12, uint16_t at14, uint16_t at16)
 {
-    return s_size == AK_TEXT_SIZE_16 ? at16 : at12;
+    return s_size == AK_TEXT_SIZE_16 ? at16 : s_size == AK_TEXT_SIZE_14 ? at14 : at12;
 }
 
 bool ak_text_uses_font(const char *s, size_t n)
 {
-    return s_size == AK_TEXT_SIZE_16 || ak_text_is_wide(s, n);
+    /* One style at every size: 12 px ASCII uses Fusion
+     * Pixel 12 too. The 8x8 font stays for single glyphs (battery digits,
+     * the default boot splash), drawn with ak_gfx_char(). */
+    (void)s;
+    (void)n;
+    return true;
+}
+
+/* Ink band of the current font: the first and last rows that CJK and capital
+ * letters use, read from the glyph table once per size. Text is centred on
+ * this band, so every string of a size shares one baseline. */
+#define AK_TEXT_INK_SAMPLE "\xE4\xB8\xAD\xE5\x9B\xBD\xE8\xAE\xBE\xE7\xBD\xAEHKE" /* 中国设置HKE */
+
+static void ak_text_ink_scan(const ak_font_t *font, uint8_t *top, uint8_t *bot)
+{
+    uint8_t     t = 0xFFU, b = 0U;
+    const char *p = AK_TEXT_INK_SAMPLE;
+    uint32_t    cp;
+    while ((cp = ak_utf8_next(&p)) != 0U) {
+        int idx = ak_font_find(font, cp);
+        if (idx < 0) {
+            continue;
+        }
+        for (uint8_t y = 0U; y < font->px; y++) {
+            for (uint8_t x = 0U; x < font->adv[idx]; x++) {
+                if (ak_font_level(font, idx, x, y) != 0U) {
+                    t = y < t ? y : t;
+                    b = y > b ? y : b;
+                    break;
+                }
+            }
+        }
+    }
+    *top = t == 0xFFU ? 0U : t;
+    *bot = t == 0xFFU ? (uint8_t)(font->px - 1U) : b;
+}
+
+void ak_text_ink(uint8_t *top, uint8_t *bot)
+{
+    static uint8_t s_top[AK_TEXT_SIZE_COUNT];
+    static uint8_t s_bot[AK_TEXT_SIZE_COUNT];
+    static bool    s_done[AK_TEXT_SIZE_COUNT];
+    if (!s_done[s_size]) {
+        ak_text_ink_scan(ak_text_font(), &s_top[s_size], &s_bot[s_size]);
+        s_done[s_size] = true;
+    }
+    *top = s_top[s_size];
+    *bot = s_bot[s_size];
+}
+
+uint16_t ak_text_vtop(uint16_t by, uint16_t bh)
+{
+    uint8_t top = 0U, bot = 0U;
+    ak_text_ink(&top, &bot);
+    int32_t t = (int32_t)by - top;
+    int32_t d = (int32_t)bh - (int32_t)(bot - top + 1U);
+    t += d >= 0 ? d / 2 : -((-d + 1) / 2); /* floor(d / 2), like the preview tool */
+    return t < 0 ? 0U : (uint16_t)t;
+}
+
+size_t ak_text_clip(const char *s, uint16_t max_px)
+{
+    size_t len = 0U;
+    while (s != NULL && s[len] != '\0') {
+        const char *q = s + len;
+        if (ak_utf8_next(&q) == 0U) {
+            break;
+        }
+        size_t next = (size_t)(q - s);
+        if (ak_text_width_n(s, next) > max_px) {
+            break;
+        }
+        len = next;
+    }
+    return len;
 }
 
 bool ak_text_is_wide(const char *s, size_t n)
@@ -165,6 +239,23 @@ size_t ak_text_wrap(const char *s, uint16_t max_px)
         p = q;
     }
     return (size_t)(p - s);
+}
+
+uint16_t ak_text_wrap_count(const char *s, uint16_t max_px)
+{
+    uint16_t n = 0U;
+    while (s != NULL && n < 0xFFFFU) {
+        while (*s == ' ') {
+            s++;
+        }
+        if (*s == '\0') {
+            break;
+        }
+        size_t len = ak_text_wrap(s, max_px);
+        s += len > 0U ? len : 1U;
+        n++;
+    }
+    return n;
 }
 
 void ak_text_utf8_trim(char *s)

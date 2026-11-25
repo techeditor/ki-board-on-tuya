@@ -41,6 +41,13 @@ uint8_t ak_action_instance_n(ak_action_t a)
     return (a >= AK_ACTION_INSTANCE_BASE + 1u && a <= AK_ACTION_INSTANCE_BASE + 9u) ? n : 0u;
 }
 
+uint8_t ak_action_shortcut_n(ak_action_t a)
+{
+    return (a >= AK_ACTION_SHORTCUT_BASE + 1u && a <= AK_ACTION_SHORTCUT_BASE + AK_SHORTCUT_COUNT)
+               ? (uint8_t)(a - AK_ACTION_SHORTCUT_BASE)
+               : 0u;
+}
+
 bool ak_action_valid(ak_action_t a)
 {
     switch (a) {
@@ -50,9 +57,10 @@ bool ak_action_valid(ak_action_t a)
     case AK_ACTION_CONFIRM:
     case AK_ACTION_MODEL_MENU:
     case AK_ACTION_MODEL_TOGGLE:
+    case AK_ACTION_SCENE_MENU:
         return true;
     default:
-        return ak_action_chat_n(a) != 0u || ak_action_instance_n(a) != 0u;
+        return ak_action_chat_n(a) != 0u || ak_action_instance_n(a) != 0u || ak_action_shortcut_n(a) != 0u;
     }
 }
 
@@ -101,11 +109,12 @@ void ak_keymap_init_defaults(ak_keymap_t *map)
     }
     memset(map, 0, sizeof(*map)); /* all NORMAL, all NONE */
 
-    /* K1-K3: single=chatN, double=instanceN (N=1,2,3). */
+    /* K1-K3: single=chatN, long=instanceN (N=1,2,3); double unbound, so a
+     * single click is reported on release with no double-click wait. */
     for (int i = 0; i < 3; i++) {
         map->entries[i].kind = AK_KEY_KIND_NORMAL;
         map->entries[i].actions[AK_GESTURE_SLOT_SINGLE] = ak_action_chat((uint8_t)(i + 1));
-        map->entries[i].actions[AK_GESTURE_SLOT_DOUBLE] = ak_action_instance((uint8_t)(i + 1));
+        map->entries[i].actions[AK_GESTURE_SLOT_LONG] = ak_action_instance((uint8_t)(i + 1));
     }
     /* K4: single=cancel_char, long=cancel_all. */
     map->entries[3].kind = AK_KEY_KIND_NORMAL;
@@ -161,7 +170,15 @@ static const struct {
 } s_fixed_actions[] = {
     {"cancel_char", AK_ACTION_CANCEL_CHAR}, {"cancel_all", AK_ACTION_CANCEL_ALL},
     {"confirm", AK_ACTION_CONFIRM},         {"model_menu", AK_ACTION_MODEL_MENU},
-    {"model_toggle", AK_ACTION_MODEL_TOGGLE},
+    {"model_toggle", AK_ACTION_MODEL_TOGGLE}, {"scene_menu", AK_ACTION_SCENE_MENU},
+};
+
+/* FR-03 limited shortcuts, SHORTCUT N = s_shortcuts[N - 1]. The order is the
+ * wire byte table in protocol.md and the Companion's SHORTCUTS: append only. */
+static const char *const s_shortcuts[AK_SHORTCUT_COUNT] = {
+    "key_enter",       "key_esc",         "key_up",        "key_down",      "key_left",
+    "key_right",       "key_backspace",   "key_delete_word", "key_clear_input", "key_command_bar",
+    "key_prev_chat",   "key_next_chat",   "key_focus_input", "key_new_chat",
 };
 
 const char *ak_keymap_action_str(ak_action_t a)
@@ -171,7 +188,8 @@ const char *ak_keymap_action_str(ak_action_t a)
             return s_fixed_actions[i].name;
         }
     }
-    return NULL;
+    uint8_t n = ak_action_shortcut_n(a);
+    return n != 0u ? s_shortcuts[n - 1u] : NULL;
 }
 
 bool ak_keymap_action_from_str(const char *s, ak_action_t *out)
@@ -186,6 +204,12 @@ bool ak_keymap_action_from_str(const char *s, ak_action_t *out)
     for (size_t i = 0; i < sizeof(s_fixed_actions) / sizeof(s_fixed_actions[0]); i++) {
         if (strcmp(s, s_fixed_actions[i].name) == 0) {
             *out = s_fixed_actions[i].action;
+            return true;
+        }
+    }
+    for (uint8_t i = 0; i < AK_SHORTCUT_COUNT; i++) {
+        if (strcmp(s, s_shortcuts[i]) == 0) {
+            *out = (ak_action_t)(AK_ACTION_SHORTCUT_BASE + i + 1u);
             return true;
         }
     }
@@ -247,7 +271,8 @@ bool ak_keymap_from_blob(ak_keymap_t *map, const uint8_t *buf, unsigned len)
     if (map == NULL || buf == NULL || len != AK_KEYMAP_BLOB_SIZE) {
         return false;
     }
-    if (buf[0] != (uint8_t)AK_KEYMAP_BLOB_VERSION) {
+    uint8_t version = buf[0];
+    if (version != (uint8_t)AK_KEYMAP_BLOB_VERSION && version != AK_KEYMAP_BLOB_VERSION_V2) {
         return false; /* unknown version -> fall back to defaults */
     }
     /* Validate everything into a temp before mutating, so a corrupt blob never
@@ -267,6 +292,19 @@ bool ak_keymap_from_blob(ak_keymap_t *map, const uint8_t *buf, unsigned len)
                 return false;
             }
             tmp.entries[i].actions[g] = a;
+        }
+    }
+    if (version == AK_KEYMAP_BLOB_VERSION_V2) {
+        /* The old defaults put instanceN on K1-K3 double. Move that to long when
+         * long is free; a key the user changed is left alone. Runs once: the
+         * next save writes the current version. */
+        for (int i = 0; i < 3; i++) {
+            ak_key_entry_t *e = &tmp.entries[i];
+            if (e->kind == AK_KEY_KIND_NORMAL && e->actions[AK_GESTURE_SLOT_DOUBLE] == ak_action_instance((uint8_t)(i + 1)) &&
+                e->actions[AK_GESTURE_SLOT_LONG] == AK_ACTION_NONE) {
+                e->actions[AK_GESTURE_SLOT_DOUBLE] = AK_ACTION_NONE;
+                e->actions[AK_GESTURE_SLOT_LONG]   = ak_action_instance((uint8_t)(i + 1));
+            }
         }
     }
     *map = tmp;

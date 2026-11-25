@@ -8,7 +8,7 @@
  * agent hint all read it from here. Persisted by the caller (KV "ak_lang").
  *
  * Strings are UTF-8. Every non-ASCII character used here is pulled into the
- * UI font by tools/gen_font_ui.py, and the host tests check the coverage.
+ * UI font by the font generator, and the host tests check the coverage.
  */
 
 #ifndef AK_I18N_H
@@ -36,7 +36,10 @@ typedef enum {
     AK_STR_SET_LED_TIMEOUT,
     AK_STR_SET_LANGUAGE,
     AK_STR_SET_FONT_SIZE,
-    AK_STR_SET_CREDENTIALS,
+    AK_STR_SET_ANIMATION, /* FR-14 chat ghost animation */
+    AK_STR_VAL_ON,
+    AK_STR_VAL_OFF,
+    AK_STR_SET_DEVINFO,
     AK_STR_SET_PAIRING,
     AK_STR_SET_TEST,
     AK_STR_SET_EXIT,
@@ -65,6 +68,8 @@ typedef enum {
     AK_STR_NOTE_LEDS_AUTO,
     AK_STR_NOTE_LANGUAGE,  /* "语言：中文" / "Language: English" */
     AK_STR_NOTE_FONT_SIZE, /* printf: %u = px */
+    AK_STR_NOTE_ANIM_ON,
+    AK_STR_NOTE_ANIM_OFF,
     /* Status bar, pages, dialogs and the LCD menu (FR-01 phase 2) */
     AK_STR_ST_HOLD_TO_SPEAK,
     AK_STR_ST_DICTATION_NEEDS_CLOUD,
@@ -73,7 +78,13 @@ typedef enum {
     AK_STR_ST_INPUT_CLEARED,
     AK_STR_ST_INPUT_NOT_SENT,
     AK_STR_ST_INPUT_CONFIRMED,
+    AK_STR_ST_INPUT_FULL,
+    AK_STR_ST_PC_FILLED,
+    AK_STR_ST_INPUT_NO_LINK,
     AK_STR_ST_CHAT_NEEDS_CLOUD,
+    AK_STR_ST_VOICE_NEEDS_LINK,
+    AK_STR_ST_CHAT_AS_ASR,
+    AK_STR_ST_CHAT_RESTORED,
     AK_STR_ST_WIFI_CONNECTING,
     AK_STR_ST_WIFI_CONNECTED,
     AK_STR_ST_WIFI_FAILED,
@@ -81,7 +92,6 @@ typedef enum {
     AK_STR_ST_WIFI_DISCONNECTED,
     AK_STR_ST_PAIR_WINDOW,
     AK_STR_ST_PAIR_WRITE_LICENSE,
-    AK_STR_ST_REQUEST_WAITING,
     AK_STR_ST_PAIRING_TUYA_APP,
     AK_STR_ST_ASR_FALLBACK,
     AK_STR_ST_ASR_RESTORED,
@@ -90,6 +100,15 @@ typedef enum {
     AK_STR_ST_SESSION,
     AK_STR_ST_STATUS,
     AK_STR_ST_SELECTED_SESSION,
+    AK_STR_ST_SWITCH_INSTANCE,
+    AK_STR_ST_SCENE, /* FR-03: scene switched, %s = name */
+    AK_STR_ST_SCENE_BUSY, /* FR-03: picker / switch refused (not in standby) */
+    AK_STR_ST_SCENE_NONE, /* FR-03: no scene stored on the keyboard */
+    AK_STR_SET_SCENE,     /* settings row + picker title */
+    AK_STR_KEYS_VOICE,    /* keys home page: the voice key */
+    AK_STR_KEYS_KNOB,     /* keys home page: the EC11 push row */
+    AK_STR_KEYS_DOUBLE,   /* keys home page: double-click prefix */
+    AK_STR_KEYS_LONG,     /* keys home page: long-press prefix */
     AK_STR_ST_LISTENING,
     AK_STR_ST_RECOGNIZING,
     AK_STR_ST_DICTATED_HINT,
@@ -109,6 +128,7 @@ typedef enum {
     AK_STR_ST_BLE_INIT_FAILED,
     AK_STR_ST_BLE_CONNECTED,
     AK_STR_ST_BLE_SUBSCRIBING,
+    AK_STR_ST_BLE_AUTH_WAIT,
     AK_STR_ST_BLE_ADVERTISING,
     AK_STR_ST_BLE_DISCONNECTED,
     AK_STR_ST_LICENSE_SAVED,
@@ -148,6 +168,18 @@ typedef enum {
     AK_STR_UNPAIR_L1,
     AK_STR_UNPAIR_L2,
     AK_STR_UNPAIR_KEYS,
+    AK_STR_SET_BLE_PAIR,
+    AK_STR_SET_HINT_BLE_PAIR1,
+    AK_STR_SET_HINT_BLE_PAIR2,
+    AK_STR_BLE_PAIR_TITLE,
+    AK_STR_BLE_PAIR_L1,
+    AK_STR_BLE_PAIR_L3,
+    AK_STR_BLE_PAIR_KEYS,
+    AK_STR_BLE_PAIR_TIMEOUT,
+    AK_STR_ST_BLE_PAIR_OPEN,
+    AK_STR_ST_BLE_PAIR_CLOSED,
+    AK_STR_ST_BLE_PAIR_FAILED,
+    AK_STR_ST_BLE_PAIR_OFF,
     AK_STR_ST_PAIR_REQ_BUSY,
     AK_STR_CRED_PID,
     AK_STR_CRED_SET,
@@ -156,12 +188,54 @@ typedef enum {
     AK_STR_CRED_OVERWRITE_ON,
     AK_STR_CRED_OVERWRITE_K6,
     AK_STR_CRED_NEED_USB,
-    AK_STR_CRED_NEED_USB2,
     AK_STR_CRED_BLE,
     AK_STR_CRED_BACK,
     AK_STR_CRED_UNPAIR_ARMED,
     AK_STR_CRED_UNPAIR,
+    AK_STR_DI_G_CONN,
+    AK_STR_DI_G_WIFI,
+    AK_STR_DI_G_BLE,
+    AK_STR_DI_G_DEVICE,
+    AK_STR_DI_COMPANION,
+    AK_STR_DI_CLOUD,
+    AK_STR_DI_SSID,
+    AK_STR_DI_IP,
+    AK_STR_DI_SIGNAL,
+    AK_STR_DI_WIFI_MAC,
+    AK_STR_DI_BLE_MAC,
+    AK_STR_DI_BLE_NAME,
+    AK_STR_DI_PAIRING,
+    AK_STR_DI_FIRMWARE,
+    AK_STR_DI_UUID,
+    AK_STR_DI_AUTHKEY,
+    AK_STR_DI_NOT_CONNECTED,
+    AK_STR_DI_USB_HELLO,
+    AK_STR_DI_USB_NO_HELLO,
+    AK_STR_DI_BLE_HELLO,
+    AK_STR_DI_BLE_NO_HELLO,
+    AK_STR_DI_CLOUD_ACTIVE,
+    AK_STR_DI_CLOUD_INACTIVE,
+    AK_STR_DI_CLOUD_OFFLINE,
+    AK_STR_DI_PAIRED,
+    AK_STR_DI_NOT_PAIRED,
     AK_STR_SET_REBIND,
+    AK_STR_SET_FRESET,
+    AK_STR_SET_HINT_FRESET1, /* footer when the Reset system row is selected */
+    AK_STR_SET_HINT_FRESET2,
+    AK_STR_FRESET_TITLE1,
+    AK_STR_FRESET_I1, /* I1-I6: what is cleared, the same list in both dialogs */
+    AK_STR_FRESET_I2,
+    AK_STR_FRESET_I3,
+    AK_STR_FRESET_I4,
+    AK_STR_FRESET_I5,
+    AK_STR_FRESET_I6,
+    AK_STR_FRESET_NOTE1, /* dialog 1: one more confirm follows */
+    AK_STR_FRESET_TITLE2,
+    AK_STR_FRESET_NOTE2, /* dialog 2: the License must be written again */
+    AK_STR_FRESET_KEYS1,
+    AK_STR_FRESET_KEYS2,
+    AK_STR_FRESET_RUNNING,
+    AK_STR_FRESET_CANCELLED,
     AK_STR_SET_CHANGE_WIFI, /* Pairing mode row on an activated device */
     AK_STR_CHWIFI_TITLE,
     AK_STR_REBIND_L4,
@@ -182,6 +256,8 @@ typedef enum {
     AK_STR_BIND_NO_REPLY,
     AK_STR_BIND_BOUND,
     AK_STR_BIND_CLEARED,
+    AK_STR_ST_PID_MISSING,
+    AK_STR_ST_PID_SAVED,
     AK_STR_SET_WIFI, /* settings row: remembered Wi-Fi networks (FR-15) */
     AK_STR_WIFI_EMPTY,
     AK_STR_WIFI_CURRENT,
@@ -191,11 +267,31 @@ typedef enum {
     AK_STR_WIFI_CONFIRM_CUR,
     AK_STR_WIFI_DELETED,
     AK_STR_WIFI_ADD_USB,
+    AK_STR_SET_HINT_CHWIFI1,
+    AK_STR_SET_HINT_CHWIFI2,
+    AK_STR_WIFI_HELP_TITLE,
+    AK_STR_WIFI_HELP_H1,
+    AK_STR_WIFI_HELP_D1,
+    AK_STR_WIFI_HELP_H2,
+    AK_STR_WIFI_HELP_D2,
+    AK_STR_WIFI_HELP_H3,
+    AK_STR_WIFI_HELP_D3,
+    AK_STR_WIFI_HELP_D4,
+    AK_STR_WIFI_HELP_KEYS,
+    AK_STR_WIFI_HELP_WHY,
+    /* FR-17: scrolling long text with the knob */
+    AK_STR_SCROLL_TOP,
+    AK_STR_SCROLL_BOTTOM,
+    AK_STR_SCROLL_NEW,
     AK_STR_PAIR_TITLE,
     AK_STR_PAIR_L1,
     AK_STR_PAIR_L2,
     AK_STR_PAIR_L3,
     AK_STR_PAIR_L4,
+    AK_STR_CHWIFI_L1,
+    AK_STR_CHWIFI_L2,
+    AK_STR_CHWIFI_L3,
+    AK_STR_CHWIFI_L4,
     AK_STR_PAIR_CANCEL,
     AK_STR_PAIR_CONFIRM,
     AK_STR_PAIR_AUTO_CANCEL,
@@ -213,8 +309,6 @@ typedef enum {
     AK_STR_TEST_NO_SWITCH2,
     AK_STR_TEST_LP_KEYS,
     AK_STR_TEST_LP_HINT,
-    AK_STR_FONT_TITLE,
-    AK_STR_FONT_HINT,
     AK_STR_MENU_OPTIONS,
     AK_STR_MENU_APPROVE,
     AK_STR_MENU_QUESTION,
@@ -232,10 +326,8 @@ typedef enum {
     AK_STR_DICT_SPEAK,
     AK_STR_DICT_CONFIRM_HINT,
     AK_STR_DICT_BACK_HINT,
-    AK_STR_INPUT_TITLE,
-    AK_STR_INPUT_HINT,
     AK_STR_TEST_TITLE,
-    /* Firmware update (system confirm ⑦, docs/ota.md) */
+    /* Firmware update (system confirm ⑦) */
     AK_STR_OTA_TITLE,
     AK_STR_OTA_INSTALL,
     AK_STR_OTA_RUNNING,

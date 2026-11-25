@@ -15,15 +15,16 @@
 
 #include <stdio.h>
 #include "ak_kv.h"
+#include "ak_pid.h"
 #include "tal_api.h"
 
 #if AK_ASR_BOARD_CLOUD
 
 /* ── Real backend (Tuya IoT client + netmgr) ────────────────────────────────
- * Ported from tuya_cloud_asr/src/tuya_main.c (see git tag archive/feature-probes). Only the
- * IoT bring-up is ported here; K4 capture is routed by the app through the
+ * Ported from an earlier internal prototype. Only the IoT bring-up is ported
+ * here; K5 capture is routed by the app through the
  * official HOLD mode events in ak_asr.c, and recognized text reaches the app
- * through ak_asr.c's callback. K4 remains owned by ak_input so system/cloud
+ * through ak_asr.c's callback. K5 remains owned by ak_input so system/cloud
  * routing stays dynamic and no unconditional cloud hardware button is added. */
 
 #include "tuya_iot.h"
@@ -59,6 +60,7 @@ static bool               s_iot_ready       = false;
 static bool               s_netmgr_ready    = false;
 static volatile bool      s_cloud_activated = false;
 static bool               s_boot_window     = false;
+static bool               s_pid_missing     = false;
 static volatile bool      s_provisioning    = false;
 static ak_cloud_activation_cb s_activation_callback = NULL;
 static char               s_binding_qr_url[160];
@@ -124,7 +126,7 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
          * direct MQTT. Never include AuthKey in the URL or UART0 frame. */
         (void)snprintf(s_binding_qr_url, sizeof(s_binding_qr_url),
                        "https://smartapp.tuya.com/s/p?p=%s&uuid=%s&v=2.0",
-                       TUYA_PRODUCT_ID,
+                       ak_pid_get(),
                        s_license.uuid == NULL ? "" : s_license.uuid);
         notify_activation("scan_qr", s_binding_qr_url);
         PR_NOTICE("cloud: direct MQTT ready; waiting for SmartLife QR scan");
@@ -137,7 +139,7 @@ static void __iot_event_handler(tuya_iot_client_t *client, tuya_event_msg_t *eve
         s_cloud_activated = true;
         s_provisioning    = false;
         notify_activation("activated", "");
-        PR_NOTICE("cloud: activation succeeded; AK BLE takeover is now allowed");
+        PR_NOTICE("cloud: activation succeeded");
         break;
     case TUYA_EVENT_MQTT_CONNECTED:
         notify_activation("cloud_ready", "");
@@ -183,6 +185,7 @@ OPERATE_RET ak_cloud_init(void)
     s_netmgr_ready    = false;
     s_cloud_activated = false;
     s_boot_window     = false;
+    s_pid_missing     = false;
 
     /* KV + core services the IoT stack depends on. A partial initialization
      * must not be reported as cloud-ready: later netmgr/IoT calls otherwise
@@ -240,9 +243,20 @@ OPERATE_RET ak_cloud_init(void)
 #endif
     }
 
+    /* No product ID (a public build until the owner writes theirs over USB):
+     * the Tuya cloud stays off. KV, the License storage and everything else
+     * the keyboard does are unaffected; the PID takes effect after a restart. */
+    if (ak_pid_get()[0] == '\0') {
+        s_pid_missing = true;
+        PR_WARN("cloud: no product ID; Tuya cloud not started (write the PID over USB, then restart)");
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    /* tuya_iot_init keeps this pointer: ak_pid_get() is a static buffer that
+     * does not change while running. */
     rt = tuya_iot_init(&s_ai_client, &(const tuya_iot_config_t){
                                          .software_ver  = PROJECT_VERSION,
-                                         .productkey    = TUYA_PRODUCT_ID,
+                                         .productkey    = ak_pid_get(),
                                          .uuid          = s_license.uuid,
                                          .authkey       = s_license.authkey,
                                          .event_handler = __iot_event_handler,
@@ -302,7 +316,7 @@ OPERATE_RET ak_cloud_init(void)
     /* Register the board's onboard peripherals — critically the audio codec
      * ("audio_codec"), which ai_chat_init (called later from ak_asr_init) needs
      * for mic capture; without it ai_chat fails with "audio driver audio_codec
-     * not exist" and K4 does nothing. Button/LED registration inside are
+     * not exist" and K5 does nothing. Button/LED registration inside are
      * #if defined(BUTTON_NAME/LED_NAME) — the profile leaves those unset, so only
      * audio registers and ak_input / the WS2812 are untouched. Requires
      * CONFIG_ENABLE_AUDIO_CODECS=y in the build profile. */
@@ -311,7 +325,7 @@ OPERATE_RET ak_cloud_init(void)
         PR_ERR("cloud: board_register_hardware failed: %d (mic may be unavailable)", hw);
     }
 
-    PR_NOTICE("cloud: tuya_iot_init + netmgr + board HW up (PID=%s)", TUYA_PRODUCT_ID);
+    PR_NOTICE("cloud: tuya_iot_init + netmgr + board HW up (PID=%s)", ak_pid_get());
     return OPRT_OK;
 }
 
@@ -397,6 +411,17 @@ OPERATE_RET ak_cloud_enter_pairing(void)
     return tuya_iot_reset(&s_ai_client);
 }
 
+bool ak_cloud_reset_local(void)
+{
+    /* The SDK's own local clean-up (schema, activation data, endpoint), the
+     * same step its reset state runs; the License is not touched. */
+    if (!s_iot_ready || !tuya_iot_activated(&s_ai_client)) {
+        return false;
+    }
+    PR_WARN("cloud: removing the local activation data directly");
+    return tuya_iot_activated_data_remove(&s_ai_client) == OPRT_OK;
+}
+
 bool ak_cloud_compiled(void)
 {
     return true;
@@ -410,6 +435,11 @@ bool ak_cloud_boot_window(void)
 bool ak_cloud_license_usable(void)
 {
     return s_license.uuid != NULL && s_license.uuid[0] != '\0';
+}
+
+bool ak_cloud_pid_missing(void)
+{
+    return s_pid_missing;
 }
 
 void ak_cloud_netcfg_close(void)
@@ -429,6 +459,11 @@ bool ak_cloud_boot_window(void)
 }
 
 bool ak_cloud_license_usable(void)
+{
+    return false;
+}
+
+bool ak_cloud_pid_missing(void)
 {
     return false;
 }
@@ -481,6 +516,11 @@ OPERATE_RET ak_cloud_enter_pairing(void)
 {
     /* No cloud/provisioning in this profile — nothing to reset. */
     return OPRT_NOT_SUPPORTED;
+}
+
+bool ak_cloud_reset_local(void)
+{
+    return false;
 }
 
 bool ak_cloud_compiled(void)

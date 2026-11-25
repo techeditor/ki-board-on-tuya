@@ -1,6 +1,6 @@
 /**
  * @file ak_ota.h
- * @brief Local OTA over USB (docs/ota.md): package checks and the receive
+ * @brief Local OTA over USB: package checks and the receive
  *        state machine. Pure apart from mbedTLS; flash access goes through
  *        ak_ota_flash_ops_t so the host tests run it against RAM.
  *

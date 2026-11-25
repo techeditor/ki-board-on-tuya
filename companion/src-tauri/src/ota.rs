@@ -1,4 +1,4 @@
-//! Local firmware update over USB (`docs/ota.md`, protocol.md "固件升级（仅 USB）").
+//! Local firmware update over USB (protocol.md "固件升级（仅 USB）").
 //!
 //! * [`Package::parse`] checks a `.akota` file the user picked: layout, the
 //!   ECDSA P-256 signature against the public keys the firmware compiles in

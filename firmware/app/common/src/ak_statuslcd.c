@@ -10,6 +10,7 @@
 
 #include "ak_board_io.h"
 #include "ak_icons16.h"
+#include "ak_palette.h"
 #include "armstar.h"
 #include "tal_api.h"
 #include "tdd_disp_st7789.h"
@@ -31,6 +32,9 @@
 static TDL_DISP_HANDLE_T      s_disp = NULL;
 static TDL_DISP_DEV_INFO_T    s_info;
 static TDL_DISP_FRAME_BUFF_T *s_frame = NULL;
+static TDL_DISP_FRAME_BUFF_T *s_part  = NULL; /* ak_statuslcd_flush_rect copy */
+static TDL_DISP_FRAME_BUFF_T *s_busy  = NULL; /* buffer of the DMA in flight */
+static uint32_t               s_frame_gen;    /* full flushes so far */
 static bool                   s_ready = false;
 static volatile bool          s_flush_done = true;
 static DISP_SPI_BASE_CFG_T    s_spi_cfg;
@@ -251,7 +255,15 @@ OPERATE_RET ak_statuslcd_init(void)
     s_frame->height  = AK_STATUSLCD_H;
 
     ak_gfx_bind(s_frame, s_info.is_swap);
-    ak_gfx_clear(AK_COL_BLACK);
+    ak_gfx_clear(AK_UI_BG);
+    /* Small second buffer for ak_statuslcd_flush_rect (FR-14). Optional: without
+     * it partial updates are skipped and the caller redraws the full frame. */
+    s_part = tdl_disp_create_frame_buff(DISP_FB_TP_PSRAM, AK_STATUSLCD_RECT_MAX_PX * 2U);
+    if (s_part == NULL) {
+        PR_WARN("status LCD: no partial-refresh buffer; animations off");
+    } else {
+        s_part->fmt = TUYA_PIXEL_FMT_RGB565;
+    }
     s_ready = true;
     return OPRT_OK;
 }
@@ -306,8 +318,9 @@ bool ak_statuslcd_flush_wait(void)
         s_ready = false;
         return false;
     }
-    if (s_frame != NULL) {
-        s_frame->free_cb = NULL;
+    if (s_busy != NULL) {
+        s_busy->free_cb = NULL;
+        s_busy = NULL;
     }
     return true;
 }
@@ -320,8 +333,9 @@ bool ak_statuslcd_flush_wait(void)
  */
 void ak_statuslcd_flush_poll(void)
 {
-    if (s_ready && s_flush_done && s_frame != NULL && s_frame->free_cb != NULL) {
-        s_frame->free_cb = NULL;
+    if (s_ready && s_flush_done && s_busy != NULL) {
+        s_busy->free_cb = NULL;
+        s_busy = NULL;
     }
 }
 
@@ -355,9 +369,12 @@ void ak_statuslcd_flush(void)
 
     s_flush_done = false;
     s_frame->free_cb = ak_statuslcd_on_flush_done;
+    s_busy           = s_frame;
+    s_frame_gen++;
     rt = tdl_disp_dev_flush(s_disp, s_frame);
     if (rt != OPRT_OK) {
         s_frame->free_cb = NULL;
+        s_busy           = NULL;
         s_flush_done = true;
         PR_ERR("status LCD flush enqueue failed: %d", rt);
         return;
@@ -366,33 +383,59 @@ void ak_statuslcd_flush(void)
      * reading UART; the next ak_statuslcd_flush() waits at entry if needed. */
 }
 
-void ak_statuslcd_title(const char *title, uint16_t bar_color)
+uint32_t ak_statuslcd_frame_gen(void)
+{
+    return s_frame_gen;
+}
+
+bool ak_statuslcd_flush_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
+{
+    if (!s_ready || s_part == NULL || w == 0U || h == 0U || (uint32_t)x + w > AK_STATUSLCD_W ||
+        (uint32_t)y + h > AK_STATUSLCD_H || (uint32_t)w * h > AK_STATUSLCD_RECT_MAX_PX) {
+        return false;
+    }
+    /* The panel takes one transfer at a time; a partial waits like a full flush
+     * (a 32 x 36 px area takes about 0.5 ms at 48 MHz). */
+    if (!ak_statuslcd_flush_wait()) {
+        return false;
+    }
+    /* Copy the rows out of the frame: the DMA needs one contiguous run. The
+     * frame keeps the drawn pixels, so the next full flush shows the same. */
+    for (uint16_t row = 0U; row < h; row++) {
+        memcpy(s_part->frame + (uint32_t)row * w * 2U,
+               s_frame->frame + ((uint32_t)(y + row) * AK_STATUSLCD_W + x) * 2U, (size_t)w * 2U);
+    }
+    s_part->x_start = x;
+    s_part->y_start = y;
+    s_part->width   = w;
+    s_part->height  = h;
+    s_part->len     = (uint32_t)w * h * 2U;
+    SCB_CleanDCache_by_Addr((uint32_t *)s_part->frame, (int32_t)s_part->len);
+
+    s_flush_done    = false;
+    s_part->free_cb = ak_statuslcd_on_flush_done;
+    s_busy          = s_part;
+    /* The SDK keeps the last window it set and changes it only on a change,
+     * so the next full frame (0,0,320,240) restores the full window itself. */
+    OPERATE_RET rt = tdl_disp_dev_flush(s_disp, s_part);
+    if (rt != OPRT_OK) {
+        s_part->free_cb = NULL;
+        s_busy          = NULL;
+        s_flush_done    = true;
+        PR_ERR("status LCD partial flush enqueue failed: %d", rt);
+        return false;
+    }
+    return true;
+}
+
+void ak_statuslcd_title(const char *title, uint16_t bar_color, uint16_t fg)
 {
     if (!s_ready) {
         return;
     }
     ak_gfx_fill_rect(0, 0, AK_STATUSLCD_W, TITLE_H, bar_color);
-    ak_gfx_text(6, 7, title == NULL ? "" : title, AK_COL_BLACK, bar_color, 1);
-    ak_gfx_fill_rect(0, TITLE_H, AK_STATUSLCD_W, (uint16_t)(AK_STATUSLCD_H - TITLE_H), AK_COL_BLACK);
-}
-
-void ak_statuslcd_title_links(const char *title, uint16_t bar_color, bool wifi_connected,
-                              bool usb_connected, bool ble_connected)
-{
-    const uint16_t icon_y = (uint16_t)((TITLE_H - AK_ICON_H) / 2U);
-
-    ak_statuslcd_title(title, bar_color);
-    if (!s_ready) {
-        return;
-    }
-
-    /* Right aligned: WiFi, USB, BLE. 16 px icons with 4 px gaps. */
-    ak_gfx_icon(256U, icon_y, wifi_connected ? AK_ICON_WIFI : AK_ICON_NO_WIFI,
-                AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
-    ak_gfx_icon(276U, icon_y, usb_connected ? AK_ICON_USB : AK_ICON_NO_USB,
-                AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
-    ak_gfx_icon(296U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH,
-                AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+    (void)ak_gfx_text_box(LCD_M, 0U, TITLE_H, title == NULL ? "" : title, fg, bar_color);
+    ak_gfx_fill_rect(0, TITLE_H, AK_STATUSLCD_W, (uint16_t)(AK_STATUSLCD_H - TITLE_H), AK_UI_BG);
 }
 
 /* Draw a segmented battery gauge with the percentage drawn over the body.
@@ -411,16 +454,17 @@ static void draw_battery(uint16_t x_right, uint8_t pct, uint16_t bar_color)
     const uint16_t term_x = (uint16_t)(x_right - term_w);
     const uint16_t body_x = (uint16_t)(term_x - body_w);
 
-    /* Fill colour by charge level. */
-    uint16_t fill = pct > 50U ? AK_COL_GREEN : (pct >= 20U ? AK_COL_YELLOW : AK_COL_RED);
+    /* Fill colour by charge level: White, functional red below 20 %. */
+    bool     low     = pct < 20U;
+    uint16_t fill    = low ? AK_UI_BAT_LOW : AK_UI_BAT_FILL;
+    uint16_t fill_fg = low ? AK_UI_BAT_LOW_FG : AK_UI_BAT_FILL_FG;
 
-    /* Outer shell: black outline then white border then black interior. */
-    ak_gfx_fill_rect(body_x, body_y, body_w, body_h, AK_COL_WHITE);
-    ak_gfx_fill_rect((uint16_t)(body_x + 1U), (uint16_t)(body_y + 1U),
-                     (uint16_t)(body_w - 2U), (uint16_t)(body_h - 2U), AK_COL_BLACK);
+    /* Outer shell: a 1 px border, black interior. */
+    ak_gfx_fill_rect(body_x, body_y, body_w, body_h, AK_UI_BAT_SHELL);
+    ak_gfx_fill_rect((uint16_t)(body_x + 1U), (uint16_t)(body_y + 1U), (uint16_t)(body_w - 2U), (uint16_t)(body_h - 2U),
+                     AK_UI_BAT_EMPTY);
     /* Positive terminal nub on the right, vertically centred. */
-    ak_gfx_fill_rect(term_x, (uint16_t)(body_y + (body_h - term_h) / 2U),
-                     term_w, term_h, AK_COL_WHITE);
+    ak_gfx_fill_rect(term_x, (uint16_t)(body_y + (body_h - term_h) / 2U), term_w, term_h, AK_UI_BAT_SHELL);
 
     /* Interior fill proportional to charge (2 px inset inside the border). */
     const uint16_t in_x = (uint16_t)(body_x + 2U);
@@ -445,21 +489,20 @@ static void draw_battery(uint16_t x_right, uint8_t pct, uint16_t bar_color)
     for (uint16_t i = 0; i < digits; i++) {
         uint16_t gx = (uint16_t)(text_x + i * 8U);
         /* Background = the fill colour if this glyph cell is over the filled
-         * part, else black (empty part of the battery). Foreground is white. */
+         * part, else the empty interior. */
         bool over_fill = (uint16_t)(gx + 4U) < (uint16_t)(in_x + fill_w);
-        uint16_t bg = over_fill ? fill : AK_COL_BLACK;
-        uint16_t fg = (over_fill && fill == AK_COL_YELLOW) ? AK_COL_BLACK : AK_COL_WHITE;
+        uint16_t bg        = over_fill ? fill : AK_UI_BAT_EMPTY;
+        uint16_t fg        = over_fill ? fill_fg : AK_UI_BAT_DIGIT;
         ak_gfx_char_thin(gx, text_y, text[i], fg, bg, 1);
     }
 }
 
-void ak_statuslcd_header(const char *title, uint16_t bar_color, bool wifi_connected,
-                         bool usb_connected, bool ble_connected,
-                         uint8_t battery_pct, bool battery_valid)
+void ak_statuslcd_header(const char *title, uint16_t bar_color, uint16_t fg, bool wifi_connected, bool usb_connected,
+                         bool ble_connected, uint8_t battery_pct, bool battery_valid)
 {
     const uint16_t icon_y = (uint16_t)((TITLE_H - AK_ICON_H) / 2U);
 
-    ak_statuslcd_title(title, bar_color);
+    ak_statuslcd_title(title, bar_color, fg);
     if (!s_ready) {
         return;
     }
@@ -467,19 +510,15 @@ void ak_statuslcd_header(const char *title, uint16_t bar_color, bool wifi_connec
     if (battery_valid) {
         /* Gauge terminal at the far right edge; link icons shifted left of it. */
         draw_battery((uint16_t)(AK_STATUSLCD_W - 2U), battery_pct, bar_color);
-        ak_gfx_icon(214U, icon_y, wifi_connected ? AK_ICON_WIFI : AK_ICON_NO_WIFI,
-                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
-        ak_gfx_icon(234U, icon_y, usb_connected ? AK_ICON_USB : AK_ICON_NO_USB,
-                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
-        ak_gfx_icon(254U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH,
-                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+        ak_gfx_icon(214U, icon_y, wifi_connected ? AK_ICON_WIFI : AK_ICON_NO_WIFI, AK_ICON_W, AK_ICON_H, fg, bar_color);
+        ak_gfx_icon(234U, icon_y, usb_connected ? AK_ICON_USB : AK_ICON_NO_USB, AK_ICON_W, AK_ICON_H, fg, bar_color);
+        ak_gfx_icon(254U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH, AK_ICON_W, AK_ICON_H, fg,
+                    bar_color);
     } else {
         /* No gauge: keep the original right-aligned icon layout. */
-        ak_gfx_icon(256U, icon_y, wifi_connected ? AK_ICON_WIFI : AK_ICON_NO_WIFI,
-                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
-        ak_gfx_icon(276U, icon_y, usb_connected ? AK_ICON_USB : AK_ICON_NO_USB,
-                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
-        ak_gfx_icon(296U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH,
-                    AK_ICON_W, AK_ICON_H, AK_COL_BLACK, bar_color);
+        ak_gfx_icon(256U, icon_y, wifi_connected ? AK_ICON_WIFI : AK_ICON_NO_WIFI, AK_ICON_W, AK_ICON_H, fg, bar_color);
+        ak_gfx_icon(276U, icon_y, usb_connected ? AK_ICON_USB : AK_ICON_NO_USB, AK_ICON_W, AK_ICON_H, fg, bar_color);
+        ak_gfx_icon(296U, icon_y, ble_connected ? AK_ICON_BLUETOOTH : AK_ICON_NO_BLUETOOTH, AK_ICON_W, AK_ICON_H, fg,
+                    bar_color);
     }
 }

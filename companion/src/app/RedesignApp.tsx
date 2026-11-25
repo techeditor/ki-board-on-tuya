@@ -1,33 +1,36 @@
-/* Redesign shell (R3/R6). Assembles the theme + i18n providers, the persistent
- * header (brand, status pill, Simple/Advanced toggle, theme + language), and the
- * content. This stage ships the v0.3 keymap panel + a pending-confirm / LED
- * visualizer; the Connection/Control/Logs views are reskinned in a later batch
- * and plug into the same nav.
- *
- * The set_keymap downlink goes through the Tauri invoke bridge; in a plain Vite
- * preview (no Tauri runtime) it logs instead, so the UI is reviewable in a
- * browser without a board. On-hardware verification runs the Tauri app (A6). */
+/* Companion shell (design §1, §5). Header with brand, board status, the
+ * Simple/Advanced mode switch and a settings popover; Simple shows connection,
+ * voice and the watched chat; Advanced has a left nav with Connection, Input,
+ * Control and Logs. The mode, theme, language and control mechanism persist
+ * to localStorage (key ak-ui-prefs, same as the previous entry). */
 import { useEffect, useMemo, useState } from "react";
 
 import { ThemeProvider, THEMES, useTheme, type ThemeId } from "../theme";
-import { I18nProvider, LOCALES, isLocale, useI18n, type Locale } from "../i18n";
-import { KeymapPanel, defaultKeymapState, type KeymapState } from "../ui/KeymapPanel";
+import { I18nProvider, LOCALES, isLocale, type Locale } from "../i18n";
 import { Card, StateBadge } from "../ui/primitives";
-import { BoardStatusCards, SimpleVoiceLine } from "../ui/BoardStatusCards";
-import { useBoardStatus } from "../ui/boardStatus";
-import { LedDot } from "../ui/LedDot";
-import { toBindings } from "../keymap/actions";
+import { SimpleVoiceLine } from "../ui/BoardStatusCards";
+import { sessionDisplayName } from "./companionTypes";
+import { useCompanion, tauriReady, type Model } from "./useCompanion";
+import { useAppVersion } from "./useAppVersion";
+import { ConnectionView } from "./views/ConnectionView";
+import { InputView } from "./views/InputView";
+import { ControlView, type Mechanism } from "./views/ControlView";
+import { LogsView } from "./views/LogsView";
+import { DeviceSettingsView } from "./views/DeviceSettingsView";
+import { AdvancedSettingsView } from "./views/AdvancedSettingsView";
+import { SceneQuickSwitch, ScenesPanel, useScenes, type ScenesModel } from "../ui/ScenesPanel";
 
 import "../theme/components.css";
 
 type Mode = "simple" | "advanced";
+type View = "connection" | "input" | "scenes" | "control" | "deviceSettings" | "advancedSettings" | "logs";
+const VIEWS: View[] = ["connection", "input", "scenes", "control", "deviceSettings", "advancedSettings", "logs"];
 
-/** Persisted UI prefs (R7/§8). Written to ~/.ak-companion/ui.json by the Rust
- * side; here we also mirror to localStorage so a browser preview persists. */
 interface UiPrefs {
   theme: ThemeId;
   locale: Locale;
   mode: Mode;
+  mechanism: Mechanism;
 }
 
 const PREFS_KEY = "ak-ui-prefs";
@@ -38,34 +41,23 @@ function loadPrefs(): UiPrefs {
     if (raw) {
       const p = JSON.parse(raw) as Partial<UiPrefs>;
       return {
-        theme: THEMES.some((t) => t.id === p.theme) ? (p.theme as ThemeId) : "kc-dark",
+        theme: THEMES.some((th) => th.id === p.theme) ? (p.theme as ThemeId) : "kc-dark",
         locale: isLocale(p.locale) ? p.locale : "zh",
         mode: p.mode === "advanced" ? "advanced" : "simple",
+        mechanism: p.mechanism === "legacy" ? "legacy" : "api",
       };
     }
   } catch {
-    /* ignore malformed prefs */
+    /* malformed prefs fall back to defaults */
   }
-  return { theme: "kc-dark", locale: "zh", mode: "simple" };
+  return { theme: "kc-dark", locale: "zh", mode: "simple", mechanism: "api" };
 }
 
 function savePrefs(p: UiPrefs): void {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(p));
   } catch {
-    /* ignore */
-  }
-}
-
-/** Call a Tauri command when the runtime is present; otherwise log (preview). */
-async function invokeCmd(cmd: string, args: Record<string, unknown>): Promise<void> {
-  const tauri = (window as unknown as { __TAURI__?: { core?: { invoke?: (c: string, a: unknown) => Promise<unknown> } } }).__TAURI__;
-  const invoke = tauri?.core?.invoke;
-  if (invoke) {
-    await invoke(cmd, args);
-  } else {
-    // eslint-disable-next-line no-console
-    console.info(`[preview] ${cmd}`, args);
+    /* storage unavailable: prefs are per session only */
   }
 }
 
@@ -74,75 +66,62 @@ export function RedesignApp() {
   const [theme, setTheme] = useState<ThemeId>(prefs.theme);
   const [locale, setLocale] = useState<Locale>(prefs.locale);
   const [mode, setMode] = useState<Mode>(prefs.mode);
+  const [mechanism, setMechanism] = useState<Mechanism>(prefs.mechanism);
 
   useEffect(() => {
-    savePrefs({ theme, locale, mode });
-    void invokeCmd("save_ui_prefs", { theme, locale, mode });
-  }, [theme, locale, mode]);
+    savePrefs({ theme, locale, mode, mechanism });
+  }, [theme, locale, mode, mechanism]);
 
   return (
     <ThemeProvider initial={theme} onChange={setTheme}>
       <I18nProvider locale={locale} setLocale={setLocale}>
-        <Shell theme={theme} setTheme={setTheme} locale={locale} setLocale={setLocale} mode={mode} setMode={setMode} />
+        <Shell mode={mode} setMode={setMode} mechanism={mechanism} setMechanism={setMechanism} />
       </I18nProvider>
     </ThemeProvider>
   );
 }
 
 function Shell({
-  theme,
-  setTheme,
-  locale,
-  setLocale,
   mode,
   setMode,
+  mechanism,
+  setMechanism,
 }: {
-  theme: ThemeId;
-  setTheme: (t: ThemeId) => void;
-  locale: Locale;
-  setLocale: (l: Locale) => void;
   mode: Mode;
   setMode: (m: Mode) => void;
+  mechanism: Mechanism;
+  setMechanism: (m: Mechanism) => void;
 }) {
-  const { t } = useI18n();
-  const { setTheme: applyTheme } = useTheme();
-  const [keymap, setKeymap] = useState<KeymapState>(defaultKeymapState);
-  // Pending-confirm demo state — in the real app this is driven by board frames.
-  const [pending, setPending] = useState<string | null>(null);
-  // Board-reported pairing window / License / voice mode / Chat turns.
-  const board = useBoardStatus();
-
-  const onApply = (state: KeymapState) => {
-    void invokeCmd("set_keymap", { bindings: toBindings(state) });
-  };
-
-  // FR-01: the keyboard and the Companion share one language. The board's
-  // report wins; a pick here is sent to a board that reports a language.
-  useEffect(() => {
-    if (isLocale(board.language)) setLocale(board.language);
-  }, [board.language, setLocale]);
-  const chooseLocale = (l: Locale) => {
-    setLocale(l);
-    if (board.language) void invokeCmd("set_device_language", { language: l });
-  };
-
-  const chooseTheme = (id: ThemeId) => {
-    setTheme(id);
-    applyTheme(id);
-  };
+  const m = useCompanion();
+  const { t, locale } = m;
+  const { theme, setTheme } = useTheme();
+  const [view, setView] = useState<View>("connection");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const preview = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("preview");
+  const online = m.status.device_connected;
+  const appVersion = useAppVersion();
+  const sc = useScenes();
 
   return (
     <div className="kc-root">
       <div className="kc-shell">
         <header className="kc-header">
           <div className="kc-brand">
-            <b>{t("brand.name")}</b>
+            <b>
+              {t("brand.name")} <span className="kc-ver" title={t("about.companion")}>v{appVersion}</span>
+            </b>
             <span>{t("brand.tagline")}</span>
           </div>
-          <span className="kc-pill online">
+          <span className={`kc-pill ${online ? "online" : ""}`}>
             <span className="dot" />
-            {t("status.online")}
+            {online ? `${t("status.online")} · ${m.status.transport.toUpperCase()}` : t("status.offline")}
           </span>
+          {online && m.status.handshake_missing && (
+            <span className="kc-pill warn" role="status">
+              <span className="dot" />
+              {t("status.noHandshake")}
+            </span>
+          )}
           <div className="kc-keymap-head" style={{ margin: 0 }}>
             <button type="button" className={`kc-seg ${mode === "simple" ? "on" : ""}`} onClick={() => setMode("simple")}>
               {t("common.simple")}
@@ -151,69 +130,144 @@ function Shell({
               {t("common.advanced")}
             </button>
           </div>
-          <div className="kc-settings-pop">
-            <select aria-label={t("common.theme")} value={theme} onChange={(e) => chooseTheme(e.target.value as ThemeId)}>
-              {THEMES.map((th) => (
-                <option key={th.id} value={th.id}>
-                  {th.label}
-                </option>
-              ))}
-            </select>
-            <select aria-label={t("common.language")} value={locale} onChange={(e) => chooseLocale(e.target.value as Locale)}>
-              {LOCALES.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </header>
-
-        {pending && (
-          <div className="kc-pending">
-            <b>{t("pending.title")}</b>
-            <div style={{ marginTop: 6 }}>{t("pending.confirming", { text: pending })}</div>
-            <div className="kc-muted" style={{ fontSize: 12, marginTop: 8, display: "flex", gap: 14, flexWrap: "wrap" }}>
-              <span><LedDot color="red" effect="breathing" /> {t("pending.k4")}</span>
-              <span><LedDot color="green" effect="single" /> {t("pending.k6")}</span>
-            </div>
-          </div>
-        )}
-
-        {mode === "simple" ? (
-          <Card title={t("brand.name")}>
-            <div className="kc-stack">
-              <div>
-                <StateBadge tone="success">{t("status.online")}</StateBadge>{" "}
-                <StateBadge tone="neutral">{t("simple.voice.idle")}</StateBadge>
-              </div>
-              <div className="kc-muted">{t("simple.followingAll")}</div>
-              <SimpleVoiceLine status={board} />
-              <button type="button" className="kc-btn ghost" onClick={() => setMode("advanced")}>
-                {t("simple.openAdvanced")}
-              </button>
-            </div>
-          </Card>
-        ) : (
-          <div className="kc-stack">
-            {/* Connection view (design §1): board-reported status cards. The
-             * board sends prov_status over UART0 only, so an open window
-             * already implies a USB link. */}
-            <h3 className="kc-card-title" style={{ margin: 0 }}>{t("nav.connection")}</h3>
-            <BoardStatusCards status={board} usbConnected />
-            <KeymapPanel value={keymap} onChange={setKeymap} onApply={onApply} />
-            {/* Dev affordance to preview the pending-confirm visualizer. */}
+          <div className="kc-settings">
             <button
               type="button"
               className="kc-btn ghost"
-              style={{ alignSelf: "flex-start" }}
-              onClick={() => setPending(pending ? null : "你好，Kiro")}
+              aria-label={t("common.settings")}
+              aria-expanded={settingsOpen}
+              onClick={() => setSettingsOpen((v) => !v)}
             >
-              {pending ? "hide pending-confirm" : "preview pending-confirm"}
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+              </svg>
             </button>
+            {settingsOpen && (
+              <div className="kc-popover" role="dialog" aria-label={t("common.settings")}>
+                <div className="kc-field" role="group" aria-label={t("common.theme")} style={{ marginTop: 0 }}>
+                  <span>{t("common.theme")}</span>
+                  <div className="kc-keymap-head kc-setting-choices">
+                    {THEMES.map((th) => (
+                      <button
+                        key={th.id}
+                        type="button"
+                        className={`kc-seg ${theme === th.id ? "on" : ""}`}
+                        aria-pressed={theme === th.id}
+                        onClick={() => setTheme(th.id)}
+                      >
+                        {themeLabel(t, th.id, th.label)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="kc-field" role="group" aria-label={t("common.language")}>
+                  <span>{t("common.language")}</span>
+                  <div className="kc-keymap-head kc-setting-choices">
+                    {LOCALES.map((l) => (
+                      <button
+                        key={l.id}
+                        type="button"
+                        className={`kc-seg ${locale === l.id ? "on" : ""}`}
+                        aria-pressed={locale === l.id}
+                        onClick={() => m.chooseLocale(l.id)}
+                      >
+                        {l.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="kc-about" aria-label={t("about.title")}>
+                  <div className="kc-about-title">{t("about.title")}</div>
+                  <div className="kc-about-row">
+                    <span>{t("about.companion")}</span>
+                    <b>v{appVersion}</b>
+                  </div>
+                  {online && (
+                    <div className="kc-about-row">
+                      <span>{t("about.firmware")}</span>
+                      <b>{m.status.firmware_version ? `v${m.status.firmware_version.replace(/^v/i, "")}` : "--"}</b>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </header>
+
+        {mode === "simple" ? (
+          <SimpleView m={m} sc={sc} onAdvanced={() => setMode("advanced")} />
+        ) : (
+          <div className="kc-adv">
+            <nav className="kc-nav kc-nav-rail" aria-label={t("common.navigation")}>
+              {VIEWS.map((v) => (
+                <button key={v} type="button" className={view === v ? "on" : ""} onClick={() => setView(v)}>
+                  {t(`nav.${v}`)}
+                </button>
+              ))}
+            </nav>
+            <div className="kc-adv-content">
+              <h3 className="kc-view-title">{t(`nav.${view}`)}</h3>
+              {m.uiError && <div className="error-banner">{m.uiError}</div>}
+              {view === "connection" && <ConnectionView m={m} />}
+              {view === "input" && <InputView m={m} preview={preview} />}
+              {view === "scenes" && <ScenesPanel sc={sc} />}
+              {view === "control" && <ControlView m={m} mechanism={mechanism} setMechanism={setMechanism} />}
+              {view === "deviceSettings" && <DeviceSettingsView m={m} />}
+              {view === "advancedSettings" && <AdvancedSettingsView m={m} />}
+              {view === "logs" && <LogsView m={m} />}
+            </div>
           </div>
         )}
+
+        <footer className="kc-foot">
+          <span>{t("footer.protocol")}</span>
+          <span>v{appVersion}{tauriReady() ? "" : ` · ${t("footer.preview")}`}</span>
+        </footer>
       </div>
+    </div>
+  );
+}
+
+/** Theme names come from the catalog; an unlisted skin falls back to its own label. */
+function themeLabel(t: (key: string) => string, id: string, fallback: string): string {
+  const key = `theme.${id}`;
+  const text = t(key);
+  return text === key ? fallback : text;
+}
+
+function SimpleView({ m, sc, onAdvanced }: { m: Model; sc: ScenesModel; onAdvanced: () => void }) {
+  const { t } = m;
+  const online = m.status.device_connected;
+  const watching = m.pinnedSession ? sessionDisplayName(m.pinnedSession) : t("simple.followingAll");
+  return (
+    <div className="kc-stack">
+      <Card title={t("nav.connection")}>
+        <div className="kc-stack">
+          <div className="kc-field" style={{ marginTop: 0 }}>
+            <StateBadge tone={online ? "success" : "neutral"}>{online ? t("status.online") : t("status.offline")}</StateBadge>
+            {online && <span className="kc-muted">{m.status.transport.toUpperCase()}</span>}
+          </div>
+          <div className="kc-field">
+            <button type="button" className="kc-btn" onClick={() => m.runAction(m.connect)} disabled={online}>{t("common.connect")}</button>
+            <button type="button" className="kc-btn ghost" onClick={() => m.runAction(m.disconnect)} disabled={!online}>{t("common.disconnect")}</button>
+          </div>
+          {m.uiError && <div className="error-banner">{m.uiError}</div>}
+        </div>
+      </Card>
+      <div className="kc-metrics">
+        <div className="kc-metric">
+          <span>{t("conn.metric.voice")}</span>
+          <b>{m.voiceLabel}</b>
+        </div>
+        <div className="kc-metric">
+          <span>{t("simple.watchingLabel")}</span>
+          <b className={m.pinnedSession ? "kc-ok" : ""}>{watching}</b>
+        </div>
+      </div>
+      <SceneQuickSwitch sc={sc} />
+      <SimpleVoiceLine status={m.board} />
+      <button type="button" className="kc-btn ghost" onClick={onAdvanced}>{t("simple.openAdvanced")}</button>
     </div>
   );
 }

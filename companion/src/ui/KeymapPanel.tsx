@@ -178,7 +178,7 @@ function BoardMap({
 
   return (
     <>
-      <p className="kc-muted" style={{ fontSize: 12, margin: "0 0 10px" }}>{t("keymap.tapHint")}</p>
+      <p className="kc-muted kc-small" style={{ margin: "0 0 10px" }}>{t("keymap.tapHint")}</p>
       <div className="kc-board">
         {BOARD_ROWS.map((row, ri) => (
           <div key={ri} className={`kc-board-row ${row[0] === "enc" ? "enc" : ""}`}>
@@ -213,7 +213,7 @@ function BoardMap({
         </div>
 
         {b.kind === "voice" ? (
-          <p className="kc-muted" style={{ fontSize: 12, marginTop: 10 }}>
+          <p className="kc-muted kc-small" style={{ marginTop: 10 }}>
             {t("keymap.voiceHold")}
           </p>
         ) : (
@@ -264,7 +264,7 @@ function KeymapTable({
               </label>
             </div>
             {b.kind === "voice" ? (
-              <div className="kc-muted" style={{ fontSize: 12 }}>{t("keymap.voiceHold")}</div>
+              <div className="kc-muted kc-small">{t("keymap.voiceHold")}</div>
             ) : (
               <table className="kc-rules">
                 <tbody>

@@ -80,6 +80,7 @@ pub fn tr(en: &'static str, zh: bool) -> &'static str {
         "Local model missing" => "本地模型未下载",
         "Microphone error" => "电脑麦克风错误",
         "Didn't catch that" => "没听清",
+        "Voice needs keyboard control" => "语音需要打开键盘控制电脑",
         "Bind" => "绑定",
         "This computer" => "本机",
         "Unbind" => "解除绑定",
@@ -88,6 +89,13 @@ pub fn tr(en: &'static str, zh: bool) -> &'static str {
         "Session list unavailable" => "无法获取会话列表",
         "Binding not saved" => "绑定未保存",
         "Remote chat: status only" => "远端会话：仅显示状态",
+        "No chat selected (K1-K3)" => "未选择对话(K1-K3)",
+        "Chat not bound (Settings)" => "这个键没有绑定对话",
+        "Nothing to send" => "没有可发送的内容",
+        "Crew refused: sign-in" => "Crew 拒绝：请先登录",
+        "Crew not running" => "Crew 没有运行",
+        "Send failed" => "发送失败",
+        "Typing failed" => "输入失败，文字留在键盘",
         _ => en,
     }
 }
@@ -113,7 +121,10 @@ mod tests {
             assert!(tr(en, true).len() <= CLOSE_MSG_MAX, "{en}");
         }
         for en in ["Crew window not in front", "Model list unavailable", "Select a chat first", "Crew identity check failed",
-                   "Session list unavailable", "Binding not saved", "Remote chat: status only", "Bound", "Unbound"] {
+                   "Session list unavailable", "Binding not saved", "Remote chat: status only", "Bound", "Unbound",
+                   "No chat selected (K1-K3)", "Chat not bound (Settings)", "Nothing to send", "Crew refused: sign-in",
+                   "Crew not running", "Send failed", "Typing failed"] {
+            assert_ne!(tr(en, true), en, "{en} has no Chinese text");
             assert!(tr(en, true).len() <= NOTICE_MAX, "{en}");
         }
     }
@@ -130,11 +141,12 @@ mod tests {
             crate::stream_asr::AsrErrorKind::Audio,
         ]
         .map(|k| crate::stream_asr::AsrError::new(k, "").short());
-        let labels = ["PC ASR: Doubao", "PC ASR: Aliyun", "PC ASR: local", "Cloud failed, used local", "Microphone error", "Didn't catch that"];
+        let labels = ["PC ASR: Doubao", "PC ASR: Aliyun", "PC ASR: local", "Cloud failed, used local", "Microphone error", "Didn't catch that", "Voice needs keyboard control"];
         for en in errors.iter().chain(labels.iter()) {
             assert!(en.len() <= NOTICE_MAX, "{en}");
             assert_ne!(tr(en, true), *en, "{en} has no Chinese text");
             assert!(tr(en, true).len() <= NOTICE_MAX, "{en}");
         }
     }
+
 }

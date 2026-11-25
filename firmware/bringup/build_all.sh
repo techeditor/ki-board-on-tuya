@@ -27,8 +27,8 @@ fi
 
 source "${tuyaopen_root}/export.sh"
 
-python3 "${repo_root}/hardware/pinmap/check_pins_v0.2.py"
-# v0.3 pin map, including v0.3.2 LED_PWR_EN = P18 in the bring-up header.
+# v0.3 pin map; also checks every pin in the bring-up header
+# (common/include/agentic_board_io.h), including v0.3.2 LED_PWR_EN = P18.
 python3 "${repo_root}/hardware/pinmap/check_pins_v0.3.py"
 
 mapfile -t format_sources < <(

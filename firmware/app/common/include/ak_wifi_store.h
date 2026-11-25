@@ -21,11 +21,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define AK_WIFI_STORE_MAX       10U
+#define AK_WIFI_STORE_MAX       8U /* 2026-11-19: 10 -> 8; docs, Companion text and the Wi-Fi help page follow this */
+/* Firmware before that stored up to this many; a stored blob of that size must
+ * still be read (and trimmed to AK_WIFI_STORE_MAX), not discarded. */
+#define AK_WIFI_STORE_LEGACY_MAX 10U
 #define AK_WIFI_STORE_SSID_MAX  32U
 #define AK_WIFI_STORE_PASS_MAX  64U
 #define AK_WIFI_STORE_VERSION   1U
-#define AK_WIFI_STORE_BLOB_MAX  (8U + AK_WIFI_STORE_MAX * (7U + AK_WIFI_STORE_SSID_MAX + AK_WIFI_STORE_PASS_MAX) + 4U)
+#define AK_WIFI_STORE_BLOB_MAX  (8U + AK_WIFI_STORE_LEGACY_MAX * (7U + AK_WIFI_STORE_SSID_MAX + AK_WIFI_STORE_PASS_MAX) + 4U)
 
 /* Security type as reported by the scan (WF_AP_AUTH_MODE_E: 0 open, 1 WEP,
  * 2 WPA, 3 WPA2, 4 WPA/WPA2, 5 WPA3); 0xFF when it was never seen. */
@@ -53,6 +56,7 @@ typedef enum {
 
 typedef enum {
     AK_WIFI_BLOB_OK = 0,
+    AK_WIFI_BLOB_TRIMMED, /* valid, but held more than AK_WIFI_STORE_MAX: the oldest were dropped; save it back */
     AK_WIFI_BLOB_BAD_FORMAT, /* magic, length or field out of range */
     AK_WIFI_BLOB_BAD_VERSION,
     AK_WIFI_BLOB_BAD_CRC,
@@ -86,8 +90,16 @@ size_t ak_wifi_store_by_recency(const ak_wifi_store_t *s, uint8_t out[AK_WIFI_ST
  *  Returns the length, 0 when `cap` is too small. */
 size_t ak_wifi_store_serialize(const ak_wifi_store_t *s, uint8_t *buf, size_t cap);
 
-/** Parse a blob. Any failure leaves `s` empty and reports why. */
+/** Parse a blob. Any failure leaves `s` empty and reports why. A blob with
+ *  more than AK_WIFI_STORE_MAX records (older firmware) keeps the most recently
+ *  connected ones and reports AK_WIFI_BLOB_TRIMMED. */
 ak_wifi_blob_result_t ak_wifi_store_parse(ak_wifi_store_t *s, const uint8_t *buf, size_t len);
+
+/** As ak_wifi_store_parse; when trimming, the record named `keep_ssid` (the
+ *  network in use, may be NULL) is kept even when it is among the oldest.
+ *  Not reentrant (one static scratch list). */
+ak_wifi_blob_result_t ak_wifi_store_parse_keep(ak_wifi_store_t *s, const uint8_t *buf, size_t len,
+                                               const char *keep_ssid);
 
 /* ── Reconnect planning ─────────────────────────────────────────────────── */
 
@@ -109,5 +121,30 @@ int ak_wifi_store_mru(const ak_wifi_store_t *s, uint16_t tried);
 
 /** Wait before reconnect round `round` (0-based) after every network failed. */
 uint32_t ak_wifi_roam_backoff_ms(uint8_t round);
+
+/* ── "Connecting" while the SDK retries on its own ─────────────────────────
+ * TuyaOpen's netconn_wifi joins the saved network at boot (activated devices)
+ * and rejoins it after a drop, retrying for ever with no event per attempt:
+ * netmgr publishes only status changes. So the "connecting" shown for such an
+ * attempt ends on link-up, when the roamer takes over, or after
+ * AK_WIFI_CONNECTING_UI_MS, whichever comes first; then it reads disconnected.
+ * Longer than AK_WIFI_ROAM_GRACE_MS, so a roaming round follows without a gap. */
+#define AK_WIFI_CONNECTING_UI_MS 30000U
+
+typedef struct {
+    bool     armed;
+    uint32_t deadline_ms;
+} ak_wifi_attempt_t;
+
+/** The link is down (boot, or it just dropped). `sdk_retrying`: the SDK is
+ *  trying a known network by itself. True = show "connecting" (and the
+ *  attempt is armed), false = show "disconnected". */
+bool ak_wifi_attempt_down(ak_wifi_attempt_t *a, bool sdk_retrying, uint32_t now_ms);
+
+/** Link up, or another owner (a user connect, the roamer) reports from now on. */
+void ak_wifi_attempt_clear(ak_wifi_attempt_t *a);
+
+/** True once when an armed attempt ran out: report "disconnected" now. */
+bool ak_wifi_attempt_expired(ak_wifi_attempt_t *a, uint32_t now_ms);
 
 #endif /* AK_WIFI_STORE_H */

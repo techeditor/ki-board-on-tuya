@@ -1,10 +1,10 @@
 /**
  * @file ak_feedback.h
- * @brief Probe feedback on UART0 (CH340C -> COM6), JSONL protocol v1.
+ * @brief Probe feedback on UART0 (CH340C -> COMx), JSONL protocol v1.
  *
  * A thin convenience layer over ak_uart (UART0 @115200) + ak_protocol so that
  * bring-up / feature-probe firmware can report status and events on the SAME
- * port the companion / serial monitor watches (COM6), instead of only on the
+ * port the companion / serial monitor watches (COMx), instead of only on the
  * Tuya debug log (UART1) or the on-board LCD.
  *
  * All emitters are best-effort and non-blocking beyond the UART write; a failed

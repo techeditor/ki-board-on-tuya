@@ -10,8 +10,8 @@ import "./kc-light.css";
 export type ThemeId = "kc-dark" | "kc-light";
 
 export const THEMES: { id: ThemeId; label: string }[] = [
-  { id: "kc-dark", label: "Kiro Dark" },
-  { id: "kc-light", label: "Kiro Light" },
+  { id: "kc-dark", label: "Ki-board Dark" },
+  { id: "kc-light", label: "Ki-board Light" },
 ];
 
 const DEFAULT_THEME: ThemeId = "kc-dark";

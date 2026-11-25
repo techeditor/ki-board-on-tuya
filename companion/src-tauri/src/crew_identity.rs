@@ -6,7 +6,7 @@
 //!
 //! (a) the process belongs to the current user (Windows: token user SID;
 //!     Linux: socket owner UID from `/proc/net/tcp`), and
-//! (b) its executable is the Kiro Crew gateway: a file inside the Kiro install
+//! (b) its executable is the Kiro Crew gateway: a file inside the Kiro Crew install
 //!     root (the parent of the Crew home, `~/.kiro` by default), under a
 //!     top-level directory whose name starts with `crew` (`crew-python`,
 //!     `crew-venv-0.12.2`, `crew/kirocrew-bin`, ...), named `kirocrew`,
@@ -14,6 +14,15 @@
 //!     `.exe`, compared case-insensitively; elsewhere exact).
 //!     The gateway is a Python process started by the Crew launcher; the
 //!     interpreter path is what identifies the install.
+//!     Or the desktop app's bundled interpreter: `<app>\resources\backend-dist\
+//!     kirocrew-backend*\[bin\]python.exe` (any name above), where `<app>` is
+//!     a Kiro Crew install directory (Windows: `%LOCALAPPDATA%\Programs\
+//!     KiroCrew` and every `InstallLocation` of a "Kiro Crew" uninstall entry
+//!     in the registry). The desktop app must vouch for it too: the gateway's
+//!     first ancestor outside the bundle runs from under `<app>` (the app
+//!     spawned it; Crew's own `cli_server_stop._desktop_supervisor_pid` reads
+//!     the same rule), or, when that ancestor is gone (the app quit), `<app>`
+//!     still holds the app's own `*kiro*.exe`.
 //!
 //! Every listener that can accept a 127.0.0.1 connection on the port
 //! (bound to 127.0.0.1 or 0.0.0.0) must pass. Anything unknown fails closed.
@@ -44,7 +53,27 @@ pub trait ListenerQuery {
     /// Every listener that would accept a connection to 127.0.0.1:`port`.
     fn listeners(&self, port: u16) -> Result<Vec<Listener>, String>;
     fn current_user(&self) -> Result<OwnerId, String>;
+    /// Image paths of `pid`'s parent, grandparent, ... (at most
+    /// [`ANCESTOR_DEPTH`]); stops at the first one that cannot be read.
+    fn ancestor_exes(&self, _pid: u32) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    /// File names directly in `dir` (empty when unreadable).
+    fn file_names(&self, dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
+
+/// How many ancestors of the gateway are read to find the desktop app (the
+/// app spawns the interpreter directly; slack for a launcher shim).
+pub const ANCESTOR_DEPTH: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IdentityError {
@@ -52,7 +81,7 @@ pub enum IdentityError {
     Query(String),
     NoListener,
     OwnerMismatch { pid: u32 },
-    NotGateway { pid: u32, exe: PathBuf },
+    NotGateway { pid: u32, exe: PathBuf, reason: String },
 }
 
 impl fmt::Display for IdentityError {
@@ -62,8 +91,8 @@ impl fmt::Display for IdentityError {
             IdentityError::Query(e) => write!(f, "cannot read the port owner ({e})"),
             IdentityError::NoListener => write!(f, "nothing is listening on the Crew port"),
             IdentityError::OwnerMismatch { pid } => write!(f, "process {pid} belongs to another user"),
-            IdentityError::NotGateway { pid, exe } => {
-                write!(f, "process {pid} is not the Kiro Crew gateway ({})", exe.display())
+            IdentityError::NotGateway { pid, exe, reason } => {
+                write!(f, "process {pid} is not the Kiro Crew gateway ({}): {reason}", exe.display())
             }
         }
     }
@@ -72,8 +101,26 @@ impl fmt::Display for IdentityError {
 /// Prefix of every identity failure, matched by the UI and the keyboard notice.
 pub const IDENTITY_FAILED: &str = "Crew identity check failed";
 
+/// Where a gateway may run from: the Kiro Crew install root (`~/.kiro`) and the
+/// desktop app's install directories.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GatewayRoots {
+    pub install_root: PathBuf,
+    pub app_roots: Vec<PathBuf>,
+}
+
 /// Verify the listener(s) on `port`. Returns the gateway PID.
-pub fn verify_gateway(q: &dyn ListenerQuery, port: u16, install_root: &Path) -> Result<u32, IdentityError> {
+pub fn verify_gateway(q: &dyn ListenerQuery, port: u16, roots: &GatewayRoots) -> Result<u32, IdentityError> {
+    verify_gateway_with(q, port, roots, cfg!(windows))
+}
+
+/// [`verify_gateway`] with the path case rule explicit (`fold`: Windows).
+pub fn verify_gateway_with(
+    q: &dyn ListenerQuery,
+    port: u16,
+    roots: &GatewayRoots,
+    fold: bool,
+) -> Result<u32, IdentityError> {
     let me = q.current_user().map_err(IdentityError::Query)?;
     let listeners = q.listeners(port).map_err(IdentityError::Query)?;
     if listeners.is_empty() {
@@ -83,54 +130,129 @@ pub fn verify_gateway(q: &dyn ListenerQuery, port: u16, install_root: &Path) -> 
         if l.owner != me {
             return Err(IdentityError::OwnerMismatch { pid: l.pid });
         }
-        if !gateway_exe_allowed(&l.exe, install_root, cfg!(windows)) {
-            return Err(IdentityError::NotGateway { pid: l.pid, exe: l.exe.clone() });
+        let not = |reason: String| IdentityError::NotGateway { pid: l.pid, exe: l.exe.clone(), reason };
+        if gateway_exe_allowed(&l.exe, &roots.install_root, fold) {
+            continue;
         }
+        let app = match bundled_app_root(&l.exe, &roots.app_roots, fold) {
+            Ok(app) => app,
+            Err(why) => return Err(not(why)),
+        };
+        desktop_vouches(q, l.pid, &l.exe, &app, fold).map_err(not)?;
     }
     Ok(listeners[0].pid)
 }
 
+/// The path's components, lower-cased when `fold_case`; `None` for a path
+/// with `..` (not a resolved image path).
+fn parts(p: &Path, fold_case: bool) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for c in p.components() {
+        let s = match c {
+            Component::Normal(s) => s.to_string_lossy().into_owned(),
+            Component::Prefix(p) => p.as_os_str().to_string_lossy().into_owned(),
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir => return None,
+        };
+        out.push(if fold_case { s.to_lowercase() } else { s });
+    }
+    Some(out)
+}
+
+fn under(path: &[String], root: &[String]) -> bool {
+    !root.is_empty() && path.len() > root.len() && path[..root.len()] == root[..]
+}
+
+/// An allowed interpreter / launcher file name (python3.12 and similar too).
+fn gateway_name(name: &str, fold_case: bool) -> bool {
+    let stem = if fold_case { name.strip_suffix(".exe").unwrap_or(name) } else { name };
+    GATEWAY_NAMES.contains(&stem)
+        || stem.strip_prefix("python3.").is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The desktop install directory `exe` is the bundled gateway of:
+/// `<app>/resources/backend-dist/kirocrew-backend*/[bin/]<gateway name>`.
+/// Err names why it is not.
+pub fn bundled_app_root(exe: &Path, app_roots: &[PathBuf], fold_case: bool) -> Result<PathBuf, String> {
+    let e = parts(exe, fold_case).ok_or("the path contains '..'")?;
+    let name = e.last().cloned().unwrap_or_default();
+    if !gateway_name(&name, fold_case) {
+        return Err(format!("'{name}' is not a Kiro Crew interpreter or launcher name"));
+    }
+    if app_roots.is_empty() {
+        return Err("outside the Kiro Crew install root, and no Kiro Crew desktop install was found".into());
+    }
+    for root in app_roots {
+        let Some(r) = parts(root, fold_case) else { continue };
+        if !under(&e, &r) {
+            continue;
+        }
+        let rest = &e[r.len()..e.len() - 1];
+        let shape_ok = (rest.len() == 3 || (rest.len() == 4 && rest[3] == "bin"))
+            && rest[0] == "resources"
+            && rest[1] == "backend-dist"
+            && rest[2].starts_with("kirocrew-backend");
+        return if shape_ok {
+            Ok(root.clone())
+        } else {
+            Err(format!(
+                "inside the Kiro Crew app {} but not in resources{sep}backend-dist{sep}kirocrew-backend",
+                root.display(),
+                sep = std::path::MAIN_SEPARATOR
+            ))
+        };
+    }
+    let listed: Vec<String> = app_roots.iter().map(|r| r.display().to_string()).collect();
+    Err(format!("outside the Kiro Crew install root and the Kiro Crew app ({})", listed.join("; ")))
+}
+
+/// The desktop app vouches for its bundled gateway: the first ancestor
+/// outside the bundle runs from under `app`, or (no such ancestor readable:
+/// the app quit) `app` still holds the app's `*kiro*.exe`.
+fn desktop_vouches(q: &dyn ListenerQuery, pid: u32, exe: &Path, app: &Path, fold_case: bool) -> Result<(), String> {
+    let (Some(e), Some(a)) = (parts(exe, fold_case), parts(app, fold_case)) else {
+        return Err("unreadable path".into());
+    };
+    // `<app>/resources/backend-dist/kirocrew-backend*`
+    let bundle = &e[..a.len() + 3];
+    for anc in q.ancestor_exes(pid) {
+        let Some(p) = parts(&anc, fold_case) else { continue };
+        if under(&p, bundle) {
+            continue; // a launcher shim inside the bundle
+        }
+        return if under(&p, &a) {
+            Ok(())
+        } else {
+            Err(format!("started by {}, not by the Kiro Crew app", anc.display()))
+        };
+    }
+    let has_app = q.file_names(app).iter().any(|n| {
+        let n = n.to_lowercase();
+        n.ends_with(".exe") && n.contains("kiro") && !n.starts_with("uninstall")
+    });
+    if has_app {
+        Ok(())
+    } else {
+        Err(format!("no Kiro Crew app executable in {}", app.display()))
+    }
+}
+
 const GATEWAY_NAMES: [&str; 4] = ["kirocrew", "python", "python3", "pythonw"];
 
-/// Rule (b) above. `fold_case`: compare case-insensitively (Windows paths).
+/// Rule (b) above for the Crew home. `fold_case`: compare case-insensitively
+/// (Windows paths).
 pub fn gateway_exe_allowed(exe: &Path, install_root: &Path, fold_case: bool) -> bool {
-    let norm = |p: &Path| -> Option<Vec<String>> {
-        let mut out = Vec::new();
-        for c in p.components() {
-            match c {
-                Component::Normal(s) => {
-                    let s = s.to_string_lossy();
-                    out.push(if fold_case { s.to_lowercase() } else { s.into_owned() });
-                }
-                Component::Prefix(p) => {
-                    let s = p.as_os_str().to_string_lossy();
-                    out.push(if fold_case { s.to_lowercase() } else { s.into_owned() });
-                }
-                Component::RootDir | Component::CurDir => {}
-                // A path with `..` is not a resolved image path: refuse.
-                Component::ParentDir => return None,
-            }
-        }
-        Some(out)
-    };
-    let (Some(exe_parts), Some(root_parts)) = (norm(exe), norm(install_root)) else {
+    let (Some(exe_parts), Some(root_parts)) = (parts(exe, fold_case), parts(install_root, fold_case)) else {
         return false;
     };
     if root_parts.is_empty() || exe_parts.len() < root_parts.len() + 2 || exe_parts[..root_parts.len()] != root_parts[..] {
         return false;
     }
     // Parts are already lower-case when fold_case; otherwise compare exactly.
-    let top = &exe_parts[root_parts.len()];
-    if !top.starts_with("crew") {
+    if !exe_parts[root_parts.len()].starts_with("crew") {
         return false;
     }
-    let name = exe_parts.last().cloned().unwrap_or_default();
-    let stem = if fold_case { name.strip_suffix(".exe").unwrap_or(&name) } else { name.as_str() };
-    if GATEWAY_NAMES.contains(&stem) {
-        return true;
-    }
-    // python3.12 and similar.
-    stem.strip_prefix("python3.").is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+    gateway_name(exe_parts.last().map(String::as_str).unwrap_or(""), fold_case)
 }
 
 /// The platform query.
@@ -236,6 +358,39 @@ impl ListenerQuery for SystemQuery {
     fn current_user(&self) -> Result<OwnerId, String> {
         win::current_user()
     }
+    fn ancestor_exes(&self, pid: u32) -> Vec<PathBuf> {
+        win::ancestor_exes(pid)
+    }
+}
+
+/// The Kiro Crew desktop app's install directories (Windows; empty
+/// elsewhere): the per-user default `%LOCALAPPDATA%\Programs\KiroCrew`, and
+/// the `InstallLocation` of every uninstall entry named "Kiro Crew" /
+/// "KiroCrew" (per-user and per-machine).
+pub fn desktop_app_roots() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut out = Vec::new();
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+            out.push(PathBuf::from(local).join("Programs").join("KiroCrew"));
+        }
+        for p in win::registry_install_locations() {
+            if !out.iter().any(|o: &PathBuf| o.as_os_str().eq_ignore_ascii_case(p.as_os_str())) {
+                out.push(p);
+            }
+        }
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Whether an uninstall entry's DisplayName is the Kiro Crew desktop app.
+pub fn is_crew_display_name(name: &str) -> bool {
+    let n: String = name.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    n.starts_with("kirocrew")
 }
 
 #[cfg(windows)]
@@ -361,6 +516,161 @@ mod win {
         process_user(unsafe { GetCurrentProcess() }).ok_or_else(|| "current user SID unavailable".into())
     }
 
+    const TH32CS_SNAPPROCESS: u32 = 0x2;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        size: u32,
+        usage: u32,
+        pid: u32,
+        default_heap_id: usize,
+        module_id: u32,
+        threads: u32,
+        parent_pid: u32,
+        pri_class_base: i32,
+        flags: u32,
+        exe_file: [u16; 260],
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> HANDLE;
+        fn Process32FirstW(snap: HANDLE, entry: *mut ProcessEntry32W) -> BOOL;
+        fn Process32NextW(snap: HANDLE, entry: *mut ProcessEntry32W) -> BOOL;
+    }
+
+    /// pid -> parent pid for every process, from one snapshot.
+    fn parent_table() -> Vec<(u32, u32)> {
+        // SAFETY: plain snapshot of the process list.
+        let snap = Handle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) });
+        if snap.0 == 0 || snap.0 == -1 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        // SAFETY: zeroed POD with its size set, as the API requires.
+        let mut e: ProcessEntry32W = unsafe { std::mem::zeroed() };
+        e.size = std::mem::size_of::<ProcessEntry32W>() as u32;
+        // SAFETY: e is a valid, sized entry.
+        let mut ok = unsafe { Process32FirstW(snap.0, &mut e) } != 0;
+        while ok {
+            out.push((e.pid, e.parent_pid));
+            // SAFETY: as above.
+            ok = unsafe { Process32NextW(snap.0, &mut e) } != 0;
+        }
+        out
+    }
+
+    /// Image paths of `pid`'s ancestors, nearest first.
+    /// shortcut: a parent pid can be reused after the parent exits; the rule
+    /// then sees an unrelated process and refuses (or, for a process under the
+    /// app root, accepts like the file fallback would). Compare creation times
+    /// if that matters.
+    pub fn ancestor_exes(pid: u32) -> Vec<PathBuf> {
+        let table = parent_table();
+        let mut out = Vec::new();
+        let mut cur = pid;
+        for _ in 0..super::ANCESTOR_DEPTH {
+            let Some(&(_, parent)) = table.iter().find(|(p, _)| *p == cur) else { break };
+            if parent == 0 || parent == cur {
+                break;
+            }
+            // SAFETY: plain query access to a PID from the snapshot.
+            let h = Handle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, parent) });
+            let Some(exe) = (h.0 != 0).then(|| image_path(h.0)).flatten() else { break };
+            out.push(exe);
+            cur = parent;
+        }
+        out
+    }
+
+    type HKEY = isize;
+    const HKEY_CURRENT_USER: HKEY = 0x8000_0001_u32 as i32 as isize;
+    const HKEY_LOCAL_MACHINE: HKEY = 0x8000_0002_u32 as i32 as isize;
+    const KEY_READ: u32 = 0x20019;
+    const RRF_RT_REG_SZ: u32 = 0x2;
+    const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegOpenKeyExW(key: HKEY, sub: *const u16, opts: u32, sam: u32, out: *mut HKEY) -> i32;
+        fn RegEnumKeyExW(
+            key: HKEY,
+            index: u32,
+            name: *mut u16,
+            name_len: *mut u32,
+            reserved: *mut u32,
+            class: *mut u16,
+            class_len: *mut u32,
+            time: *mut u64,
+        ) -> i32;
+        fn RegGetValueW(
+            key: HKEY,
+            sub: *const u16,
+            value: *const u16,
+            flags: u32,
+            kind: *mut u32,
+            data: *mut c_void,
+            len: *mut u32,
+        ) -> i32;
+        fn RegCloseKey(key: HKEY) -> i32;
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn reg_string(key: HKEY, sub: &[u16], value: &str) -> Option<String> {
+        let value = wide(value);
+        let mut buf = vec![0u16; 1024];
+        let mut len = (buf.len() * 2) as u32;
+        // SAFETY: buf holds `len` bytes; strings are NUL-terminated.
+        let rc = unsafe {
+            RegGetValueW(key, sub.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len)
+        };
+        if rc != 0 {
+            return None;
+        }
+        let n = (len as usize / 2).min(buf.len());
+        let s = String::from_utf16_lossy(&buf[..n]);
+        Some(s.trim_end_matches('\0').trim().trim_matches('"').to_string())
+    }
+
+    /// `InstallLocation` of each "Kiro Crew" uninstall entry.
+    pub fn registry_install_locations() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            let mut key: HKEY = 0;
+            let path = wide(UNINSTALL);
+            // SAFETY: out-pointer to a local; read-only access.
+            if unsafe { RegOpenKeyExW(hive, path.as_ptr(), 0, KEY_READ, &mut key) } != 0 {
+                continue;
+            }
+            for i in 0..4096u32 {
+                let mut name = vec![0u16; 256];
+                let mut len = name.len() as u32;
+                // SAFETY: name holds `len` u16s.
+                let rc = unsafe {
+                    RegEnumKeyExW(key, i, name.as_mut_ptr(), &mut len, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+                };
+                if rc != 0 {
+                    break;
+                }
+                let mut sub = name[..len as usize].to_vec();
+                sub.push(0);
+                let shown = reg_string(key, &sub, "DisplayName").unwrap_or_default();
+                if !super::is_crew_display_name(&shown) {
+                    continue;
+                }
+                if let Some(loc) = reg_string(key, &sub, "InstallLocation").filter(|l| !l.is_empty()) {
+                    out.push(PathBuf::from(loc));
+                }
+            }
+            // SAFETY: a key this function opened.
+            unsafe { RegCloseKey(key) };
+        }
+        out
+    }
+
     fn image_path(h: HANDLE) -> Option<PathBuf> {
         let mut buf = vec![0u16; 1024];
         let mut len = buf.len() as u32;
@@ -416,6 +726,14 @@ mod tests {
     struct Mock {
         me: &'static str,
         listeners: Result<Vec<Listener>, String>,
+        ancestors: Vec<&'static str>,
+        files: Vec<&'static str>,
+    }
+
+    impl Mock {
+        fn new(me: &'static str, listeners: Result<Vec<Listener>, String>) -> Self {
+            Mock { me, listeners, ancestors: vec![], files: vec![] }
+        }
     }
 
     impl ListenerQuery for Mock {
@@ -425,6 +743,16 @@ mod tests {
         fn current_user(&self) -> Result<OwnerId, String> {
             Ok(OwnerId(self.me.into()))
         }
+        fn ancestor_exes(&self, _pid: u32) -> Vec<PathBuf> {
+            self.ancestors.iter().map(PathBuf::from).collect()
+        }
+        fn file_names(&self, _dir: &Path) -> Vec<String> {
+            self.files.iter().map(|f| f.to_string()).collect()
+        }
+    }
+
+    fn roots() -> GatewayRoots {
+        GatewayRoots { install_root: PathBuf::from(ROOT), app_roots: vec![] }
     }
 
     fn l(pid: u32, owner: &str, exe: &str) -> Listener {
@@ -436,35 +764,35 @@ mod tests {
 
     #[test]
     fn genuine_gateway_passes() {
-        let q = Mock { me: "1000", listeners: Ok(vec![l(42, "1000", GW)]) };
-        assert_eq!(verify_gateway(&q, 5476, Path::new(ROOT)), Ok(42));
+        let q = Mock::new("1000", Ok(vec![l(42, "1000", GW)]));
+        assert_eq!(verify_gateway(&q, 5476, &roots()), Ok(42));
     }
 
     #[test]
     fn other_users_listener_fails_closed() {
-        let q = Mock { me: "1000", listeners: Ok(vec![l(42, "0", GW)]) };
-        assert_eq!(verify_gateway(&q, 5476, Path::new(ROOT)), Err(IdentityError::OwnerMismatch { pid: 42 }));
+        let q = Mock::new("1000", Ok(vec![l(42, "0", GW)]));
+        assert_eq!(verify_gateway(&q, 5476, &roots()), Err(IdentityError::OwnerMismatch { pid: 42 }));
         // Every listener must pass: one impostor next to the gateway is refused.
-        let q = Mock { me: "1000", listeners: Ok(vec![l(42, "1000", GW), l(7, "1001", GW)]) };
-        assert_eq!(verify_gateway(&q, 5476, Path::new(ROOT)), Err(IdentityError::OwnerMismatch { pid: 7 }));
+        let q = Mock::new("1000", Ok(vec![l(42, "1000", GW), l(7, "1001", GW)]));
+        assert_eq!(verify_gateway(&q, 5476, &roots()), Err(IdentityError::OwnerMismatch { pid: 7 }));
     }
 
     #[test]
     fn wrong_executable_fails_closed() {
-        let q = Mock { me: "1000", listeners: Ok(vec![l(9, "1000", "/usr/bin/python3")]) };
-        let err = verify_gateway(&q, 5476, Path::new(ROOT)).unwrap_err();
+        let q = Mock::new("1000", Ok(vec![l(9, "1000", "/usr/bin/python3")]));
+        let err = verify_gateway(&q, 5476, &roots()).unwrap_err();
         assert!(matches!(err, IdentityError::NotGateway { pid: 9, .. }));
         assert!(err.to_string().starts_with(IDENTITY_FAILED));
-        let q = Mock { me: "1000", listeners: Ok(vec![l(9, "1000", "/home/u/.kiro/crew-python/bin/node")]) };
-        assert!(matches!(verify_gateway(&q, 5476, Path::new(ROOT)), Err(IdentityError::NotGateway { .. })));
+        let q = Mock::new("1000", Ok(vec![l(9, "1000", "/home/u/.kiro/crew-python/bin/node")]));
+        assert!(matches!(verify_gateway(&q, 5476, &roots()), Err(IdentityError::NotGateway { .. })));
     }
 
     #[test]
     fn query_failure_and_no_listener_fail_closed() {
-        let q = Mock { me: "1000", listeners: Err("denied".into()) };
-        assert_eq!(verify_gateway(&q, 5476, Path::new(ROOT)), Err(IdentityError::Query("denied".into())));
-        let q = Mock { me: "1000", listeners: Ok(vec![]) };
-        assert_eq!(verify_gateway(&q, 5476, Path::new(ROOT)), Err(IdentityError::NoListener));
+        let q = Mock::new("1000", Err("denied".into()));
+        assert_eq!(verify_gateway(&q, 5476, &roots()), Err(IdentityError::Query("denied".into())));
+        let q = Mock::new("1000", Ok(vec![]));
+        assert_eq!(verify_gateway(&q, 5476, &roots()), Err(IdentityError::NoListener));
     }
 
     #[test]
@@ -496,6 +824,93 @@ mod tests {
             true
         ));
         assert!(gateway_exe_allowed(Path::new("/users/u/.kiro/crew/kirocrew.exe"), Path::new("/Users/U/.kiro"), true));
+    }
+
+    // The Windows desktop install (user report, Companion 0.3.9): the gateway
+    // is the app's bundled python.exe. Paths written with `/` so the test runs
+    // on every host; Windows folds case.
+    const APP: &str = "/C:/Users/U/AppData/Local/Programs/KiroCrew";
+    const BUNDLED: &str =
+        "/C:/Users/U/AppData/Local/Programs/KiroCrew/resources/backend-dist/kirocrew-backend/python.exe";
+
+    fn desktop() -> GatewayRoots {
+        GatewayRoots { install_root: PathBuf::from("/C:/Users/U/.kiro"), app_roots: vec![PathBuf::from(APP)] }
+    }
+
+    #[test]
+    fn desktop_bundled_gateway_passes() {
+        // Spawned by the app.
+        let mut q = Mock::new("S-1-5-21-1", Ok(vec![l(20240, "S-1-5-21-1", BUNDLED)]));
+        q.ancestors = vec!["/c:/users/u/appdata/local/programs/kirocrew/Kiro Crew.exe"];
+        assert_eq!(verify_gateway_with(&q, 5476, &desktop(), true), Ok(20240));
+        // A launcher shim inside the bundle is skipped on the way up.
+        q.ancestors = vec![
+            "/C:/Users/U/AppData/Local/Programs/KiroCrew/resources/backend-dist/kirocrew-backend/kirocrew.exe",
+            "/C:/Users/U/AppData/Local/Programs/KiroCrew/KiroCrew.exe",
+        ];
+        assert_eq!(verify_gateway_with(&q, 5476, &desktop(), true), Ok(20240));
+        // The app quit: its executable is still in the install directory.
+        q.ancestors = vec![];
+        q.files = vec!["Uninstall Kiro Crew.exe", "Kiro Crew.exe", "ffmpeg.dll"];
+        assert_eq!(verify_gateway_with(&q, 5476, &desktop(), true), Ok(20240));
+        // bin/ layout and pythonw too.
+        let alt = "/C:/Users/U/AppData/Local/Programs/KiroCrew/resources/backend-dist/kirocrew-backend-x64/bin/pythonw.exe";
+        let q = Mock { ancestors: vec!["/C:/Users/U/AppData/Local/Programs/KiroCrew/Kiro Crew.exe"], ..Mock::new("S", Ok(vec![l(1, "S", alt)])) };
+        assert_eq!(verify_gateway_with(&q, 5476, &desktop(), true), Ok(1));
+    }
+
+    #[test]
+    fn other_pythons_fail_closed_with_a_reason() {
+        let reason = |q: &Mock| match verify_gateway_with(q, 5476, &desktop(), true) {
+            Err(IdentityError::NotGateway { reason, .. }) => reason,
+            other => panic!("expected NotGateway, got {other:?}"),
+        };
+        // Another directory.
+        let q = Mock::new("S", Ok(vec![l(5, "S", "/C:/Python312/python.exe")]));
+        assert!(reason(&q).contains("outside the Kiro Crew install root and the Kiro Crew app"), "{}", reason(&q));
+        // Inside the app, but not the bundle.
+        let q = Mock::new("S", Ok(vec![l(5, "S", "/C:/Users/U/AppData/Local/Programs/KiroCrew/python.exe")]));
+        assert!(reason(&q).contains("not in resources"), "{}", reason(&q));
+        let q = Mock::new("S", Ok(vec![l(5, "S", "/C:/Users/U/AppData/Local/Programs/KiroCrew/resources/backend-dist/other/python.exe")]));
+        assert!(reason(&q).contains("not in resources"));
+        // Not an interpreter name.
+        let q = Mock::new("S", Ok(vec![l(5, "S", "/C:/Users/U/AppData/Local/Programs/KiroCrew/resources/backend-dist/kirocrew-backend/node.exe")]));
+        assert!(reason(&q).contains("'node.exe'"));
+        // A python copied into the bundle but started by something else.
+        let mut q = Mock::new("S", Ok(vec![l(5, "S", BUNDLED)]));
+        q.ancestors = vec!["/C:/Windows/System32/cmd.exe"];
+        q.files = vec!["Kiro Crew.exe"];
+        assert!(reason(&q).contains("started by"), "{}", reason(&q));
+        // Parent gone and no app executable next to it.
+        q.ancestors = vec![];
+        q.files = vec!["Uninstall Kiro Crew.exe", "evil.exe"];
+        assert!(reason(&q).contains("no Kiro Crew app executable"));
+        // No desktop install known.
+        let q = Mock::new("S", Ok(vec![l(5, "S", BUNDLED)]));
+        let none = GatewayRoots { install_root: PathBuf::from("/C:/Users/U/.kiro"), app_roots: vec![] };
+        match verify_gateway_with(&q, 5476, &none, true) {
+            Err(IdentityError::NotGateway { reason, .. }) => assert!(reason.contains("no Kiro Crew desktop install")),
+            other => panic!("{other:?}"),
+        }
+        // The message the log shows carries the reason.
+        let q = Mock::new("S", Ok(vec![l(5, "S", "/C:/Python312/python.exe")]));
+        let msg = verify_gateway_with(&q, 5476, &desktop(), true).unwrap_err().to_string();
+        assert!(msg.starts_with(IDENTITY_FAILED) && msg.contains("): outside"), "{msg}");
+    }
+
+    #[test]
+    fn bundled_gateway_of_another_user_fails_closed() {
+        let mut q = Mock::new("S-1-5-21-1", Ok(vec![l(20240, "S-1-5-21-2", BUNDLED)]));
+        q.ancestors = vec!["/C:/Users/U/AppData/Local/Programs/KiroCrew/Kiro Crew.exe"];
+        assert_eq!(verify_gateway_with(&q, 5476, &desktop(), true), Err(IdentityError::OwnerMismatch { pid: 20240 }));
+    }
+
+    #[test]
+    fn uninstall_entry_names() {
+        assert!(is_crew_display_name("Kiro Crew 0.12.4"));
+        assert!(is_crew_display_name("KiroCrew"));
+        assert!(!is_crew_display_name("Kiro"));
+        assert!(!is_crew_display_name("My Kiro Crew helper"));
     }
 
     #[test]

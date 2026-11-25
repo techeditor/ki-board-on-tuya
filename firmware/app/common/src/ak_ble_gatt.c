@@ -2,10 +2,10 @@
  * @file ak_ble_gatt.c
  * @brief BLE GATT transport backend for the Agentic Keyboard product firmware.
  *
- * See ak_ble_gatt.h. Ported from the real-hardware-verified FP-2
- * ble_gatt_link probe (see git tag archive/feature-probes):
+ * See ak_ble_gatt.h. Ported from an earlier internal prototype that was
+ * verified on real hardware (FP-2 ble_gatt_link):
  *
- *   - advertise local name "Agentic Keyboard-XXXXXX" + service UUID,
+ *   - advertise local name "Ki-board-XXXXXX" + service UUID,
  *   - use Tuya's built-in BLE common service selected by TAL,
  *   - NOTIFY JSONL frames via tal_ble_server_common_send() only while subscribed,
  *   - receive companion writes in TAL_BLE_EVT_WRITE_REQ -> write_report.report
@@ -36,7 +36,7 @@
  * BLE-specific module can query state without crossing that SDK packaging bug. */
 extern int ble_gap_adv_active(void);
 
-#define BLE_NAME_PREFIX          "Agentic Keyboard-"
+#define BLE_NAME_PREFIX          "Ki-board-" /* Ki-board-D3E4F5; 15 chars, scan response 17 of 31 bytes */
 #define BLE_NAME_SUFFIX_HEX_LEN  6U
 #define BLE_NAME_MAX_LEN         ((sizeof(BLE_NAME_PREFIX) - 1U) + BLE_NAME_SUFFIX_HEX_LEN)
 #define SERVER_MTU                 247U
@@ -76,7 +76,7 @@ static uint8_t s_adv_data[] = {
     (uint8_t)(AK_BLE_GATT_SERVICE_UUID >> 8),
 };
 
-/* Scan response is generated at runtime as Agentic Keyboard-XXXXXX,
+/* Scan response is generated at runtime as Ki-board-XXXXXX,
  * where XXXXXX normally comes from the device Wi-Fi MAC suffix. */
 static char    s_ble_name[BLE_NAME_MAX_LEN + 1U];
 static uint8_t s_scan_rsp[BLE_NAME_MAX_LEN + 2U];
@@ -539,6 +539,16 @@ const char *ak_ble_gatt_device_name(void)
 {
     prepare_device_name();
     return s_ble_name;
+}
+
+bool ak_ble_gatt_address(uint8_t out[6])
+{
+    TKL_BLE_GAP_ADDR_T address = {0};
+    if (tkl_ble_gap_address_get(&address) != OPRT_OK || !device_address_valid(address.addr)) {
+        return false;
+    }
+    memcpy(out, address.addr, 6U);
+    return true;
 }
 
 const char *ak_ble_gatt_link_state_str(ak_ble_link_state_t state)

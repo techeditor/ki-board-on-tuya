@@ -32,7 +32,8 @@ pub fn encode_json_line(payload: &Value) -> Result<Vec<u8>, String> {
 
 /// Companion -> board handshake.
 pub fn hello_payload() -> Value {
-    serde_json::json!({
+    #[allow(unused_mut)]
+    let mut hello = serde_json::json!({
         "v": PROTOCOL_VERSION,
         "type": "hello",
         "payload": {
@@ -41,7 +42,8 @@ pub fn hello_payload() -> Value {
             // PC ASR text comes back as input_restore: the keyboard may wait in ②.
             "pc_asr": true
         }
-    })
+    });
+    hello
 }
 
 /// Companion -> board graceful disconnect. Plain UART has no hardware
@@ -96,12 +98,15 @@ pub fn config_payload(voice_engine: &str) -> Value {
 /// PC -> board: synchronize optional display aliases for slots A, B, and C,
 /// and the name of the Crew session bound to each (Settings > Bind session
 /// page; empty = not bound, clipped to 48 bytes). Empty aliases tell the AK
-/// to render the corresponding default letter.
-pub fn bindings_payload(aliases: &[String], names: &[String]) -> Value {
+/// to render the corresponding default letter. `mode_a..c` is the slot's voice
+/// input mode (`kbd` | `pc`).
+pub fn bindings_payload(aliases: &[String], names: &[String], pc: [bool; 3]) -> Value {
     let alias = |index: usize| aliases.get(index).map(String::as_str).unwrap_or("");
     let name = |index: usize| {
         crate::menu_wire::clip_text(names.get(index).map(String::as_str).unwrap_or(""), BIND_NAME_MAX)
     };
+    // Voice input mode of the slot: "pc" = typed into the PC input box, else "kbd".
+    let mode = |index: usize| if pc[index] { "pc" } else { "kbd" };
     serde_json::json!({
         "v": PROTOCOL_VERSION,
         "type": "bindings",
@@ -111,7 +116,10 @@ pub fn bindings_payload(aliases: &[String], names: &[String]) -> Value {
             "alias_c": alias(2),
             "name_a": name(0),
             "name_b": name(1),
-            "name_c": name(2)
+            "name_c": name(2),
+            "mode_a": mode(0),
+            "mode_b": mode(1),
+            "mode_c": mode(2)
         }
     })
 }
@@ -168,13 +176,16 @@ pub struct DeviceSettingsUpdate {
     pub led_auto_off_s: Option<u32>,
     #[serde(default)]
     pub font_size: Option<u8>,
+    /// Chat ghost animation on the keyboard sidebar (FR-14).
+    #[serde(default)]
+    pub animation: Option<bool>,
 }
 
 /// Auto power-off delays the keyboard offers (ak_led_policy.c).
 pub const LED_AUTO_OFF_S: [u32; 4] = [30, 60, 300, 900];
 
 /// LCD font sizes in px the keyboard offers (ak_text.h).
-pub const FONT_SIZES: [u8; 2] = [12, 16];
+pub const FONT_SIZES: [u8; 3] = [12, 14, 16];
 
 impl DeviceSettingsUpdate {
     /// Same ranges as the firmware, so the UI gets an error instead of a
@@ -186,7 +197,8 @@ impl DeviceSettingsUpdate {
             && self.voice_mode.is_none()
             && self.led_power.is_none()
             && self.led_auto_off_s.is_none()
-            && self.font_size.is_none();
+            && self.font_size.is_none()
+            && self.animation.is_none();
         if empty {
             return Err("no setting to change".into());
         }
@@ -209,7 +221,7 @@ impl DeviceSettingsUpdate {
             return Err("led_auto_off_s must be 30, 60, 300 or 900".into());
         }
         if self.font_size.is_some_and(|s| !FONT_SIZES.contains(&s)) {
-            return Err("font_size must be 12 or 16".into());
+            return Err("font_size must be 12, 14 or 16".into());
         }
         Ok(())
     }
@@ -238,6 +250,9 @@ pub fn device_settings_update_payload(u: &DeviceSettingsUpdate) -> Value {
     }
     if let Some(v) = u.font_size {
         p.insert("font_size".into(), v.into());
+    }
+    if let Some(v) = u.animation {
+        p.insert("animation".into(), v.into());
     }
     serde_json::json!({ "v": PROTOCOL_VERSION, "type": "device_settings", "payload": Value::Object(p) })
 }
@@ -313,6 +328,23 @@ pub fn license_payload(uuid: &str, authkey: &str) -> Value {
     })
 }
 
+/// A Tuya product ID: 16 chars of [a-z0-9], not the all-'x' template value.
+pub fn pid_is_valid(pid: &str) -> bool {
+    pid.len() == 16
+        && pid.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && !pid.bytes().all(|c| c == b'x')
+}
+
+/// PC -> board (USB only): write the Tuya product ID once, while the keyboard
+/// has none. The board never echoes it and never replaces or clears one.
+pub fn pid_payload(pid: &str) -> Value {
+    serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "type": "pid",
+        "payload": { "pid": pid }
+    })
+}
+
 /// PC -> board: explicitly request masked License diagnostics over USB/UART0.
 pub fn license_read_payload() -> Value {
     serde_json::json!({
@@ -377,6 +409,10 @@ pub enum KeyAction {
     ModelToggle,
     /// K4 single in standby while ESC'd requests wait: show them again.
     MenuRecall,
+    /// FR-03: the keyboard opens its scene picker (board-local; ignored here).
+    SceneMenu,
+    /// FR-03 limited shortcut N (1-based index into `scene::SHORTCUTS`).
+    Shortcut(u8),
     Unknown,
 }
 
@@ -394,7 +430,11 @@ impl KeyAction {
             "model_menu" => KeyAction::ModelMenu,
             "model_toggle" => KeyAction::ModelToggle,
             "menu_recall" => KeyAction::MenuRecall,
+            "scene_menu" => KeyAction::SceneMenu,
             _ => {
+                if let Some(n) = crate::scene::shortcut_index(s) {
+                    return KeyAction::Shortcut(n);
+                }
                 // chatN / instanceN with a single digit 1..=9.
                 if let Some(d) = s.strip_prefix("chat") {
                     if let Ok(n) = d.parse::<u8>() {
@@ -430,6 +470,10 @@ impl KeyAction {
             KeyAction::ModelMenu => "model_menu".into(),
             KeyAction::ModelToggle => "model_toggle".into(),
             KeyAction::MenuRecall => "menu_recall".into(),
+            KeyAction::SceneMenu => "scene_menu".into(),
+            KeyAction::Shortcut(n) => crate::scene::SHORTCUTS
+                .get((n as usize).wrapping_sub(1))
+                .map_or("unknown".into(), |s| (*s).to_string()),
             KeyAction::Unknown => "unknown".into(),
         }
     }
@@ -493,6 +537,10 @@ pub struct KeyPayload {
     pub action: KeyAction,
     #[serde(default)]
     pub held_ms: u32,
+    /// Gesture frames: how long the firmware waited after the deciding release
+    /// before reporting (the double-click window; 0 = reported at once).
+    #[serde(default)]
+    pub wait_ms: u32,
     /// Resolved action the firmware ran for this gesture (`chatN`,
     /// `instanceN`, `cancel_char`, `cancel_all`, `confirm`, or a local action
     /// such as `settings`). Absent when the gesture is unbound.
@@ -502,6 +550,9 @@ pub struct KeyPayload {
     /// keyboard, which the Companion sends to the selected chat. Never logged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// `bind:"confirm"`: the chat slot (1..=3) the text is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u8>,
 }
 
 /// `encoder` payload: EC11 rotary step. `detents` is a signed step count
@@ -516,6 +567,10 @@ pub struct EncoderPayload {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoicePayload {
     pub state: VoiceState,
+    /// The chat slot (1..=3) the utterance is for (absent: older firmware, or
+    /// the input strip already holds text and keeps taking words).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u8>,
 }
 
 /// `macro` payload.
@@ -528,6 +583,9 @@ pub struct MacroPayload {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AsrPayload {
     pub text: String,
+    /// The chat slot (1..=3) the text is for; same rule as `VoicePayload::slot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u8>,
 }
 
 /// `voice_source` payload: the board's current voice routing (`cloud`/`system`).
@@ -643,6 +701,16 @@ pub struct LicenseStatusPayload {
     pub state: String,
 }
 
+/// `pid_status` payload: result of a `pid` write. `state` is
+/// "written_reboot_required" or "rejected"; `reason` is "source" / "exists" /
+/// "invalid" / "storage" when rejected. The PID itself is never sent back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PidStatusPayload {
+    pub state: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
 /// `license_info` payload: full UUID plus only the last four AuthKey chars.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LicenseInfoPayload {
@@ -674,6 +742,47 @@ pub struct SystemInfoPayload {
     pub license: String,
 }
 
+/// `device_info` payload: the keyboard's read-only Settings > Device info page.
+/// PID, UUID, AuthKey and License are booleans (set / not set), so no secret can
+/// arrive here: a frame that sends text for one of them does not decode. Fields
+/// the firmware does not send stay `None` / empty and show as "--" in the UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeviceInfoPayload {
+    #[serde(default)]
+    pub fw: String,
+    /// "usb" / "ble" / "none": the link that is talking to the keyboard.
+    #[serde(default)]
+    pub companion: String,
+    #[serde(default)]
+    pub handshake: Option<bool>,
+    /// "active" / "offline" / "inactive".
+    #[serde(default)]
+    pub cloud: String,
+    #[serde(default)]
+    pub wifi_ssid: String,
+    #[serde(default)]
+    pub wifi_ip: String,
+    /// dBm; absent while Wi-Fi is not connected.
+    #[serde(default)]
+    pub wifi_rssi: Option<i32>,
+    #[serde(default)]
+    pub wifi_mac: String,
+    #[serde(default)]
+    pub ble_mac: String,
+    #[serde(default)]
+    pub ble_name: String,
+    #[serde(default)]
+    pub ble_paired: Option<bool>,
+    #[serde(default)]
+    pub pid: Option<bool>,
+    #[serde(default)]
+    pub uuid: Option<bool>,
+    #[serde(default)]
+    pub authkey: Option<bool>,
+    #[serde(default)]
+    pub license: Option<bool>,
+}
+
 /// `device_settings_state` payload: the values currently applied by the AK.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceSettingsPayload {
@@ -690,12 +799,19 @@ pub struct DeviceSettingsPayload {
     /// Voice mode "asr" / "chat" (FR-02); absent from older firmware.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_mode: Option<String>,
-    /// LCD font size in px (12 / 16); absent from older firmware.
+    /// LCD font size in px (12 / 14 / 16); absent from older firmware.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<u8>,
+    /// Chat ghost animation on / off (FR-14); absent from older firmware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<bool>,
     /// Status only (FR-02): "present" / "missing", never the License itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /// Status only: "present" / "pending" (written, restart to apply) /
+    /// "missing"; never the PID itself. Absent from older firmware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<String>,
     /// Status only (FR-02): whether the keyboard holds a BLE pairing key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ble_paired: Option<bool>,
@@ -764,6 +880,59 @@ pub struct HelloPayload {
     pub version: String,
 }
 
+/// FR-03: keyboard scene slots (0 = current from the Companion, 1..=4 favourites).
+pub const SCENE_SLOTS: usize = 5;
+
+/// One keyboard scene slot summary; an empty slot has an empty `id`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SceneSlotInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub rev: u32,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `scene_state` payload (board -> companion). `slots[i]` is slot i.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneStatePayload {
+    pub active: i32,
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default)]
+    pub slots: Vec<SceneSlotInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub req: Option<String>,
+}
+
+/// `scene_data` payload (board -> companion): same fields as `scene_put`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneDataPayload {
+    pub slot: u8,
+    pub id: String,
+    pub rev: u32,
+    pub name: String,
+    pub km: String,
+    pub voice: String,
+    pub led: String,
+    pub led_off_s: u32,
+    pub idle: String,
+    pub home: String,
+}
+
+/// `scene_switch` / `scene_del` / `scene_get` for keyboard slot 0..=4
+/// (`scene_put` is built by `scene::scene_put_payload`).
+pub fn scene_slot_payload(kind: &str, slot: u8) -> Value {
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": kind, "payload": { "slot": slot } })
+}
+
+pub fn scene_list_payload() -> Value {
+    serde_json::json!({ "v": PROTOCOL_VERSION, "type": "scene_list" })
+}
+
 /// `hello_ack` payload (board -> companion).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HelloAckPayload {
@@ -801,6 +970,8 @@ pub enum Inbound {
     ActivationStatus { seq: Option<u64>, payload: ActivationStatusPayload },
     /// The board's device-license provisioning result.
     LicenseStatus { seq: Option<u64>, payload: LicenseStatusPayload },
+    /// The result of writing the Tuya product ID.
+    PidStatus { seq: Option<u64>, payload: PidStatusPayload },
     /// A new BLE pairing key from the keyboard (USB only, sent once).
     BlePairKey { seq: Option<u64>, payload: BlePairKeyPayload },
     /// The keyboard's pairing window (open / closed / confirming).
@@ -809,12 +980,18 @@ pub enum Inbound {
     LicenseInfo { seq: Option<u64>, payload: LicenseInfoPayload },
     /// Consolidated firmware/network/radio diagnostics emitted on UART0.
     SystemInfo { seq: Option<u64>, payload: SystemInfoPayload },
+    /// Read-only device facts (Wi-Fi, Bluetooth, set / not set); USB and BLE.
+    DeviceInfo { seq: Option<u64>, payload: DeviceInfoPayload },
     /// The volume and brightness currently applied by the board.
     DeviceSettings { seq: Option<u64>, payload: DeviceSettingsPayload },
     /// The user's answer to an LCD menu (physical keys on the keyboard).
     MenuResult { seq: Option<u64>, payload: MenuResultPayload },
     /// Settings > Bind session on the keyboard picked a slot (1..3).
     BindSession { seq: Option<u64>, payload: BindSessionPayload },
+    /// FR-03: the keyboard's scene slots and current scene.
+    SceneState { seq: Option<u64>, payload: SceneStatePayload },
+    /// FR-03: one keyboard scene slot in full (answer to `scene_get`).
+    SceneData { seq: Option<u64>, payload: SceneDataPayload },
     /// Local firmware update status / transfer ack (USB only).
     OtaStatus(OtaStatusPayload),
     OtaAck(OtaAckPayload),
@@ -881,6 +1058,9 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "license_status" => serde_json::from_value::<LicenseStatusPayload>(payload)
             .ok()
             .map(|p| Inbound::LicenseStatus { seq, payload: p }),
+        "pid_status" => serde_json::from_value::<PidStatusPayload>(payload)
+            .ok()
+            .map(|p| Inbound::PidStatus { seq, payload: p }),
         "ble_pair_key" => serde_json::from_value::<BlePairKeyPayload>(payload)
             .ok()
             .map(|p| Inbound::BlePairKey { seq, payload: p }),
@@ -893,6 +1073,9 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
         "system_info" => serde_json::from_value::<SystemInfoPayload>(payload)
             .ok()
             .map(|p| Inbound::SystemInfo { seq, payload: p }),
+        "device_info" => serde_json::from_value::<DeviceInfoPayload>(payload)
+            .ok()
+            .map(|p| Inbound::DeviceInfo { seq, payload: p }),
         "device_settings_state" => serde_json::from_value::<DeviceSettingsPayload>(payload)
             .ok()
             .map(|p| Inbound::DeviceSettings { seq, payload: p }),
@@ -903,6 +1086,14 @@ pub fn decode_value(value: &Value) -> Option<Inbound> {
             .ok()
             .filter(|p| (1..=3).contains(&p.slot))
             .map(|p| Inbound::BindSession { seq, payload: p }),
+        "scene_state" => serde_json::from_value::<SceneStatePayload>(payload)
+            .ok()
+            .filter(|p| p.slots.len() <= SCENE_SLOTS && (-1..SCENE_SLOTS as i32).contains(&p.active))
+            .map(|p| Inbound::SceneState { seq, payload: p }),
+        "scene_data" => serde_json::from_value::<SceneDataPayload>(payload)
+            .ok()
+            .filter(|p| (p.slot as usize) < SCENE_SLOTS)
+            .map(|p| Inbound::SceneData { seq, payload: p }),
         "ota_status" => serde_json::from_value::<OtaStatusPayload>(payload)
             .ok()
             .map(Inbound::OtaStatus),
@@ -987,9 +1178,9 @@ mod tests {
     #[test]
     fn voice_cancel_decodes_and_unknown_states_stay_unknown() {
         let f = decode_line(r#"{"v":1,"seq":4,"type":"voice","payload":{"state":"cancel"}}"#).unwrap();
-        assert!(matches!(f, Inbound::Voice { payload: VoicePayload { state: VoiceState::Cancel }, .. }));
+        assert!(matches!(f, Inbound::Voice { payload: VoicePayload { state: VoiceState::Cancel, slot: None }, .. }));
         let f = decode_line(r#"{"v":1,"type":"voice","payload":{"state":"later"}}"#).unwrap();
-        assert!(matches!(f, Inbound::Voice { payload: VoicePayload { state: VoiceState::Unknown }, .. }));
+        assert!(matches!(f, Inbound::Voice { payload: VoicePayload { state: VoiceState::Unknown, slot: None }, .. }));
     }
 
     #[test]
@@ -1010,7 +1201,7 @@ mod tests {
         assert_eq!(display["payload"]["state"], "running");
         assert_eq!(led_payload("on", "green")["payload"]["color"], "green");
         assert_eq!(config_payload("system")["payload"]["voice_engine"], "system");
-        let aliases = bindings_payload(&["Plan".into(), "".into()], &["".into(), "Ki-board Mate".into()]);
+        let aliases = bindings_payload(&["Plan".into(), "".into()], &["".into(), "Ki-board Mate".into()], [false, true, false]);
         assert_eq!(aliases["type"], "bindings");
         assert_eq!(aliases["payload"]["alias_a"], "Plan");
         assert_eq!(aliases["payload"]["alias_b"], "");
@@ -1018,7 +1209,9 @@ mod tests {
         assert_eq!(aliases["payload"]["name_a"], "");
         assert_eq!(aliases["payload"]["name_b"], "Ki-board Mate");
         assert_eq!(aliases["payload"]["name_c"], "");
-        let long = bindings_payload(&[], &["会话".repeat(20)]);
+        assert_eq!(aliases["payload"]["mode_a"], "kbd");
+        assert_eq!(aliases["payload"]["mode_b"], "pc");
+        let long = bindings_payload(&[], &["会话".repeat(20)], [false; 3]);
         assert!(long["payload"]["name_a"].as_str().unwrap().len() <= BIND_NAME_MAX);
         assert!(matches!(
             decode_line(r#"{"v":1,"seq":4,"type":"bind_session","payload":{"slot":2}}"#),
@@ -1051,8 +1244,10 @@ mod tests {
                     id: "k1".into(),
                     action: KeyAction::Down,
                     held_ms: 0,
+                    wait_ms: 0,
                     bind: None,
                     text: None,
+                    slot: None,
                 },
             }
         );
@@ -1105,6 +1300,7 @@ mod tests {
                 seq: None,
                 payload: VoicePayload {
                     state: VoiceState::Start,
+                    slot: None,
                 },
             }
         );
@@ -1157,7 +1353,7 @@ mod tests {
             asr,
             Inbound::Asr {
                 seq: Some(11),
-                payload: AsrPayload { text: "hello world".into() },
+                payload: AsrPayload { text: "hello world".into(), slot: None },
             }
         );
         let vs = decode_line(
@@ -1227,20 +1423,20 @@ mod tests {
         assert!(f.to_string().find("pass").is_none());
 
         let list = decode_line(
-            r#"{"v":1,"seq":4,"type":"wifi_list_state","payload":{"max":10,"entries":[{"ssid":"Home","sec":"wpa2","current":true},{"ssid":"Cafe","sec":"unknown","current":false}]}}"#,
+            r#"{"v":1,"seq":4,"type":"wifi_list_state","payload":{"max":8,"entries":[{"ssid":"Home","sec":"wpa2","current":true},{"ssid":"Cafe","sec":"unknown","current":false}]}}"#,
         )
         .unwrap();
         match list {
             Inbound::WifiList { seq, payload } => {
                 assert_eq!(seq, Some(4));
-                assert_eq!(payload.max, 10);
+                assert_eq!(payload.max, 8);
                 assert_eq!(payload.entries.len(), 2);
                 assert!(payload.entries[0].current);
                 assert_eq!(payload.entries[1].ssid, "Cafe");
             }
             other => panic!("unexpected {other:?}"),
         }
-        let empty = decode_line(r#"{"v":1,"type":"wifi_list_state","payload":{"max":10,"entries":[]}}"#).unwrap();
+        let empty = decode_line(r#"{"v":1,"type":"wifi_list_state","payload":{"max":8,"entries":[]}}"#).unwrap();
         assert!(matches!(empty, Inbound::WifiList { ref payload, .. } if payload.entries.is_empty()));
     }
 
@@ -1353,7 +1549,7 @@ mod tests {
     #[test]
     fn system_info_decodes_all_feedback_fields() {
         let info = decode_line(
-            r#"{"v":1,"seq":15,"type":"system_info","payload":{"fw":"0.1.1","transport":"dual","wifi_name":"MyAP","wifi_state":"connected","ble_name":"Agentic Keyboard-A1B2C3","ble_state":"advertising","cloud":"ready","license":"present"}}"#,
+            r#"{"v":1,"seq":15,"type":"system_info","payload":{"fw":"0.1.1","transport":"dual","wifi_name":"MyAP","wifi_state":"connected","ble_name":"Ki-board-A1B2C3","ble_state":"advertising","cloud":"ready","license":"present"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -1365,13 +1561,88 @@ mod tests {
                     transport: "dual".into(),
                     wifi_name: "MyAP".into(),
                     wifi_state: "connected".into(),
-                    ble_name: "Agentic Keyboard-A1B2C3".into(),
+                    ble_name: "Ki-board-A1B2C3".into(),
                     ble_state: "advertising".into(),
                     cloud: "ready".into(),
                     license: "present".into(),
                 },
             }
         );
+    }
+
+    #[test]
+    fn device_info_decodes_the_firmware_example_frame() {
+        // The example frame from the firmware report (chat-93, 0.3.98) and protocol.md.
+        let frame = decode_line(
+            r#"{"v":1,"seq":9,"type":"device_info","payload":{"fw":"0.3.98","companion":"usb","handshake":true,"cloud":"active","wifi_ssid":"Office-5G","wifi_ip":"192.168.10.23","wifi_rssi":-61,"wifi_mac":"A0:B1:C2:D3:E4:F5","ble_mac":"A0:B1:C2:D3:E4:F6","ble_name":"Ki-board-D3E4F5","ble_paired":true,"pid":true,"uuid":true,"authkey":true,"license":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            Inbound::DeviceInfo {
+                seq: Some(9),
+                payload: DeviceInfoPayload {
+                    fw: "0.3.98".into(),
+                    companion: "usb".into(),
+                    handshake: Some(true),
+                    cloud: "active".into(),
+                    wifi_ssid: "Office-5G".into(),
+                    wifi_ip: "192.168.10.23".into(),
+                    wifi_rssi: Some(-61),
+                    wifi_mac: "A0:B1:C2:D3:E4:F5".into(),
+                    ble_mac: "A0:B1:C2:D3:E4:F6".into(),
+                    ble_name: "Ki-board-D3E4F5".into(),
+                    ble_paired: Some(true),
+                    pid: Some(true),
+                    uuid: Some(true),
+                    authkey: Some(true),
+                    license: Some(true),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn device_info_without_wifi_has_no_rssi_and_keeps_the_macs() {
+        // Not on Wi-Fi: empty SSID / IP, no wifi_rssi, MACs still there; nothing set yet.
+        let frame = decode_line(
+            r#"{"v":1,"seq":10,"type":"device_info","payload":{"fw":"0.3.98","companion":"none","handshake":false,"cloud":"inactive","wifi_ssid":"","wifi_ip":"","wifi_mac":"A0:B1:C2:D3:E4:F5","ble_mac":"","ble_name":"","ble_paired":false,"pid":false,"uuid":false,"authkey":false,"license":false}}"#,
+        )
+        .unwrap();
+        let Inbound::DeviceInfo { payload, .. } = frame else { panic!("not a device_info") };
+        assert_eq!(payload.wifi_rssi, None);
+        assert_eq!(payload.wifi_ssid, "");
+        assert_eq!(payload.wifi_mac, "A0:B1:C2:D3:E4:F5");
+        assert_eq!(payload.cloud, "inactive");
+        assert_eq!(payload.license, Some(false));
+    }
+
+    #[test]
+    fn device_info_missing_fields_are_unknown_not_false() {
+        // A shorter frame (older or newer firmware): absent flags are None, so the UI shows "--"
+        // instead of claiming "not set".
+        let frame = decode_line(r#"{"v":1,"type":"device_info","payload":{"fw":"0.3.98"}}"#).unwrap();
+        let Inbound::DeviceInfo { seq, payload } = frame else { panic!("not a device_info") };
+        assert_eq!(seq, None);
+        assert_eq!(payload.pid, None);
+        assert_eq!(payload.license, None);
+        assert_eq!(payload.ble_paired, None);
+        assert_eq!(payload.handshake, None);
+    }
+
+    #[test]
+    fn device_info_never_carries_a_secret() {
+        // The frame has booleans only. Text where a flag belongs is not decoded at all, so a
+        // secret in `authkey` / `uuid` / `pid` / `license` can never reach the log or the UI.
+        for field in ["pid", "uuid", "authkey", "license", "ble_paired"] {
+            let line = format!(
+                r#"{{"v":1,"type":"device_info","payload":{{"fw":"0.3.98","{field}":"SECRET-VALUE-123"}}}}"#
+            );
+            assert!(
+                !matches!(decode_line(&line), Some(Inbound::DeviceInfo { .. })),
+                "a text {field} must not decode as device_info"
+            );
+        }
     }
 
     #[test]
@@ -1394,6 +1665,51 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn pid_payload_status_and_validation() {
+        assert!(pid_is_valid("abcdefgh01234567"));
+        assert!(!pid_is_valid(""));
+        assert!(!pid_is_valid("abcdefgh0123456"));
+        assert!(!pid_is_valid("abcdefgh012345678"));
+        assert!(!pid_is_valid("ABCDEFGH01234567"));
+        assert!(!pid_is_valid("abcdefgh-1234567"));
+        assert!(!pid_is_valid("xxxxxxxxxxxxxxxx"));
+        let p = pid_payload("abcdefgh01234567");
+        assert_eq!(p["type"], "pid");
+        assert_eq!(p["payload"]["pid"], "abcdefgh01234567");
+
+        let ok = decode_line(
+            r#"{"v":1,"seq":5,"type":"pid_status","payload":{"state":"written_reboot_required"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ok,
+            Inbound::PidStatus {
+                seq: Some(5),
+                payload: PidStatusPayload { state: "written_reboot_required".into(), reason: String::new() },
+            }
+        );
+        let no = decode_line(
+            r#"{"v":1,"seq":6,"type":"pid_status","payload":{"state":"rejected","reason":"exists"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            no,
+            Inbound::PidStatus {
+                seq: Some(6),
+                payload: PidStatusPayload { state: "rejected".into(), reason: "exists".into() },
+            }
+        );
+        let st = decode_line(
+            r#"{"v":1,"seq":7,"type":"device_settings_state","payload":{"volume":60,"brightness":80,"pid":"pending"}}"#,
+        )
+        .unwrap();
+        match st {
+            Inbound::DeviceSettings { payload, .. } => assert_eq!(payload.pid.as_deref(), Some("pending")),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -1428,6 +1744,16 @@ mod tests {
         }
         let down = device_settings_update_payload(&DeviceSettingsUpdate { font_size: Some(12), ..Default::default() });
         assert_eq!(down["payload"], serde_json::json!({ "font_size": 12 }));
+        let anim = decode_line(
+            r#"{"v":1,"seq":20,"type":"device_settings_state","payload":{"volume":60,"brightness":80,"animation":false}}"#,
+        )
+        .unwrap();
+        match anim {
+            Inbound::DeviceSettings { payload, .. } => assert_eq!(payload.animation, Some(false)),
+            other => panic!("{other:?}"),
+        }
+        let down = device_settings_update_payload(&DeviceSettingsUpdate { animation: Some(true), ..Default::default() });
+        assert_eq!(down["payload"], serde_json::json!({ "animation": true }));
         assert_eq!(prov_open_payload()["type"], "prov_open");
         assert_eq!(ble_unpair_payload()["type"], "ble_unpair");
     }
@@ -1442,8 +1768,10 @@ mod tests {
             led_power: Some("auto".into()),
             led_auto_off_s: Some(300),
             font_size: Some(16),
+            animation: Some(false),
         };
         assert_eq!(ok.validate(), Ok(()));
+        assert_eq!(DeviceSettingsUpdate { font_size: Some(14), ..Default::default() }.validate(), Ok(()));
         for bad in [
             DeviceSettingsUpdate { volume: Some(101), ..Default::default() },
             DeviceSettingsUpdate { brightness: Some(5), ..Default::default() },
@@ -1451,7 +1779,7 @@ mod tests {
             DeviceSettingsUpdate { voice_mode: Some("yolo".into()), ..Default::default() },
             DeviceSettingsUpdate { led_power: Some("Auto".into()), ..Default::default() },
             DeviceSettingsUpdate { led_auto_off_s: Some(45), ..Default::default() },
-            DeviceSettingsUpdate { font_size: Some(14), ..Default::default() },
+            DeviceSettingsUpdate { font_size: Some(15), ..Default::default() },
             DeviceSettingsUpdate::default(),
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
@@ -1617,6 +1945,7 @@ mod tests {
                 seq: None,
                 payload: VoicePayload {
                     state: VoiceState::Stop,
+                    slot: None,
                 },
             }
         );
@@ -1676,5 +2005,28 @@ mod tests {
         assert!(matches!(f, Some(Inbound::Key { payload, .. }) if payload.bind == Some(KeyAction::ModelToggle)));
         assert_eq!(serde_json::to_value(KeyAction::ModelMenu).unwrap(), "model_menu");
         assert_eq!(serde_json::to_value(KeyAction::ModelToggle).unwrap(), "model_toggle");
+    }
+
+    #[test]
+    fn scene_frames() {
+        let f = decode_line(r#"{"v":1,"seq":3,"type":"scene_state","payload":{"active":2,"dirty":false,"slots":[{"id":"","rev":0,"name":""},{"id":"","rev":0,"name":""},{"id":"k3m9x2qa","rev":7,"name":"编程"},{"id":"","rev":0,"name":""},{"id":"","rev":0,"name":""}]}}"#);
+        let Some(Inbound::SceneState { seq: Some(3), payload }) = f else { panic!("{f:?}") };
+        assert_eq!(payload.active, 2);
+        assert_eq!(payload.slots[2].name, "编程");
+        assert!(payload.error.is_none());
+        let f = decode_line(r#"{"v":1,"seq":4,"type":"scene_state","payload":{"active":-1,"dirty":false,"slots":[],"error":"busy","req":"scene_switch"}}"#);
+        assert!(matches!(f, Some(Inbound::SceneState { payload, .. }) if payload.error.as_deref() == Some("busy")));
+        assert!(decode_line(r#"{"v":1,"type":"scene_state","payload":{"active":5,"slots":[]}}"#).is_none());
+        let f = decode_line(r#"{"v":1,"seq":5,"type":"scene_data","payload":{"slot":2,"id":"k3m9x2qa","rev":7,"name":"编程","km":"00112100001222000013230000010002010000000003050400000000","voice":"chat","led":"on","led_off_s":300,"idle":"00000000050003","home":"keys"}}"#);
+        let Some(Inbound::SceneData { payload, .. }) = f else { panic!("{f:?}") };
+        let keys = crate::scene::keys_from_km(&payload.km).unwrap();
+        assert_eq!(keys.k5.kind.as_deref(), Some("voice"));
+        assert!(decode_line(r#"{"v":1,"type":"scene_data","payload":{"slot":5,"id":"","rev":0,"name":"","km":"","voice":"","led":"","led_off_s":0,"idle":"","home":""}}"#).is_none());
+        let sw = scene_slot_payload("scene_switch", 3);
+        assert_eq!((sw["type"].as_str(), sw["payload"]["slot"].as_u64(), sw["v"].as_u64()), (Some("scene_switch"), Some(3), Some(1)));
+        assert_eq!(scene_list_payload()["type"], "scene_list");
+        let f = decode_line(r#"{"v":1,"type":"key","payload":{"id":"enc","action":"double","bind":"scene_menu","held_ms":0}}"#);
+        assert!(matches!(f, Some(Inbound::Key { payload, .. }) if payload.bind == Some(KeyAction::SceneMenu)));
+        assert_eq!(serde_json::to_value(KeyAction::Shortcut(14)).unwrap(), "key_new_chat");
     }
 }

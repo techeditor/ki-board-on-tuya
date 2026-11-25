@@ -49,6 +49,20 @@ ak_ptt_action_t ak_voice_mode_ptt_action(ak_voice_mode_t mode, bool cloud_availa
     return route_is_cloud ? AK_PTT_CLOUD_HOLD : AK_PTT_SYSTEM_DICTATION;
 }
 
+ak_ptt_plan_t ak_voice_ptt_plan(ak_voice_mode_t mode, bool cloud_available, bool route_is_cloud,
+                                bool companion_linked)
+{
+    switch (ak_voice_mode_ptt_action(mode, cloud_available, route_is_cloud)) {
+    case AK_PTT_CLOUD_HOLD:
+        return AK_PTT_PLAN_CLOUD;
+    case AK_PTT_SYSTEM_DICTATION:
+        return companion_linked ? AK_PTT_PLAN_PC : AK_PTT_PLAN_NEED_LINK;
+    case AK_PTT_CHAT_UNAVAILABLE:
+    default:
+        return companion_linked ? AK_PTT_PLAN_CHAT_AS_PC : AK_PTT_PLAN_NEED_LINK;
+    }
+}
+
 void ak_chat_text_reset(ak_chat_text_t *t)
 {
     t->text[0]   = '\0';

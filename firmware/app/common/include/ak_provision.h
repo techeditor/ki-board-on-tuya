@@ -169,10 +169,13 @@ bool ak_provision_rebind_pending(const ak_provision_t *p, uint32_t now_ms);
 bool ak_provision_rebind_resolve(ak_provision_t *p, bool confirm, uint32_t now_ms);
 
 /**
- * May AK take the shared BLE callbacks over from Tuya now? Only on an
- * activated device whose Tuya binding is not in progress, and never while a
+ * May AK take the shared BLE callbacks over from Tuya now? Never while a
  * pairing window or its confirm is up (FR-12 B): BLE belongs to Tuya netcfg
- * for the whole window.
+ * for the whole window. With the window closed AK takes BLE whether or not the
+ * device is activated, so a new board pairs with the Companion without the
+ * Tuya cloud. An unactivated board reports `tuya_provisioning` from BIND_START
+ * on every boot, so that flag only holds AK back on an activated board (an
+ * unbind/reset in progress, reboot pending).
  */
 bool ak_provision_ble_takeover_allowed(const ak_provision_t *p, bool activated, bool tuya_provisioning);
 

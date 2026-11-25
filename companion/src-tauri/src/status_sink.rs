@@ -20,10 +20,8 @@
 //!   `companion --hook` process can find the sink (see [`handoff_path`] /
 //!   [`write_handoff`] / [`read_handoff`]).
 //!
-//! Design ref: see git tag `archive/feature-probes`
-//! (`.kiro/specs/feature-probes-kirocrew-local-control/design.md`).
-//! (Decision 2: the hook is a mode of the companion binary, `companion --hook`,
-//! not a separate shell script — see `Handoff` below).
+//! The hook is a mode of the companion binary (`companion --hook`), not a
+//! separate shell script — see `Handoff` below.
 
 use std::io::Read;
 use std::net::TcpListener;
@@ -46,13 +44,13 @@ pub const DEFAULT_STATUS_PORT: u16 = 5477;
 // ───────────────────────────── T5 — pure mapping ─────────────────────────────
 
 /// The slimmed hook event the companion's `--hook` mode reads from STDIN and
-/// POSTs to the sink. Tolerant on field names: Kiro hooks spell the event key
+/// POSTs to the sink. Tolerant on field names: Kiro Crew hooks spell the event key
 /// `hook_event_name`; we also accept a plain `event` alias so the same struct
 /// works whether the raw hook JSON or a pre-slimmed body is posted.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookEvent {
     /// The hook name: `agentSpawn` | `postToolUse` | `stop` | `userPromptSubmit`
-    /// | …. Accepts either `hook_event_name` (Kiro's own key) or `event`.
+    /// | …. Accepts either `hook_event_name` (Kiro Crew's own key) or `event`.
     #[serde(default, alias = "hook_event_name")]
     pub event: String,
     /// Stable session identity. CLI hooks provide `session_id`/`sessionId` or
@@ -670,7 +668,7 @@ mod tests {
     // ── HookEvent deserialization tolerance ──────────────────
     #[test]
     fn hook_event_accepts_kiro_key_names() {
-        // Raw Kiro hook JSON uses hook_event_name; a slimmed body uses `event`.
+        // Raw Kiro Crew hook JSON uses hook_event_name; a slimmed body uses `event`.
         let raw: HookEvent = serde_json::from_str(
             r#"{"hook_event_name":"postToolUse","sessionId":"abc","toolName":"grep"}"#,
         )

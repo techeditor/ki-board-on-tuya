@@ -22,7 +22,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// WCH vendor id shared by the CH340 / CH342 / CH343 bridges.
 pub const WCH_VID: u16 = 0x1A86;
@@ -155,6 +155,26 @@ pub fn port_kind(port_type: &SerialPortType) -> &'static str {
     }
 }
 
+/// Serial ports present now, flagged when they are the board's CH34x bridge.
+pub fn scan_ports() -> Vec<crate::connection_prefs::Port> {
+    serialport::available_ports()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|port| {
+            let board = match &port.port_type {
+                SerialPortType::UsbPort(info) => {
+                    is_board_port(info.vid, info.pid, info.product.as_deref().unwrap_or(""))
+                }
+                _ => false,
+            };
+            crate::connection_prefs::Port {
+                name: port.port_name,
+                board,
+            }
+        })
+        .collect()
+}
+
 /// Find the first port that looks like the board's CH34x bridge.
 pub fn discover_board_port() -> Option<String> {
     serialport::available_ports().ok()?.into_iter().find_map(|port| {
@@ -189,7 +209,6 @@ fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender, stop: Arc<At
         diagnostics::record("INFO", "usb-reader", "thread started");
         let mut acc = LineAccumulator::new();
         let mut chunk = [0u8; 512];
-        let mut last_error_log = Instant::now() - Duration::from_secs(5);
         loop {
             if stop.load(Ordering::SeqCst) {
                 diagnostics::record("INFO", "usb-reader", "stop requested");
@@ -209,11 +228,12 @@ fn spawn_reader(mut reader: Box<dyn SerialPort>, lines: LineSender, stop: Arc<At
                     // Idle read timeout is normal; loop back to re-check `stop`.
                 }
                 Err(error) => {
-                    if last_error_log.elapsed() >= Duration::from_secs(5) {
-                        diagnostics::record("WARN", "usb-reader", &format!("read failed: {error}"));
-                        last_error_log = Instant::now();
-                    }
-                    thread::sleep(Duration::from_millis(50));
+                    // A real read error ends the link. Returning drops `lines`,
+                    // which the board reader reads as link loss, and the
+                    // reconnect supervisor retries. Before this, a yanked cable
+                    // left the reader spinning and the UI showed "connected".
+                    diagnostics::record("WARN", "usb-reader", &format!("read failed, link lost: {error}"));
+                    return;
                 }
             }
         }

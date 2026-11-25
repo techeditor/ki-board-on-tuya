@@ -45,6 +45,27 @@ EXPECTED_ASSIGNMENTS = {
     "P32": "KEY6",
 }
 
+# Bring-up header macro for each assigned net (firmware/bringup/common/include/agentic_board_io.h).
+BRINGUP_MACROS = {
+    "WS_DIN_3V3": "AK_WS2812_DATA_PIN",
+    "LCD_RST": "AK_LCD_RST_PIN",
+    "LCD_TE": "AK_LCD_TE_PIN",
+    "LCD_BL": "AK_LCD_BACKLIGHT_PIN",
+    "LCD_SCK": "AK_LCD_SPI_SCK_PIN",
+    "LCD_CS": "AK_LCD_SPI_CS_PIN",
+    "LCD_MOSI": "AK_LCD_SPI_MOSI_PIN",
+    "LCD_DC": "AK_LCD_DC_PIN",
+    "EC11_A": "AK_EC11_A_PIN",
+    "EC11_B": "AK_EC11_B_PIN",
+    "EC11_SW": "AK_EC11_SW_PIN",
+    "KEY1": "AK_KEY1_PIN",
+    "KEY2": "AK_KEY2_PIN",
+    "KEY3": "AK_KEY3_PIN",
+    "KEY4": "AK_KEY4_PIN",
+    "KEY5": "AK_KEY5_PIN",
+    "KEY6": "AK_KEY6_PIN",
+}
+
 EXPECTED_LCD_PINS = {
     "1": "GND",
     "2": "LCD_RST",
@@ -134,6 +155,18 @@ def validate_json(data: dict) -> list[str]:
         "bring-up AK_LED_PWR_EN_PIN must be TUYA_GPIO_NUM_18",
         errors,
     )
+    # Every assigned v0.3 pin must be the one the bring-up programs use.
+    expect(set(BRINGUP_MACROS) == set(EXPECTED_ASSIGNMENTS.values()), "BRINGUP_MACROS must cover every assigned net", errors)
+    for pin, net in EXPECTED_ASSIGNMENTS.items():
+        macro = BRINGUP_MACROS.get(net)
+        if macro is None:
+            continue
+        found = re.search(rf"#define\s+{macro}\s+TUYA_GPIO_NUM_(\d+)\b", bringup_io)
+        expect(
+            found is not None and f"P{found.group(1)}" == pin,
+            f"bring-up {macro} must be TUYA_GPIO_NUM_{pin[1:]} ({net})",
+            errors,
+        )
     expect("P28" in internal, "P28 ADC_BAT must remain board-internal", errors)
     expect("P38" in internal, "P38 CHG_DET_N must remain board-internal", errors)
 

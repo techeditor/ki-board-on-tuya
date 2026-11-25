@@ -2,7 +2,7 @@
  * @file tuya_app_main.c
  * @brief v0.3.2 WS2812 chain power switch (LED_PWR_EN = P18) bring-up.
  *
- * Power-on order (hardware/eda/ws2812-power-reduction-study.md §3, §6.3):
+ * Power-on order:
  *   DIN (P4) idle low -> P18 high -> wait for VDD_LED to settle -> reset
  *   (DIN low >= 280 us) -> first colour frame.
  * Power-off order: all-zero frame -> DIN idle low -> P18 low; wait >= 200 ms

@@ -5,6 +5,9 @@
 
 #include "ak_protocol.h"
 
+#include "ak_led_policy.h"
+#include "ak_voice_mode.h"
+
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -133,11 +136,12 @@ int ak_proto_key(char *buf, size_t size, uint32_t seq, const char *id, const cha
 int ak_proto_key_gesture(char *buf, size_t size, uint32_t seq, const char *id, const char *gesture,
                          const char *bind)
 {
-    return ak_proto_key_gesture_text(buf, size, seq, id, gesture, bind, NULL);
+    return ak_proto_key_gesture_text(buf, size, seq, id, gesture, bind, NULL, 0U);
 }
 
-int ak_proto_key_gesture_text(char *buf, size_t size, uint32_t seq, const char *id, const char *gesture,
-                              const char *bind, const char *text)
+/* held_ms / wait_ms are emitted only when `timed`. */
+static int key_gesture_frame(char *buf, size_t size, uint32_t seq, const char *id, const char *gesture,
+                             const char *bind, const char *text, uint8_t slot, bool timed, uint32_t held_ms, uint32_t wait_ms)
 {
     ak_json_writer_t writer;
     writer_init(&writer, buf, size);
@@ -151,12 +155,34 @@ int ak_proto_key_gesture_text(char *buf, size_t size, uint32_t seq, const char *
         writer_raw(&writer, ",\"bind\":");
         writer_json_string(&writer, bind);
     }
+    if (slot != 0U) {
+        writer_raw(&writer, ",\"slot\":");
+        writer_u32(&writer, slot);
+    }
     if (text != NULL) {
         writer_raw(&writer, ",\"text\":");
         writer_json_string(&writer, text);
     }
-    writer_raw(&writer, ",\"held_ms\":0}}\n");
+    writer_raw(&writer, ",\"held_ms\":");
+    writer_u32(&writer, timed ? held_ms : 0U);
+    if (timed) {
+        writer_raw(&writer, ",\"wait_ms\":");
+        writer_u32(&writer, wait_ms);
+    }
+    writer_raw(&writer, "}}\n");
     return writer_finish(&writer);
+}
+
+int ak_proto_key_gesture_text(char *buf, size_t size, uint32_t seq, const char *id, const char *gesture,
+                              const char *bind, const char *text, uint8_t slot)
+{
+    return key_gesture_frame(buf, size, seq, id, gesture, bind, text, slot, false, 0U, 0U);
+}
+
+int ak_proto_key_gesture_timed(char *buf, size_t size, uint32_t seq, const char *id, const char *gesture,
+                               const char *bind, uint32_t held_ms, uint32_t wait_ms)
+{
+    return key_gesture_frame(buf, size, seq, id, gesture, bind, NULL, 0U, true, held_ms, wait_ms);
 }
 
 int ak_proto_encoder(char *buf, size_t size, uint32_t seq, int32_t detents)
@@ -171,7 +197,7 @@ int ak_proto_encoder(char *buf, size_t size, uint32_t seq, int32_t detents)
     return writer_finish(&writer);
 }
 
-int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state)
+int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state, uint8_t slot)
 {
     ak_json_writer_t writer;
     writer_init(&writer, buf, size);
@@ -179,9 +205,14 @@ int ak_proto_voice(char *buf, size_t size, uint32_t seq, const char *state)
     writer_u32(&writer, seq);
     writer_raw(&writer, ",\"type\":\"voice\",\"payload\":{\"state\":");
     writer_json_string(&writer, state);
+    if (slot != 0U) {
+        writer_raw(&writer, ",\"slot\":");
+        writer_u32(&writer, slot);
+    }
     writer_raw(&writer, "}}\n");
     return writer_finish(&writer);
 }
+
 
 int ak_proto_bind_session(char *buf, size_t size, uint32_t seq, uint8_t slot)
 {
@@ -195,7 +226,7 @@ int ak_proto_bind_session(char *buf, size_t size, uint32_t seq, uint8_t slot)
     return writer_finish(&writer);
 }
 
-int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text)
+int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text, uint8_t slot)
 {
     ak_json_writer_t writer;
     writer_init(&writer, buf, size);
@@ -203,6 +234,10 @@ int ak_proto_asr(char *buf, size_t size, uint32_t seq, const char *text)
     writer_u32(&writer, seq);
     writer_raw(&writer, ",\"type\":\"asr\",\"payload\":{\"text\":");
     writer_json_string(&writer, text);
+    if (slot != 0U) {
+        writer_raw(&writer, ",\"slot\":");
+        writer_u32(&writer, slot);
+    }
     writer_raw(&writer, "}}\n");
     return writer_finish(&writer);
 }
@@ -320,6 +355,22 @@ int ak_proto_license_status(char *buf, size_t size, uint32_t seq, const char *st
     return writer_finish(&writer);
 }
 
+int ak_proto_pid_status(char *buf, size_t size, uint32_t seq, const char *state, const char *reason)
+{
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"pid_status\",\"payload\":{\"state\":");
+    writer_json_string(&writer, state);
+    if (reason != NULL && reason[0] != '\0') {
+        writer_raw(&writer, ",\"reason\":");
+        writer_json_string(&writer, reason);
+    }
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
 int ak_proto_prov_status(char *buf, size_t size, uint32_t seq, const char *state, uint32_t remaining_s,
                          const char *rejected, const char *reason)
 {
@@ -422,10 +473,61 @@ int ak_proto_device_settings(char *buf, size_t size, uint32_t seq, const ak_prot
     writer_json_string(&writer, s->voice_mode);
     writer_raw(&writer, ",\"font_size\":");
     writer_u32(&writer, s->font_size);
+    writer_raw(&writer, ",\"animation\":");
+    writer_raw(&writer, s->animation ? "true" : "false");
     writer_raw(&writer, ",\"license\":");
     writer_json_string(&writer, s->license_present ? "present" : "missing");
+    writer_raw(&writer, ",\"pid\":");
+    writer_json_string(&writer, s->pid != NULL ? s->pid : "missing");
     writer_raw(&writer, ",\"ble_paired\":");
     writer_raw(&writer, s->ble_paired ? "true" : "false");
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
+int ak_proto_device_info(char *buf, size_t size, uint32_t seq, const ak_devinfo_t *d)
+{
+    char             mac[AK_DEVINFO_MAC_STR];
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"device_info\",\"payload\":{\"fw\":");
+    writer_json_string(&writer, d->fw);
+    writer_raw(&writer, ",\"companion\":");
+    writer_json_string(&writer, ak_devinfo_link_str(d->companion));
+    writer_raw(&writer, d->handshake ? ",\"handshake\":true" : ",\"handshake\":false");
+    writer_raw(&writer, ",\"cloud\":");
+    writer_json_string(&writer, ak_devinfo_cloud_str(d->cloud));
+    writer_raw(&writer, ",\"wifi_ssid\":");
+    writer_json_string(&writer, d->ssid);
+    writer_raw(&writer, ",\"wifi_ip\":");
+    writer_json_string(&writer, d->ip);
+    if (d->rssi_valid) {
+        writer_raw(&writer, ",\"wifi_rssi\":");
+        writer_i32(&writer, d->rssi);
+    }
+    writer_raw(&writer, ",\"wifi_mac\":");
+    if (d->wifi_mac_valid) {
+        ak_devinfo_mac_str(d->wifi_mac, mac);
+    } else {
+        mac[0] = '\0';
+    }
+    writer_json_string(&writer, mac);
+    writer_raw(&writer, ",\"ble_mac\":");
+    if (d->ble_mac_valid) {
+        ak_devinfo_mac_str(d->ble_mac, mac);
+    } else {
+        mac[0] = '\0';
+    }
+    writer_json_string(&writer, mac);
+    writer_raw(&writer, ",\"ble_name\":");
+    writer_json_string(&writer, d->ble_name);
+    writer_raw(&writer, d->ble_paired ? ",\"ble_paired\":true" : ",\"ble_paired\":false");
+    writer_raw(&writer, d->pid ? ",\"pid\":true" : ",\"pid\":false");
+    writer_raw(&writer, d->uuid ? ",\"uuid\":true" : ",\"uuid\":false");
+    writer_raw(&writer, d->authkey ? ",\"authkey\":true" : ",\"authkey\":false");
+    writer_raw(&writer, d->uuid && d->authkey ? ",\"license\":true" : ",\"license\":false");
     writer_raw(&writer, "}}\n");
     return writer_finish(&writer);
 }
@@ -439,22 +541,23 @@ int ak_proto_hello_ack_caps(char *buf, size_t size, const char *fw, const char *
 {
     ak_json_writer_t writer;
     writer_init(&writer, buf, size);
-    writer_raw(&writer, "{\"v\":1,\"type\":\"hello_ack\",\"payload\":{\"fw\":");
+    writer_raw(&writer, AK_HELLO_ACK_HEAD);
     writer_json_string(&writer, fw);
-    writer_raw(&writer, ",\"transport\":");
+    writer_raw(&writer, AK_HELLO_ACK_TRANSPORT);
     writer_json_string(&writer, transport);
-    writer_raw(&writer, ",\"capabilities\":[");
+    writer_raw(&writer, AK_HELLO_ACK_CAPS_OPEN);
     writer_json_string(&writer, transport);
-    writer_raw(&writer, ",\"keymap\",\"voice_state\",\"device_settings\"");
+    writer_raw(&writer, AK_HELLO_CAPS_BASE);
     if (transport != NULL &&
         (strcmp(transport, "uart") == 0 || strcmp(transport, "dual") == 0)) {
-        writer_raw(&writer, ",\"system_info\"");
+        writer_raw(&writer, AK_HELLO_CAP_SYSTEM);
     }
     if (menu) {
         /* Display builds wait in ② for the Companion's PC ASR text. */
-        writer_raw(&writer, ",\"menu\",\"pc_asr_wait\",\"bind_session\"");
+        writer_raw(&writer, AK_HELLO_CAPS_MENU);
+        writer_raw(&writer, AK_HELLO_CAP_SCENES); /* FR-03 */
     }
-    writer_raw(&writer, "]}}\n");
+    writer_raw(&writer, AK_HELLO_ACK_TAIL);
     return writer_finish(&writer);
 }
 
@@ -549,6 +652,83 @@ int ak_proto_log(char *buf, size_t size, uint32_t seq, const char *tag, const ch
     writer_json_string(&writer, tag);
     writer_raw(&writer, ",\"msg\":");
     writer_json_string(&writer, msg);
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
+/* ── FR-03 scenes ─────────────────────────────────────────────────────── */
+
+int ak_proto_scene_state(char *buf, size_t size, uint32_t seq, int active, bool dirty,
+                         const ak_scene_t *const slots[], size_t n_slots, const char *error, const char *req)
+{
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"scene_state\",\"payload\":{\"active\":");
+    writer_i32(&writer, (int32_t)active);
+    writer_raw(&writer, ",\"dirty\":");
+    writer_raw(&writer, dirty ? "true" : "false");
+    writer_raw(&writer, ",\"slots\":[");
+    for (size_t i = 0; i < n_slots; i++) {
+        const ak_scene_t *s = slots != NULL ? slots[i] : NULL;
+        if (i > 0) {
+            writer_char(&writer, ',');
+        }
+        writer_raw(&writer, "{\"id\":"); /* the array index is the slot number */
+        writer_json_string(&writer, s != NULL ? s->id : "");
+        writer_raw(&writer, ",\"rev\":");
+        writer_u32(&writer, s != NULL ? s->rev : 0U);
+        writer_raw(&writer, ",\"name\":");
+        writer_json_string(&writer, s != NULL ? s->name : "");
+        writer_char(&writer, '}');
+    }
+    writer_char(&writer, ']');
+    if (error != NULL) {
+        writer_raw(&writer, ",\"error\":");
+        writer_json_string(&writer, error);
+    }
+    if (req != NULL) {
+        writer_raw(&writer, ",\"req\":");
+        writer_json_string(&writer, req);
+    }
+    writer_raw(&writer, "}}\n");
+    return writer_finish(&writer);
+}
+
+int ak_proto_scene_data(char *buf, size_t size, uint32_t seq, uint8_t slot, const ak_scene_t *scene)
+{
+    char km[AK_SCENE_KM_HEX + 1U];
+    char idle[AK_SCENE_IDLE_HEX + 1U];
+    if (scene == NULL) {
+        return -1;
+    }
+    ak_scene_km_to_hex(&scene->keymap, km);
+    ak_scene_idle_to_hex(scene->idle, idle);
+    ak_json_writer_t writer;
+    writer_init(&writer, buf, size);
+    writer_raw(&writer, "{\"v\":1,\"seq\":");
+    writer_u32(&writer, seq);
+    writer_raw(&writer, ",\"type\":\"scene_data\",\"payload\":{\"slot\":");
+    writer_u32(&writer, slot);
+    writer_raw(&writer, ",\"id\":");
+    writer_json_string(&writer, scene->id);
+    writer_raw(&writer, ",\"rev\":");
+    writer_u32(&writer, scene->rev);
+    writer_raw(&writer, ",\"name\":");
+    writer_json_string(&writer, scene->name);
+    writer_raw(&writer, ",\"km\":");
+    writer_json_string(&writer, km);
+    writer_raw(&writer, ",\"voice\":");
+    writer_json_string(&writer, ak_voice_mode_str((ak_voice_mode_t)scene->voice_mode));
+    writer_raw(&writer, ",\"led\":");
+    writer_json_string(&writer, ak_led_mode_wire_str((ak_led_mode_t)scene->led_mode));
+    writer_raw(&writer, ",\"led_off_s\":");
+    writer_u32(&writer, ak_led_policy_timeout_ms(scene->led_timeout_idx) / 1000U);
+    writer_raw(&writer, ",\"idle\":");
+    writer_json_string(&writer, idle);
+    writer_raw(&writer, ",\"home\":");
+    writer_json_string(&writer, ak_scene_home_wire(scene->home));
     writer_raw(&writer, "}}\n");
     return writer_finish(&writer);
 }

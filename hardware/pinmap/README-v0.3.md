@@ -25,7 +25,7 @@ T5AI-Core 通过44P排针连接无源扩展板。扩展板只承载：
 | [netlist-v0.3.md](netlist-v0.3.md) | 按功能整理的原理图连接关系与实际位号 |
 | [bom-v0.3.md](bom-v0.3.md) | v0.3 BOM、DNP项、机械件和采购编号 |
 | [component-notes-v0.3.md](component-notes-v0.3.md) | 器件使用、封装方向、PCB布局和实物核验注意事项 |
-| [check_pins_v0.3.py](check_pins_v0.3.py) | 独立校验v0.3 JSON和本组文档，不读取v0.2的pinmap-v0.2.json |
+| [check_pins_v0.3.py](check_pins_v0.3.py) | 独立校验v0.3 JSON和本组文档 |
 
 ## 已验证状态
 
@@ -38,8 +38,6 @@ T5AI-Core 通过44P排针连接无源扩展板。扩展板只承载：
 
 审核报告：
 
-- [v0.3原理图审核](../eda/v0.3-schematic-review-2026-10-01.md)
-- [v0.3 PCB审核](../eda/v0.3-pcb-review-2026-10-01.md)
 
 ## 独立校验
 

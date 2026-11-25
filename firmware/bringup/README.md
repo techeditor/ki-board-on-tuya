@@ -7,7 +7,8 @@ and are not host-side unit tests.
 ## IO source of truth
 
 All bring-up applications include `common/include/agentic_board_io.h`. Its
-values mirror `hardware/pinmap/pinmap-v0.2.json` and `hardware/pinmap/pinmap-v0.2.md`.
+values mirror `hardware/pinmap/pinmap-v0.3.json` and `hardware/pinmap/pinmap-v0.3.md`;
+`build_all.sh` checks them with `hardware/pinmap/check_pins_v0.3.py`.
 Do not copy pin definitions from reference projects.
 
 ## Applications
@@ -40,14 +41,6 @@ Do not copy pin definitions from reference projects.
 >   `"led_pwr_option":"on"|"off"|"always"` so you can tell which image is flashed.
 > - No other bring-up app drives the LED chain or P18.
 
-> **v0.3 (expansion baseboard, 2026-10-01)** changed the input and LED blocks:
-> the 5-way joystick became an **EC11 rotary encoder** (A=P20/B=P21/SW=P22), a
-> **sixth key K6=P32** was added, the WS2812 chain grew **3 -> 7** LEDs, the LCD
-> changed to a 12P ST7789P3 panel whose **P7 is now TE (not LCD_PWR)** — panel
-> VDD is tied directly to 3V3 — and the expansion board's **USB/battery/VBUS &
-> BAT indicator circuits were removed** (flash via the dev-board Type-C). The
-> per-app READMEs below reflect v0.3.
-
 ## Build
 
 ```bash
@@ -74,10 +67,10 @@ To rebuild selected applications after a local change:
 
 ## Flash from Windows
 
-Run from the repository's `scripts` directory:
+Flash the built image (`dist/<version>/<app>_QIO_<version>.bin`) with tyutool (or `tos.py flash`), for example:
 
 ```powershell
-.\flash.ps1 -Port COM5 -App "firmware/bringup/key1_uart" -Build -Monitor
+tyutool_cli write -d t5ai -p COMx -b 460800 -f <app>_QIO_<version>.bin   # see tyutool_cli --help
 ```
 
 Only connect one of the two Type-C UART bridges at a time. UART0 uses
@@ -89,4 +82,3 @@ Only connect one of the two Type-C UART bridges at a time. UART0 uses
 All eight applications build with the TuyaOpen T5AI SDK (each built with the
 same `config choice` + `build` steps as `build_all.sh`). The complete
 sequential physical hardware acceptance procedure is in `TEST_PLAN.md`.
-Bench results and the bring-up summary are kept in internal test records.

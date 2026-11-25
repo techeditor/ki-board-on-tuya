@@ -66,6 +66,11 @@ bool ak_cloud_provisioning(void);
  *  provisioning to reset. */
 OPERATE_RET ak_cloud_enter_pairing(void);
 
+/** Settings > Reset system fallback: when the SDK reset did not finish in
+ *  time, remove the local activation data directly (no cloud call; License
+ *  kept). True when something was removed. The stub returns false. */
+bool ak_cloud_reset_local(void);
+
 /** True only when the real backend is compiled in (AK_ASR_BOARD_CLOUD=1).
  *  The stub returns false so callers can log "cloud off". */
 bool ak_cloud_compiled(void);
@@ -79,6 +84,11 @@ bool ak_cloud_boot_window(void);
 /** True when the IoT client runs with a UUID (flashed License, or the debug
  *  compile-time fallback): only then can Tuya App pairing work. Stub: false. */
 bool ak_cloud_license_usable(void);
+
+/** True when ak_cloud_init() stopped before tuya_iot_init because no product
+ *  ID is set (ak_pid.h). The Tuya cloud, netmgr and its BLE stack are then not
+ *  running; the app brings up its own BLE instead. Stub: false. */
+bool ak_cloud_pid_missing(void);
 
 /** Stop the Tuya BLE and SoftAP netcfg (pairing window closed). Stub: no-op. */
 void ak_cloud_netcfg_close(void);

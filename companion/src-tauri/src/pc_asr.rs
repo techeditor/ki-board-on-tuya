@@ -5,7 +5,7 @@
 //!   the resulting `asr` text.
 //! - `System`: PC recognition. The keyboard sends `voice:start` / `voice:stop`
 //!   and the Companion records and recognises (see `stream_asr`,
-//!   docs/pc-asr.md). The earlier Win+H dictation, which typed straight into
+//!   docs/pc-asr.md). The earlier Win+H speech input, which typed straight into
 //!   the focused window, is replaced: PC text now goes to the keyboard's ③.
 
 /// Which ASR the system uses for a board voice event.

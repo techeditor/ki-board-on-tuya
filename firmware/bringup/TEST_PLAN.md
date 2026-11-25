@@ -1,31 +1,11 @@
 # Unified hardware bring-up test plan
 
-> **v0.3 update (expansion baseboard, 2026-10-01):** the input and LED blocks
-> changed. The 5-way joystick is now an **EC11 rotary encoder** (A=P20/B=P21/
-> SW=P22), a **sixth key K6=P32** was added, the WS2812 chain is now **7 LEDs**,
-> and the LCD is a 12P ST7789P3 whose **P7 is TE** (panel VDD tied to 3V3, no
-> LCD_PWR). The expansion board's **own USB bridge, battery path, VBUS/BAT
-> indicator LEDs and battery switch were all removed** — flash via the dev-board
-> Type-C. Acceptance steps 6 (LED4/LED5) and 7 (battery/switch) therefore no
-> longer apply and have been dropped; step 3 now covers 6 keys + the encoder and
-> step 5 covers 7 LEDs. See `hardware/expansion-baseboard-v0.3-change-scope.md`.
-
-> **v1.2 follow-up (2026-09):** This plan was written for the v1.0 board. On
-> v1.2 the WS2812 data pin moved P13 -> P4 (SPI1_MOSI) and is now driven by the
-> official SPI WS2812 driver, and the LCD backlight moved P5 -> P8. Where the
-> text below still says "WS2812 DIN is P13 / GPIO bit-bang" it describes the
-> v1.0 setup; the v1.2/v0.3 wiring is authoritative in `hardware/pinmap/` and
-> the per-app READMEs. Historical text is kept as-is for traceability.
-
 ## Safety prerequisites
 
 - Connect only one Type-C UART bridge at a time.
-- Keep WS2812 brightness at the bring-up defaults (7 LEDs at full white draws
-  more current than the old 3-LED chain).
-
-> v0.3 removed the expansion board's battery path and its own CH340C, so the
-> old "one battery only" / "CH340C powered by expansion Type-C" cautions no
-> longer apply; power and flash through the dev-board Type-C.
+- Keep WS2812 brightness at the bring-up defaults (7 LEDs at full white draw a
+  lot of current).
+- Power and flash through the dev-board Type-C.
 
 ## Build all applications
 
@@ -43,7 +23,7 @@ visual/RF observation; they cannot be closed by the cloud build alone.
 Flash with tyutool (or `tos.py flash`) from a Windows host, for example:
 
 ```powershell
-tyutool_cli write -d t5ai -p COM5 -b 460800 -f <app>_QIO_<version>.bin   # see tyutool_cli --help
+tyutool_cli write -d t5ai -p COMx -b 460800 -f <app>_QIO_<version>.bin   # see tyutool_cli --help
 ```
 
 The flash baud is 460800. UART0 application monitoring defaults to 115200.
@@ -62,7 +42,7 @@ The flash baud is 460800. UART0 application monitoring defaults to 115200.
 | 7 (v0.3.2 only) | `led_power` | See "Step 7 detail" below. Skip on lite / v0.3.1 (no power switch; P18 not connected) |
 
 Record the COM port, board revision, observed result, and any
-scope/logic-analyzer measurements for each step in the internal test records. Firmware
+scope/logic-analyzer measurements for each step in your own test notes. Firmware
 SHA-256 is optional during bring-up; capture it for release/OTA builds.
 
 ## Step 0 detail - power-off visual inspection
@@ -108,11 +88,11 @@ current meter on the 5 V input. Commands are UART0 bytes or keys; see
 | 7g stress | `s` (50) and `S` (500) | Every cycle shows the correct pattern and goes fully dark; `driver_errors` = 0 |
 | 7h settle sweep | `w` | Record which waits (0/1/3/5/10/20 ms) give a correct first frame; 10 ms (firmware value) must be correct |
 
-Record each sub-step in the internal test records (table "v0.3.2 LED power switch").
+Record each sub-step in your own test notes.
 
 ## Known diagnostic boundary
 
 WS2812 data is driven from P4 (SPI1_MOSI) through the official SPI driver, so
 step 5 timing is produced by the SPI peripheral, not CPU bit-banging. If step 5
 fails, measure the P4 / level-shifter output waveform before changing software
-or hardware. (The v1.0 P13 GPIO bit-bang path is gone; see the internal bring-up summary.)
+or hardware.

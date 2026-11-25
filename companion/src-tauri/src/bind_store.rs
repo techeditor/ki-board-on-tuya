@@ -9,10 +9,6 @@
 //! store to `~/.ak-companion/binds.json` (see the `app_dirs` module, shared with
 //! the status-sink handoff and the diagnostic logs). No Tauri / Windows deps, so
 //! it `cargo test`s on the Linux host.
-//!
-//! Design ref: see git tag `archive/feature-probes`
-//! (`.kiro/specs/feature-probes-kirocrew-local-control/design.md`).
-//! ("Milestone 4 — per-conversation binding").
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -114,11 +110,13 @@ pub struct BindStore {
     /// Bring the Crew window to the front when K1-K3 selects a chat.
     #[serde(default = "default_true")]
     pub focus_on_select: bool,
-    /// Where a voice input goes after K6 on the keyboard: `false` (default) =
-    /// sent straight to the selected chat through the Crew API; `true` =
-    /// typed into the Crew window's composer (keystroke injection).
+    /// Voice input: `true` = every slot uses keyboard mode (text on the
+    /// keyboard's input strip, K6 sends it through the Crew API). `false`
+    /// (default) = automatic: a slot with an Alt+N number (`chats[i]` in
+    /// 1..=9) uses PC mode (the text is typed into the Crew input box).
+    /// Replaces the old `voice_inject`; an old file's value is ignored.
     #[serde(default)]
-    pub voice_inject: bool,
+    pub voice_force_keyboard: bool,
     /// List Crew Mode / Bot worker sessions in the keyboard's Bind session menu.
     #[serde(default)]
     pub show_workers: bool,
@@ -138,7 +136,7 @@ impl Default for BindStore {
             pinned_session: String::new(),
             last_models: BTreeMap::new(),
             focus_on_select: true,
-            voice_inject: false,
+            voice_force_keyboard: false,
             show_workers: false,
         }
     }
@@ -232,6 +230,19 @@ impl BindStore {
             Some((LOCAL_INSTANCE, key)) => Some(key.to_string()),
             _ => None,
         }
+    }
+
+    /// Per slot A/B/C: whether voice input uses PC mode (see
+    /// `voice_force_keyboard`). `control` = the keyboard may control the PC;
+    /// without it every slot is keyboard mode.
+    pub fn voice_pc(&self, control: bool) -> [bool; SLOT_COUNT] {
+        let mut pc = [false; SLOT_COUNT];
+        if control && !self.voice_force_keyboard {
+            for (i, flag) in pc.iter_mut().enumerate() {
+                *flag = matches!(self.chats.get(i), Some(1..=9));
+            }
+        }
+        pc
     }
 
     /// The pinned Agent Status session in [`status_id`] form.
@@ -498,7 +509,7 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"chats":[4,0,8],"aliases":["Plan","",""],"sessions":["local:chat-4","remote1:chat-9",""],"names":["Plan it","",""],"pinned_session":"local:chat-4","last_models":{"local:chat-4":"claude-opus"},"focus_on_select":true,"voice_inject":false,"show_workers":false}"#
+            r#"{"chats":[4,0,8],"aliases":["Plan","",""],"sessions":["local:chat-4","remote1:chat-9",""],"names":["Plan it","",""],"pinned_session":"local:chat-4","last_models":{"local:chat-4":"claude-opus"},"focus_on_select":true,"voice_force_keyboard":false,"show_workers":false}"#
         );
         let back: BindStore = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
@@ -587,7 +598,25 @@ mod tests {
         assert_eq!(s.sessions, vec!["", "", ""]);
         assert_eq!(s.pinned_session, "");
         assert!(s.focus_on_select);
-        assert!(!s.voice_inject, "voice input defaults to the direct API send");
+        assert!(!s.voice_force_keyboard);
         assert!(s.last_models.is_empty());
+    }
+
+    #[test]
+    fn voice_mode_follows_the_alt_n_number_unless_forced() {
+        let mut s = BindStore::new();
+        s.chats = vec![0, 2, 9];
+        assert_eq!(s.voice_pc(true), [false, true, true]);
+        assert_eq!(s.voice_pc(false), [false, false, false], "no PC control: keyboard mode");
+        s.voice_force_keyboard = true;
+        assert_eq!(s.voice_pc(true), [false, false, false]);
+    }
+
+    #[test]
+    fn the_old_voice_inject_field_is_ignored() {
+        let mut s: BindStore = serde_json::from_str(r#"{"chats":[1,0,0],"voice_inject":true}"#).unwrap();
+        s.normalize();
+        assert!(!s.voice_force_keyboard, "an old inject user is back on automatic");
+        assert!(!serde_json::to_string(&s).unwrap().contains("voice_inject"));
     }
 }

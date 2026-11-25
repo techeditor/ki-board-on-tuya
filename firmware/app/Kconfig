@@ -30,7 +30,7 @@ config AK_LICENSE_DEBUG_READ
     depends on AK_ASR_BOARD_CLOUD
 
 config AK_OTA_TEST_KEY
-    bool "Local OTA trusts the TEST public key (debug/test builds only; docs/ota.md)"
+    bool "Local OTA trusts the TEST public key (debug/test builds only)"
     default n
 
 config AK_DEBUG_PROBES

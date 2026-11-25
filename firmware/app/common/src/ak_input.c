@@ -134,6 +134,7 @@ OPERATE_RET ak_input_init(void)
             return rt;
         }
         ak_input_fsm_init(&s_inputs[i].fsm, level_is_pressed(level), now);
+        ak_input_fsm_set_long_ms(&s_inputs[i].fsm, ak_input_long_ms_for_id(s_inputs[i].id));
     }
 
     OPERATE_RET rt = tkl_gpio_init(AK_ENC_A_PIN, &enc_ab_cfg);

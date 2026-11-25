@@ -15,21 +15,7 @@
 #include "tdl_display_manage.h"
 #include "tuya_cloud_types.h"
 
-/* Common RGB565 colors (native, pre-swap). */
-#define AK_RGB565(r, g, b) ((uint16_t)((((r)&0xF8U) << 8) | (((g)&0xFCU) << 3) | (((b)&0xF8U) >> 3)))
-
-#define AK_COL_BLACK   0x0000U
-#define AK_COL_WHITE   0xFFFFU
-#define AK_COL_RED     0xF800U
-#define AK_COL_GREEN   0x07E0U
-#define AK_COL_BLUE    0x001FU
-#define AK_COL_YELLOW  0xFFE0U
-#define AK_COL_CYAN    0x07FFU
-#define AK_COL_MAGENTA 0xF81FU
-#define AK_COL_GRAY    0x8410U
-#define AK_COL_DKBLUE  0x0010U
-#define AK_COL_ORANGE  0xFD20U
-#define AK_COL_PURPLE  AK_RGB565(0x8EU, 0x48U, 0xFFU)
+/* Colours: ak_palette.h (by use). Values are native RGB565, pre-swap. */
 
 /**
  * @brief Bind the frame buffer that subsequent draw calls target.
@@ -70,11 +56,10 @@ void ak_gfx_char_thin(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, 
 /**
  * @brief Draw a NUL-terminated string left-to-right on one line.
  *
- * UTF-8, in the current font size (ak_text.h): at 12 px a pure-ASCII string
- * uses the 8x8 font and any other string the 12 px UI font; at 16 px every
- * string uses the 16 px UI font (x scale). y is the top of the 8 px row; a UI
- * font cell starts ak_text_dy() x scale above it. Characters outside the font
- * draw as a box. Measure with ak_text_width() (ak_text.h).
+ * UTF-8, in the UI font of the current size (ak_text.h), x scale. y is the
+ * top of the 8 px row; the font cell starts ak_text_dy() x scale above it.
+ * New pages place text by box (ak_gfx_text_box / _center / _right). Characters
+ * outside the font draw as a box. Measure with ak_text_width() (ak_text.h).
  */
 void ak_gfx_text(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale);
 
@@ -89,5 +74,43 @@ void ak_gfx_text_thin(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16
  */
 void ak_gfx_icon(uint16_t x, uint16_t y, const uint8_t *bitmap, uint16_t w, uint16_t h,
                  uint16_t fg, uint16_t bg);
+
+/**
+ * @brief Draw a 1-bpp bitmap with its holes: pixels set in @p bitmap use @p fg,
+ *        pixels set only in @p shape (the bitmap with its enclosed holes
+ *        filled, e.g. ghost eyes) use @p hole, the rest @p bg.
+ */
+void ak_gfx_icon_shape(uint16_t x, uint16_t y, const uint8_t *bitmap, const uint8_t *shape, uint16_t w, uint16_t h,
+                       uint16_t fg, uint16_t hole, uint16_t bg);
+
+/**
+ * @brief Draw an opaque 4-bpp palette image (16 RGB565 entries).
+ *
+ * Each row is ceil(w / 2) bytes; the high nibble is the left pixel. Runs of
+ * one color are drawn with one fill per run.
+ * shortcut: one fill per color run, so a noisy photo-like image is slow at
+ * boot; upgrade to a direct framebuffer copy if the splash delay matters.
+ */
+void ak_gfx_pal4(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16_t palette[16],
+                 const uint8_t *data);
+
+/* ---- LCD style primitives (ak_layout.h) ----------------------------------- */
+
+/** @brief Filled rectangle with radius-r corners (lcd_round_inset; r is clamped to w/2, h/2). */
+void ak_gfx_round_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t r, uint16_t color);
+
+/** @brief A t px frame in `color` with radius-r corners, filled with `fill` inside (radius r - t). */
+void ak_gfx_round_frame(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t r, uint16_t t, uint16_t color,
+                        uint16_t fill);
+
+/** @brief Text left-aligned at x, centred vertically in by..by+bh-1 (ak_text_vtop). Returns the x after it. */
+uint16_t ak_gfx_text_box(uint16_t x, uint16_t by, uint16_t bh, const char *s, uint16_t fg, uint16_t bg);
+
+/** @brief Text right-aligned to end at xr, centred vertically. Returns its left x. */
+uint16_t ak_gfx_text_right(uint16_t xr, uint16_t by, uint16_t bh, const char *s, uint16_t fg, uint16_t bg);
+
+/** @brief Text centred both ways in the box: x = bx + (bw - width) / 2, top = ak_text_vtop(by, bh). */
+uint16_t ak_gfx_text_center(uint16_t bx, uint16_t by, uint16_t bw, uint16_t bh, const char *s, uint16_t fg,
+                            uint16_t bg);
 
 #endif /* AK_GFX_H */

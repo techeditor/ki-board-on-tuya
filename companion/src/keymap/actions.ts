@@ -69,16 +69,17 @@ export interface KeyBinding {
 
 export type KeymapState = Record<KeySlot, KeyBinding>;
 
-/** Firmware v0.3 defaults (must match ak_keymap_init_defaults). */
+/** Firmware defaults (must match ak_keymap_init_defaults): K1-K3 single = chatN,
+ *  long (500 ms) = instanceN, double unbound so a single click needs no wait. */
 export function defaultKeymapState(): KeymapState {
   const normal = (single: ActionWire, dbl: ActionWire, long: ActionWire): KeyBinding => ({
     kind: "normal",
     actions: { single, double: dbl, long },
   });
   return {
-    k1: normal("chat1", "instance1", "none"),
-    k2: normal("chat2", "instance2", "none"),
-    k3: normal("chat3", "instance3", "none"),
+    k1: normal("chat1", "none", "instance1"),
+    k2: normal("chat2", "none", "instance2"),
+    k3: normal("chat3", "none", "instance3"),
     k4: normal("cancel_char", "none", "cancel_all"),
     k5: { kind: "voice", actions: { single: "none", double: "none", long: "none" } },
     k6: normal("confirm", "model_toggle", "model_menu"),

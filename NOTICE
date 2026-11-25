@@ -1,20 +1,28 @@
-Ki-board -- an agentic keyboard for Kiro, built on the Tuya T5AI-Core board
+Ki-board -- an AI keyboard for Kiro Crew users, built on the Tuya T5AI-Core board
 Copyright 2026 The Ki-board Authors
 
 Software in this repository is licensed under the Apache License, Version 2.0
 (see LICENSE), unless a file or directory states otherwise.
 
+The firmware is built with TuyaOpen (Apache-2.0), https://github.com/tuya/TuyaOpen.
+TuyaOpen is not part of this repository.
+
 This repository includes third-party material under its own licence:
 
-- firmware/app/common/src/ak_font_ui_data.c: the LCD interface font, a
-  subset of GNU Unifont 16px (Copyright (C) 1998-2026 Roman Czyborra, Paul
-  Hardy, Qianqian Fang, et al.), used under the SIL Open Font License 1.1.
-  Licence text: firmware/app/third_party/fonts/unifont/.
-- firmware/app/common/src/ak_font_data.c: small bitmap subsets for the
-  on-device font test page, taken from Fusion Pixel Font (with Ark Pixel,
-  Cubic-11 and Galmuri), GNU Unifont, Chill Bitmap and ISAS 16x16 Song.
-  Licences (SIL OFL 1.1 and others) and attribution are in
-  firmware/app/third_party/fonts/.
+- firmware/app/common/src/ak_font_ui12_data.c, ak_font_ui14_data.c and
+  ak_font_ui16_data.c: the LCD interface fonts, one per font size, all under
+  the SIL Open Font License 1.1:
+  - 12 px: a subset of Fusion Pixel Font (Copyright (c) 2022 TakWolf; built
+    from Ark Pixel, Cubic-11 and Galmuri).
+  - 14 px: Ki-board Pixel 14, derived from the 12 px Fusion Pixel glyphs for
+    this firmware (a Modified Version of Fusion Pixel Font), with X.Org
+    misc-fixed 7x14 for ASCII (public domain). Licence text:
+    firmware/app/third_party/fonts/ki-board-pixel-14/OFL.txt.
+  - 16 px: a subset of GNU Unifont 16px (Copyright (C) 1998-2026 Roman
+    Czyborra, Paul Hardy, Qianqian Fang, et al.), used under the OFL.
+  Licence texts (one file per font family): firmware/app/third_party/fonts/
+  fusion-pixel/ (with ark-pixel/, cubic-11/ and galmuri/), unifont/ and
+  ki-board-pixel-14/.
 - firmware/app/common/include/ak_font8x8.h: font8x8 by Daniel Hepper,
   public domain.
 

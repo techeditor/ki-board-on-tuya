@@ -16,8 +16,6 @@
  * Defaults match the confirmed v0.3 model and are overridable at runtime by a
  * Companion `keymap` frame (Companion is the config authority); the resolved
  * table is cached in TAL KV so a disconnected board keeps the last map.
- *
- * See docs/interaction.md.
  */
 
 #ifndef AK_KEYMAP_H
@@ -50,8 +48,11 @@ typedef enum {
  *   0x03            = CONFIRM       (pending-confirm: confirm + exit)
  *   0x04            = MODEL_MENU    (Companion opens the LCD model menu)
  *   0x05            = MODEL_TOGGLE  (Companion toggles Auto / last model)
+ *   0x06            = SCENE_MENU    (FR-03: open the scene picker, board-local)
  *   0x10 + N (1..9) = CHAT N        (jump to chat N -> Alt+N, Companion-mapped)
  *   0x20 + N (1..9) = INSTANCE N    (switch instance N -> Ctrl+N, Companion-mapped)
+ *   0x30 + N (1..14)= SHORTCUT N    (FR-03 limited shortcut "key_*", Companion-injected;
+ *                                    table in ak_keymap.c, same order as protocol.md)
  * The high-nibble scheme keeps the parameterised chat/instance actions in one
  * byte and leaves room for future action families. */
 typedef uint8_t ak_action_t;
@@ -64,6 +65,12 @@ typedef uint8_t ak_action_t;
 #define AK_ACTION_MODEL_TOGGLE 0x05u /* Auto <-> last picked model (Companion-run) */
 #define AK_ACTION_CHAT_BASE   0x10u /* + N (1..9) */
 #define AK_ACTION_INSTANCE_BASE 0x20u /* + N (1..9) */
+#define AK_ACTION_SCENE_MENU   0x06u /* FR-03: scene picker (board-local) */
+#define AK_ACTION_SHORTCUT_BASE 0x30u /* + N (1..AK_SHORTCUT_COUNT), FR-03 */
+#define AK_SHORTCUT_COUNT      14u
+
+/** If `a` is SHORTCUT N return N (1..AK_SHORTCUT_COUNT) else 0. */
+uint8_t ak_action_shortcut_n(ak_action_t a);
 
 /** Build a CHAT N action (N 1..9), or AK_ACTION_NONE if out of range. */
 ak_action_t ak_action_chat(uint8_t n);
@@ -96,7 +103,7 @@ const char *ak_keymap_id_for_slot(int slot);
 int ak_keymap_slot_for_gesture(const char *g);
 
 /** Fill `map` with the confirmed v0.3 defaults:
- *   K1-K3 NORMAL: single=chatN, double=instanceN (N=1,2,3), long=none
+ *   K1-K3 NORMAL: single=chatN, long=instanceN (N=1,2,3), double=none
  *   K4   NORMAL: single=cancel_char, long=cancel_all
  *   K5   VOICE
  *   K6   NORMAL: single=confirm, double=model_toggle, long=model_menu
@@ -114,12 +121,12 @@ bool ak_keymap_is_voice(const ak_keymap_t *map, const char *id);
 
 /** Parse an action WIRE name into an encoded action. Recognises "none",
  *  "cancel_char", "cancel_all", "confirm", "model_menu", "model_toggle",
- *  "chat1".."chat9", "instance1".."instance9". Returns false (out untouched)
- *  for anything else. */
+ *  "scene_menu", "key_*" shortcuts, "chat1".."chat9", "instance1".."instance9".
+ *  Returns false (out untouched) for anything else. */
 bool ak_keymap_action_from_str(const char *s, ak_action_t *out);
 
-/** Wire name of a fixed (non-parameterised) action, or NULL for NONE,
- *  chatN / instanceN and unknown bytes. */
+/** Wire name of a fixed (non-parameterised) action or a "key_*" shortcut, or
+ *  NULL for NONE, chatN / instanceN and unknown bytes. */
 const char *ak_keymap_action_str(ak_action_t a);
 
 /** Set key `id`'s kind to VOICE. Returns true if applied (known id). */
@@ -130,14 +137,16 @@ bool ak_keymap_set_voice(ak_keymap_t *map, const char *id);
 bool ak_keymap_bind(ak_keymap_t *map, const char *id, ak_gesture_slot_t slot, ak_action_t action);
 
 /* Compact KV blob: version byte, then per slot: 1 kind byte + 3 action bytes. */
-#define AK_KEYMAP_BLOB_VERSION 2u
+#define AK_KEYMAP_BLOB_VERSION 3u    /* v3: K1-K3 default instanceN moved from double to long */
+#define AK_KEYMAP_BLOB_VERSION_V2 2u /* same layout; from_blob migrates the old K1-K3 default */
 #define AK_KEYMAP_BLOB_SIZE    (1u + AK_KEYMAP_SLOTS * (1u + AK_GESTURE_SLOT_COUNT)) /* 1 + 7*4 = 29 */
 
 /** Serialize `map` into a fixed AK_KEYMAP_BLOB_SIZE byte buffer for TAL KV.
  *  Returns bytes written (AK_KEYMAP_BLOB_SIZE) or 0 on error. */
 unsigned ak_keymap_to_blob(const ak_keymap_t *map, uint8_t *buf, unsigned buf_size);
 
-/** Load `map` from a KV blob. Rejects a wrong version/size or an invalid kind/
+/** Load `map` from a KV blob (current or v2; a v2 blob still holding the old
+ *  K1-K3 default double=instanceN is migrated to long=instanceN). Rejects a wrong version/size or an invalid kind/
  *  action byte (returns false, leaving `map` untouched) so a stale/corrupt blob
  *  falls back to defaults rather than scrambling the table. */
 bool ak_keymap_from_blob(ak_keymap_t *map, const uint8_t *buf, unsigned len);

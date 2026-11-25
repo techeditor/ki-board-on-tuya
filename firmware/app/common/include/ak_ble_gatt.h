@@ -10,7 +10,7 @@
  *
  * Interface shape mirrors ak_uart exactly so tuya_app_main.c can #define the
  * ak_transport_* aliases against either backend:
- *   - ak_ble_gatt_init()  : bring up BLE and advertise "Agentic Keyboard-XXXXXX"
+ *   - ak_ble_gatt_init()  : bring up BLE and advertise "Ki-board-XXXXXX"
  *                           with the service selected by TAL,
  *                           register the event callback. Returns once the init
  *                           call is issued; the stack signals readiness
@@ -103,7 +103,7 @@ bool ak_ble_gatt_take_greet(void);
 void ak_ble_gatt_suspend_for_usb(void);
 
 /**
- * Keep the Agentic Keyboard-XXXXXX advertisement alive while disconnected.
+ * Keep the Ki-board-XXXXXX advertisement alive while disconnected.
  * Checks the real NimBLE advertising state before starting, so an already-live
  * advertisement is never restarted every second. No-op after USB suspension.
  */
@@ -111,7 +111,7 @@ void ak_ble_gatt_maintain(uint32_t now_ms);
 
 /** Link state for the app header. */
 typedef enum {
-    AK_BLE_LINK_ADVERTISING = 0, /* not connected — advertising as Agentic Keyboard-XXXXXX */
+    AK_BLE_LINK_ADVERTISING = 0, /* not connected — advertising as Ki-board-XXXXXX */
     AK_BLE_LINK_CONNECTED,       /* central connected, notify not yet subscribed */
     AK_BLE_LINK_LIVE,            /* connected AND subscribed to notify (link live) */
 } ak_ble_link_state_t;
@@ -119,8 +119,11 @@ typedef enum {
 /** Current BLE link state, for the app to render in its header. */
 ak_ble_link_state_t ak_ble_gatt_link_state(void);
 
-/** Generated advertising name (Agentic Keyboard-XXXXXX). */
+/** Generated advertising name (Ki-board-XXXXXX). */
 const char *ak_ble_gatt_device_name(void);
+
+/** The Bluetooth device address (read-only); false when the stack has none. */
+bool ak_ble_gatt_address(uint8_t out[6]);
 
 /** Stable protocol string for a BLE link state. */
 const char *ak_ble_gatt_link_state_str(ak_ble_link_state_t state);

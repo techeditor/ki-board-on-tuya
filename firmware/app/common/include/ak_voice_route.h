@@ -15,7 +15,7 @@ typedef enum {
 
 typedef struct {
     ak_voice_source_t preferred; /* explicit/default user preference */
-    ak_voice_source_t effective; /* route currently used by K4 */
+    ak_voice_source_t effective; /* route currently used by K5 */
     bool              fallback;  /* preferred=cloud but cloud unavailable */
 } ak_voice_route_t;
 

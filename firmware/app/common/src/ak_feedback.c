@@ -1,6 +1,6 @@
 /**
  * @file ak_feedback.c
- * @brief Probe feedback on UART0 (COM6) — see ak_feedback.h.
+ * @brief Probe feedback on UART0 (COMx) — see ak_feedback.h.
  */
 
 #include "ak_feedback.h"

@@ -15,13 +15,13 @@ static uint8_t s_volume = AK_ASR_DEFAULT_VOLUME;
 #if AK_ASR_BOARD_CLOUD
 
 /* ── Real backend (Tuya cloud ASR) ──────────────────────────────────────────
- * Ported from the tuya_cloud_asr probe, see git tag archive/feature-probes (ai_chat HOLD mode + Tuya
- * AI agent). Requires ENABLE_AI_COMPONENTS, Wi-Fi provisioning and a PID bound
+ * Ported from an earlier internal prototype (ai_chat HOLD mode + Tuya AI
+ * agent). Requires ENABLE_AI_COMPONENTS, Wi-Fi provisioning and a PID bound
  * to an AI agent.
  *
- * K4 stays owned by ak_input (no ai_chat hardware button is registered). The
+ * K5 stays owned by ak_input (no ai_chat hardware button is registered). The
  * app injects HOLD long-press/release events only when the selected route is
- * cloud, preserving system-mode Windows dictation. HOLD itself owns codec/VAD
+ * cloud, preserving system-mode PC speech input. HOLD itself owns codec/VAD
  * capture and the cloud uploader; recognized text arrives on
  * AI_USER_EVT_ASR_OK and is handed to s_on_text as a NUL-terminated string. */
 
@@ -41,7 +41,7 @@ static ak_asr_text_cb s_on_text   = NULL;
 static ak_asr_error_cb s_on_error = NULL;
 static bool           s_ai_ready   = false; /* ai_chat_init succeeded */
 /* When true the board does NOT speak the AI's TTS reply: the recognized text is
- * routed to the PC / Kiro instead, so the keyboard stays silent. Local alert
+ * routed to the PC / Kiro Crew instead, so the keyboard stays silent. Local alert
  * tones (AI_USER_EVT_PLAY_ALERT) use the same player at a different time and are
  * left untouched. Ported from FP-3 (app_chat_bot.c). */
 static volatile bool  s_mute_ai_reply = true;
@@ -128,7 +128,7 @@ static void __ai_event_cb(AI_NOTIFY_EVENT_T *event)
     }
     switch (event->type) {
     case AI_USER_EVT_MIC_DATA:
-        /* Mic capture is streaming => K4 push-to-talk is held. (FP-3 emits a
+        /* Mic capture is streaming => K5 push-to-talk is held. (FP-3 emits a
          * "listening" edge here; the product reflects status via the LCD from
          * tuya_app_main, so nothing to forward from this layer.) */
         break;
@@ -148,7 +148,7 @@ static void __ai_event_cb(AI_NOTIFY_EVENT_T *event)
     case AI_USER_EVT_TEXT_STREAM_ABORT:
     case AI_USER_EVT_CHAT_BREAK:
         /* The agent's reply text. ASR mode ignores it (it is the reply to a
-         * dictation the user did not ask the agent about). */
+         * speech input the user did not ask the agent about). */
         if (!s_mute_ai_reply) {
             chat_record(event->type, (const AI_NOTIFY_TEXT_T *)event->data);
         }
@@ -168,7 +168,7 @@ static void __ai_event_cb(AI_NOTIFY_EVENT_T *event)
     case AI_USER_EVT_TTS_START:
     case AI_USER_EVT_TTS_DATA:
         /* Suppress the AI's spoken reply: the recognized text is routed to the
-         * PC / Kiro, so the board must not talk back. Stop the tone player as the
+         * PC / Kiro Crew, so the board must not talk back. Stop the tone player as the
          * reply TTS streams. Local alert tones fire on AI_USER_EVT_PLAY_ALERT at a
          * different time and are left untouched. (Ported from FP-3.) */
         if (s_mute_ai_reply) {
@@ -201,7 +201,7 @@ OPERATE_RET ak_asr_init(ak_asr_text_cb on_text, ak_asr_error_cb on_error)
         return rt;
     }
     s_ai_ready = true;
-    PR_NOTICE("ak_asr: cloud backend up (ai_chat HOLD, capture driven by K4)");
+    PR_NOTICE("ak_asr: cloud backend up (ai_chat HOLD, capture driven by K5)");
     return OPRT_OK;
 }
 

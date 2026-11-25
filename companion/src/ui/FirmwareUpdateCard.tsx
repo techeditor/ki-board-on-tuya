@@ -1,4 +1,4 @@
-/* Local firmware update over USB (docs/ota.md). The backend checks the
+/* Local firmware update over USB. The backend checks the
  * package signature; the keyboard checks it again and asks for K6 / K1. */
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -60,32 +60,31 @@ export function FirmwareUpdateCard({ usb, firmware }: { usb: boolean; firmware: 
 
   return (
     <>
-      <label style={{ marginTop: 14 }}>{t("ota.title")}</label>
-      <p className="hint">{t("ota.current", { version: firmware || "--" })}</p>
-      <input type="file" accept=".akota" disabled={!usb || running} onChange={(e) => void pick(e.target.files?.[0])} />
+      <div className="kc-muted kc-note">{t("ota.current", { version: firmware || "--" })}</div>
+      <div className="kc-field">
+        <input type="file" accept=".akota" disabled={!usb || running} onChange={(e) => void pick(e.target.files?.[0])} />
+      </div>
       {pkg && (
-        <p className="hint">
+        <div className="kc-muted kc-note">
           {t("ota.package", { version: pkg.version, profile: pkg.profile, key: pkg.key, size: Math.round(pkg.image_size / 1024) })}
-        </p>
+        </div>
       )}
-      <div className="actions" style={{ marginTop: 6 }}>
-        <button disabled={!usb || !pkg || running} onClick={() => void run("ota_start")}>
+      <div className="kc-field">
+        <button type="button" className="kc-btn" disabled={!usb || !pkg || running} onClick={() => void run("ota_start")}>
           {t("ota.install")}
         </button>
-        <button className="secondary" disabled={!running || progress?.state === "installing"} onClick={() => void run("ota_cancel")}>
+        <button type="button" className="kc-btn ghost" disabled={!running || progress?.state === "installing"} onClick={() => void run("ota_cancel")}>
           {t("ota.cancel")}
         </button>
       </div>
       {progress && (
-        <div className="lcd" style={{ marginTop: 6 }}>
-          <span>OTA</span>
-          <strong className={progress.state === "installed" ? "good-text" : progress.state === "failed" ? "warn-text" : ""}>
-            {stateText}
-          </strong>
+        <div className="kc-field">
+          <span className="kc-muted">OTA</span>
+          <strong>{stateText}</strong>
         </div>
       )}
-      {error && <p className="hint warn-text">{error}</p>}
-      <p className={`hint ${usb ? "good-text" : "warn-text"}`}>{t("ota.hint")}</p>
+      {error && <div className="error-banner">{error}</div>}
+      <div className="kc-muted kc-note">{t("ota.hint")}</div>
     </>
   );
 }

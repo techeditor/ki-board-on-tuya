@@ -5,10 +5,10 @@
  * (pairing window, BLE unpair, Wi-Fi, License, reset) are USB only and the
  * keyboard asks for K6 before acting; over BLE their buttons stay disabled
  * and the cards show status only. */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useI18n } from "../i18n";
-import { Card, StateBadge } from "./primitives";
+import { Card, InfoTip, StateBadge } from "./primitives";
 import { provReasonKey, provRemainingS, type BoardStatus } from "./boardStatus";
 
 function mmss(total: number): string {
@@ -56,7 +56,7 @@ export function PairingWindowCard({ status, usbConnected }: { status: BoardStatu
   );
 }
 
-/** License presence only. UUID / AuthKey values never reach this view. */
+/** Whether the Tuya UUID and AuthKey are stored (the keyboard's combined state). The values never reach this view. */
 export function CredentialsCard({ status }: { status: BoardStatus }) {
   const { t } = useI18n();
   const tone = status.license === "present" ? "success" : status.license === "missing" ? "warning" : "neutral";
@@ -76,38 +76,10 @@ export function CredentialsCard({ status }: { status: BoardStatus }) {
   );
 }
 
-/** Voice mode metric (read-only) plus the Chat-mode conversation. Chat turns
- * are display only: they are never typed into Kiro Crew (CP-01). */
-export function VoiceModeCard({ status }: { status: BoardStatus }) {
-  const { t } = useI18n();
-  const chat = status.voiceMode === "chat";
-  return (
-    <Card title={t("conn.voice.title")} info="help.conn.voice">
-      <div className="kc-field" style={{ marginTop: 0 }}>
-        <span>{t("conn.voice.mode")}</span>
-        <StateBadge tone={chat ? "blue" : "neutral"}>{chat ? t("conn.voice.chat") : t("conn.voice.asr")}</StateBadge>
-      </div>
-      {chat && (
-        <div className="kc-chat" aria-label={t("conn.voice.chatLog")}>
-          {status.chatTurns.length === 0 ? (
-            <div className="kc-muted">{t("conn.voice.empty")}</div>
-          ) : (
-            status.chatTurns.map((turn, i) => (
-              <div key={i} className={`kc-chat-turn ${turn.role === "agent" ? "agent" : ""}`}>
-                <b>{turn.role === "agent" ? t("conn.voice.ai") : t("conn.voice.you")}</b> {turn.text}
-              </div>
-            ))
-          )}
-        </div>
-      )}
-    </Card>
-  );
-}
-
 /** BLE secure channel pairing (protocol.md "BLE 安全通道"). The key is made
  * on the keyboard and handed over USB only, while the pairing window is open;
  * this card shows just its id. Forget removes this PC's copy; the keyboard's
- * copy is cleared on the device (Settings → Credentials, K1 twice) or by a
+ * copy is cleared on the device (Settings → Device info, K1 twice) or by a
  * USB ble_unpair request the keyboard confirms with K6. */
 export function BlePairingCard({ status, usbConnected }: { status: BoardStatus; usbConnected: boolean }) {
   const { t } = useI18n();
@@ -216,7 +188,7 @@ export function SavedWifiCard({ status, usbConnected }: { status: BoardStatus; u
         </div>
       ))}
       {list && (
-        <div className="kc-muted kc-note">{t("conn.wifi.count", { n: entries.length, max: list.max || 10 })}</div>
+        <div className="kc-muted kc-note">{t("conn.wifi.count", { n: entries.length, max: list.max || 8 })}</div>
       )}
       {entries.length > 0 && (
         <div className="kc-field">
@@ -246,62 +218,87 @@ export function BoardStatusCards({ status, usbConnected }: { status: BoardStatus
       <CredentialsCard status={status} />
       <SavedWifiCard status={status} usbConnected={usbConnected} />
       <BlePairingCard status={status} usbConnected={usbConnected} />
-      <VoiceModeCard status={status} />
     </div>
   );
 }
 
 const LED_DELAYS_S = [30, 60, 300, 900];
 /** LCD font sizes the keyboard offers (ak_text.h). */
-const FONT_SIZES_PX = [12, 16];
+const FONT_SIZES_PX = [12, 14, 16];
 
 /** FR-02 "Keyboard settings": the normal items the keyboard settings page
  * has, changed over USB or the paired BLE link. The keyboard applies and
  * echoes them (device_settings_state); the last change on either side wins.
- * Language, volume and brightness live in the settings menu and Device Bridge. */
+ * The voice mode lives here only: the keyboard reports it in the same
+ * device_settings_state, so a separate "voice mode" status card repeated it.
+ * Volume and brightness sit next to it in the Device settings view. Each
+ * setting is one row: the name on the left, the choices on the right. */
 export function KeyboardSettingsCard({ status }: { status: BoardStatus }) {
   const { t } = useI18n();
   const [error, setError] = useState("");
   const kb = status.keyboard;
-  const send = (update: Record<string, string | number>) => {
+  const send = (update: Record<string, string | number | boolean>) => {
     setError("");
     invoke("update_device_settings", { update }).catch((e) => setError(String(e)));
   };
   const seg = (on: boolean) => `kc-seg ${on ? "on" : ""}`;
+  const chat = status.voiceMode === "chat";
   if (!kb) {
+    // Older firmware reports only the mode (voice-mode event); no settings to change.
     return (
       <Card title={t("kb.title")} info="help.kb">
+        <div className="kc-field" style={{ marginTop: 0 }}>
+          <span>{t("kb.voiceMode")}</span>
+          <StateBadge tone={chat ? "blue" : "neutral"}>{t(chat ? "conn.voice.chat" : "conn.voice.asr")}</StateBadge>
+        </div>
         <div className="kc-muted kc-note">{t("kb.waiting")}</div>
       </Card>
     );
   }
+  const row = (label: ReactNode, choices: ReactNode, first = false) => (
+    <div className="kc-field kc-setting" style={first ? { marginTop: 0 } : undefined}>
+      <span>{label}</span>
+      <div className="kc-keymap-head kc-setting-choices">{choices}</div>
+    </div>
+  );
   return (
     <Card title={t("kb.title")} info="help.kb">
-      <div className="kc-field" style={{ marginTop: 0 }}>
-        <span>{t("kb.voiceMode")}</span>
-      </div>
-      <div className="kc-keymap-head">
-        {(["asr", "chat"] as const).map((m) => (
+      {row(
+        <>
+          {t("kb.voiceMode")}
+          <InfoTip k="help.conn.voice" />
+        </>,
+        (["asr", "chat"] as const).map((m) => (
           <button key={m} type="button" className={seg(kb.voice_mode === m)} onClick={() => send({ voice_mode: m })}>
             {t(m === "asr" ? "conn.voice.asr" : "conn.voice.chat")}
           </button>
-        ))}
-      </div>
-      <div className="kc-field">
-        <span>{t("kb.ledPower")}</span>
-      </div>
-      <div className="kc-keymap-head">
-        {(["off", "on", "auto"] as const).map((m) => (
+        )),
+        true,
+      )}
+      {chat && (
+        <div className="kc-chat" aria-label={t("conn.voice.chatLog")}>
+          {status.chatTurns.length === 0 ? (
+            <div className="kc-muted">{t("conn.voice.empty")}</div>
+          ) : (
+            status.chatTurns.map((turn, i) => (
+              <div key={i} className={`kc-chat-turn ${turn.role === "agent" ? "agent" : ""}`}>
+                <b>{turn.role === "agent" ? t("conn.voice.ai") : t("conn.voice.you")}</b> {turn.text}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+      {row(
+        t("kb.ledPower"),
+        (["off", "on", "auto"] as const).map((m) => (
           <button key={m} type="button" className={seg(kb.led_power === m)} onClick={() => send({ led_power: m })}>
             {t(`kb.led.${m}`)}
           </button>
-        ))}
-      </div>
-      <div className="kc-field">
-        <span>{t("kb.ledDelay")}</span>
-      </div>
-      <div className="kc-keymap-head">
-        {LED_DELAYS_S.map((s) => (
+        )),
+      )}
+      {row(
+        t("kb.ledDelay"),
+        LED_DELAYS_S.map((s) => (
           <button
             key={s}
             type="button"
@@ -311,22 +308,26 @@ export function KeyboardSettingsCard({ status }: { status: BoardStatus }) {
           >
             {s < 60 ? t("kb.delay.s", { n: s }) : t("kb.delay.min", { n: s / 60 })}
           </button>
-        ))}
-      </div>
-      {kb.font_size !== undefined && (
-        <>
-          <div className="kc-field">
-            <span>{t("kb.fontSize")}</span>
-          </div>
-          <div className="kc-keymap-head">
-            {FONT_SIZES_PX.map((px) => (
-              <button key={px} type="button" className={seg(kb.font_size === px)} onClick={() => send({ font_size: px })}>
-                {t("kb.font.px", { n: px })}
-              </button>
-            ))}
-          </div>
-        </>
+        )),
       )}
+      {kb.font_size !== undefined &&
+        row(
+          t("kb.fontSize"),
+          FONT_SIZES_PX.map((px) => (
+            <button key={px} type="button" className={seg(kb.font_size === px)} onClick={() => send({ font_size: px })}>
+              {t("kb.font.px", { n: px })}
+            </button>
+          )),
+        )}
+      {kb.animation !== undefined &&
+        row(
+          t("kb.animation"),
+          [true, false].map((on) => (
+            <button key={String(on)} type="button" className={seg(kb.animation === on)} onClick={() => send({ animation: on })}>
+              {t(on ? "common.on" : "common.off")}
+            </button>
+          )),
+        )}
       {error && <StateBadge tone="warning">{error}</StateBadge>}
     </Card>
   );

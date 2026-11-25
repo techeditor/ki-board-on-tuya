@@ -3,7 +3,7 @@
  * @brief Shared v0.3.2 WS2812 chain power switch (LED_PWR_EN = P18) sequence
  *        for the bring-up apps that drive the LED chain.
  *
- * Order (hardware/eda/ws2812-power-reduction-study.md §3, §6.3):
+ * Order:
  *   on : DIN (P4) idle low -> P18 high -> settle -> reset (DIN low) -> data
  *   off: all-zero frame -> DIN idle low -> P18 low; the next power-on waits
  *        BRINGUP_LED_PWR_OFF_HOLD_MS (Q2 turns off in ~160 ms via R9/C15).

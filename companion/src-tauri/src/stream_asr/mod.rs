@@ -180,13 +180,19 @@ enum Msg {
     Engine(u32, AsrEvent),
 }
 
-/// Feeds microphone audio into a running session (cheap to clone).
+/// Feeds microphone audio into a running session (cheap to clone). A
+/// long-recording controller makes its own, so it can move the audio from
+/// one session to the next.
 #[derive(Clone)]
-pub struct AudioFeeder(Sender<Msg>);
+pub struct AudioFeeder(std::sync::Arc<dyn Fn(Vec<i16>) + Send + Sync>);
 
 impl AudioFeeder {
+    pub fn new(sink: impl Fn(Vec<i16>) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(sink))
+    }
+
     pub fn push(&self, pcm: Vec<i16>) {
-        let _ = self.0.send(Msg::Audio(pcm));
+        (self.0)(pcm);
     }
 }
 
@@ -228,7 +234,10 @@ impl Session {
     }
 
     pub fn feeder(&self) -> AudioFeeder {
-        AudioFeeder(self.tx.clone())
+        let tx = self.tx.clone();
+        AudioFeeder::new(move |pcm| {
+            let _ = tx.send(Msg::Audio(pcm));
+        })
     }
 
     /// End of speech: wait for the final result.

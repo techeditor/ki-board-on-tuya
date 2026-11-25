@@ -1,6 +1,6 @@
-//! System speech recognition (dictation) seam.
+//! System speech recognition seam.
 //!
-//! Phase 1's "system" voice engine drives Windows' built-in dictation via
+//! Phase 1's "system" voice engine drives Windows' built-in speech input via
 //! `Windows.Media.SpeechRecognition` (WinRT). That binding requires the
 //! `windows` crate, which only resolves for the Windows target; to keep the
 //! Linux CI build (and `Cargo.lock`) untouched, the Windows implementation here
@@ -11,7 +11,7 @@
 //! The trait is what the rest of the app depends on, so swapping in the real
 //! WinRT recognizer later is a drop-in change with no call-site churn.
 
-/// Outcome of a dictation request.
+/// Outcome of a speech input request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecognitionResult {
     /// Final recognized text.
@@ -20,7 +20,7 @@ pub enum RecognitionResult {
     Empty,
 }
 
-/// Drives a one-shot system dictation session.
+/// Drives a one-shot system speech input session.
 pub trait SpeechRecognizer: Send {
     /// Begin listening and block until a final result (or error).
     fn recognize_once(&self) -> Result<RecognitionResult, String>;

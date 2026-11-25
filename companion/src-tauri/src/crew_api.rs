@@ -335,7 +335,7 @@ pub struct CrewModel {
 
 /// One pending question card from `GET /api/chat/slots/{slot}/question`.
 /// A blocking MCP `ask_question` card has `ask_id`; a stateless or native
-/// (kiro-cli `AskUserQuestion`) card has `card_id`.
+/// (built-in question tool, not MCP) card has `card_id`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct QuestionCard {
     #[serde(default, deserialize_with = "null_default")]
@@ -484,8 +484,11 @@ impl CrewApiClient {
     /// CP-09: the process on 127.0.0.1:<port> must be this user's Kiro Crew
     /// gateway before the secret or a token is sent to it. Fails closed.
     pub fn verify_gateway(&self) -> Result<u32, String> {
-        crate::crew_identity::verify_gateway(self.identity.as_ref(), self.config.port, &self.config.install_root())
-            .map_err(|e| e.to_string())
+        let roots = crate::crew_identity::GatewayRoots {
+            install_root: self.config.install_root(),
+            app_roots: crate::crew_identity::desktop_app_roots(),
+        };
+        crate::crew_identity::verify_gateway(self.identity.as_ref(), self.config.port, &roots).map_err(|e| e.to_string())
     }
 
     pub fn from_env() -> Result<Self, String> {

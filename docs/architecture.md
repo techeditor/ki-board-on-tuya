@@ -2,7 +2,7 @@
 
 > 本文描述 v0.3 硬件与固件 0.3.x 的整体结构。线上协议的权威定义在
 > [`shared/protocol/protocol.md`](../shared/protocol/protocol.md)；用户可见的按键、灯光和菜单行为见
-> [`docs/interaction.md`](interaction.md)。
+> [`docs/user-manual.md`](user-manual.md)（[English](user-manual.en.md)）。
 
 ## 1. 产品定位
 
@@ -42,7 +42,7 @@ Ki-board 是一款面向 Kiro Crew 使用者的 AI 键盘：它把 Kiro Crew 的
 flowchart LR
   subgraph KB[键盘：T5AI-Core 固件]
     KEYS[按键 / 旋钮]
-    UI[状态机 + LCD + 键灯<br/>③ 确认 / 菜单 / K6 确认升级]
+    UI[状态机 + LCD + 键灯<br/>输入栏 / 菜单 / K6 确认升级]
     MIC1[键盘麦克风]
     OTA[固件升级接收端]
   end
@@ -66,17 +66,17 @@ flowchart LR
   UPD -->|仅 USB：分段发送| OTA
   OTA -->|仅 USB：进度 / 确认状态| UPD
   ROUTE <-->|API：REST + WebSocket<br/>发消息、回复审批 / 对话状态、请求| CREW
-  CREW -->|状态 hook| SINK
+  CREW -.->|接口不可用时：状态 hook（后备）| SINK
   SINK --> ROUTE
 ```
 
-图中“文字”指送回键盘 ③ 确认的识别结果：键盘云端识别的文字在键盘内部直接进 ③，电脑识别的文字由
-Companion 发回键盘再进 ③。固件升级只走 USB，键盘上按 K6 确认后才写入。
+图中“文字”指识别结果：键盘云端识别的文字在键盘内部直接进输入栏，电脑识别的文字由
+Companion 发回键盘再进输入栏；设了 Alt+N 的槽，Companion 把文字打进 Crew 输入框。固件升级只走 USB，键盘上按 K6 确认后才写入。
 
 ### 3.1 固件（`firmware/app/`）
 
-基于 [TuyaOpen](https://github.com/tuya/TuyaOpen)，C 语言。一个应用、多个构建配置（profile）：
-共享核心模块，按配置选择 USB / BLE 传输和语音识别后端。
+基于 [TuyaOpen](https://github.com/tuya/TuyaOpen)，C 语言。一个应用、两个构建配置（profile）：release 和 debug，都是 USB + BLE 双载体加板端云端语音识别。
+共享核心模块，传输和语音识别后端由编译开关选择。
 
 | 模块（`firmware/app/common/`） | 作用 |
 |---|---|
@@ -85,14 +85,13 @@ Companion 发回键盘再进 ③。固件升级只走 USB，键盘上按 K6 确�
 | `ak_leds` / `ak_led_policy` / `ak_led_power` | 键灯颜色与动画、灯链电源（关 / 开 / 自动断电） |
 | `ak_protocol` / `ak_rx` / `ak_validate` / `ak_uart` / `ak_ble_gatt` | 帧编解码、严格的入站校验、按来源（USB / BLE）门控命令 |
 | `ak_ble_sec` | BLE 应用层安全通道（配对密钥、握手、加密帧） |
-| `ak_asr` / `ak_voice_route` / `ak_voice_mode` / `ak_cloud` | 板端云语音识别、语音路由（云端 / 电脑听写）、语音模式（识别 / 对话） |
-| `ak_wifi` / `ak_wifi_store` / `ak_provision` / `ak_cred` / `ak_reset_netcfg` | Wi-Fi 连接与已保存网络（最多 10 个，加密存在 KV；断线 25 s 后按信号强弱依次重连已保存的网络）、配网窗口、设备授权状态、重置配网 |
+| `ak_asr` / `ak_voice_route` / `ak_voice_mode` / `ak_cloud` | 板端云语音识别、语音路由（云端 / 电脑识别）、语音模式（识别 / 对话） |
+| `ak_wifi` / `ak_wifi_store` / `ak_provision` / `ak_cred` / `ak_reset_netcfg` | Wi-Fi 连接与已保存网络（最多 8 个，加密存在 KV；断线 25 s 后按信号强弱依次重连已保存的网络）、配网窗口、设备授权状态、重置配网 |
 | `ak_ota` / `ak_ota_link` | 本地固件升级：验签、版本检查、写分区、确认 |
 | `ak_settings` / `ak_kv` | 设备设置页（音量、亮度、语言、语音模式、灯光）；语言、语音模式和灯光设置重启后保留 |
 | `ak_battery` / `ak_bat_gauge` | 电池电压采样与电量估算 |
 
-主机单元测试在 `firmware/app/test/`，在电脑上编译运行，不需要连接键盘。版本号以 `firmware/app/VERSION` 为准，
-编号规则见 [`docs/versioning.md`](versioning.md)。`firmware/bringup/` 是一组独立的硬件验证小程序
+版本号以 `firmware/app/VERSION` 为准。`firmware/bringup/` 是一组独立的硬件验证小程序
 （按键、旋钮、屏幕、灯链、无线），新板子焊好后逐个烧录，检查硬件是否正常。
 
 ### 3.2 Companion（`companion/`）
@@ -104,7 +103,7 @@ Windows 桌面程序，Tauri 2：Rust 后端 + React / TypeScript 界面。
 | 传输层（`src-tauri/src/transport/`） | USB 串口与 BLE GATT 连接；BLE 端实现与固件相同的安全通道（`ble_sec.rs`） |
 | 协议（`protocol.rs`、`menu_wire.rs`、`lcd_text.rs`） | 与固件共用的帧定义；生成发往键盘屏幕的菜单和提示文字 |
 | 路由（`kirocrew_control.rs`、`crew_menus.rs`、`voice_send.rs`、`inject.rs`） | 把键盘手势变成对 Kiro Crew 的操作；把需要决定的请求排队并变成键盘菜单；把确认后的语音文字发给选中的对话 |
-| 状态（`status_sink.rs`、`hook_install.rs`、`crew_api.rs`） | 两条来源：Kiro Crew 的状态 hook 调用 Companion 推送事件，本机 HTTP 端口接收；Companion 经网关 API 读取对话状态。合成三个槽位的状态发给键盘 |
+| 状态（`crew_api.rs`、`status_sink.rs`、`hook_install.rs`） | 主路径：Companion 经 Kiro Crew 本机接口（REST + `/api/ws`，只走本机回环）读取对话状态、请求和模型，发送提示词、审批和回答。后备：Kiro Crew 的四条状态 hook 调用 Companion，本机 HTTP 端口接收，接口连不上时仍能显示状态。合成三个槽位的状态发给键盘 |
 | 电脑识别（`stream_asr/`、`secrets.rs`） | 电脑端流式语音识别：豆包、阿里云百炼（云端），sherpa-onnx（本地离线，模型按需下载并校验）；云端失败可自动回退本地；API Key 只存在系统凭据管理器 |
 | 网关校验（`crew_identity.rs`） | 连接本机 Kiro Crew 网关前确认对方身份（见第 5 节） |
 | 升级（`ota.rs`） | 校验签名包，只经 USB 分段发给键盘，并显示键盘回报的进度和结果 |
@@ -114,8 +113,7 @@ Windows 桌面程序，Tauri 2：Rust 后端 + React / TypeScript 界面。
 
 键盘与 Companion 之间是 UTF-8 **JSON Lines**：一行一个 JSON 对象，字段为 `v` / `seq` / `type` / `payload`，
 接收方忽略不认识的 `type`。同一套协议跑在 USB 串口和 BLE GATT 上；BLE 上每一行先经过加密通道。
-完整定义：[`shared/protocol/protocol.md`](../shared/protocol/protocol.md)；阅读导引：
-[`docs/protocol.md`](protocol.md)。
+完整定义：[`shared/protocol/protocol.md`](../shared/protocol/protocol.md)。
 
 ## 4. 数据流
 
@@ -133,17 +131,18 @@ Windows 桌面程序，Tauri 2：Rust 后端 + React / TypeScript 界面。
    - **键盘云端识别**：键盘麦克风录音，经 Wi-Fi 发到涂鸦云识别，识别文字回到键盘。
    - **电脑识别**：Companion 用电脑麦克风录音，流式送到所选引擎（豆包、阿里云百炼或本地 sherpa-onnx）。
      松开语音键后键盘停在 ②，状态栏显示「识别中…」；最终文字由 Companion 送回键盘。等待中按 K1 取消；
-     15 s 没有结果时键盘回到 ① 并提示超时。取消或超时后迟到的结果不会再进确认页。
-3. 两种识别的文字都进键盘屏幕的确认页（状态 ③）。K4 删字，按住语音键重说，K1 取消。识别结果不会直接打进任何窗口。
+     15 s 没有结果时键盘回到 ① 并提示超时。取消或超时后迟到的结果不会再出现。
+3. 两种识别的文字都进键盘屏幕底部的输入栏（键盘模式）。K4 删字（长按清空），按住语音键接着说。设了 Alt+N 的对话走电脑模式：
+   Companion 切到那个对话，把文字打进输入框，不发送，由你按 K6 或 Enter 发送。键盘模式下识别结果不会打进任何窗口。
    电脑识别的引擎、Key 保存和本地模型见 [`docs/pc-asr.md`](pc-asr.md)。
-4. 按 K6 确认后，Companion 把文字经网关 API 发到当前选中的对话（默认）；也可以设置成用模拟按键送进 Kiro Crew 窗口的输入框。
+4. 键盘模式下按 K6，Companion 把文字经网关 API 发到 K1–K3 选中的对话，不管电脑上开着哪个对话。
 
 语音模式还有一种「对话」模式：键盘直接与涂鸦云上的对话 agent 对话，回复只显示在键盘上，不发给 Kiro Crew。
 
 ### 4.3 状态上屏与请求
 
 - Companion 跟踪 K1–K3 绑定的三个 Kiro Crew 对话，把每个对话的状态（空闲 / 忙碌 / 等待操作 / 有新信息 / 未绑定）
-  发给键盘，键盘用屏幕左侧图标背景色和键灯显示。
+  发给键盘，键盘用屏幕左侧卡片上的状态圆点和键灯显示。
 - 对话需要用户决定时（权限审批、提问、回复选项），Companion 按优先级排队，同一时刻只给键盘发一个菜单。
   用户在键盘上按键回答，键盘回传选择结果，Companion 校验后回复给对应对话。
 
@@ -156,10 +155,9 @@ Windows 桌面程序，Tauri 2：Rust 后端 + React / TypeScript 界面。
 
 ### 4.5 固件升级（OTA）
 
-只经 USB。发布方用签名工具（`firmware/app/tools/ota_pack.py`）生成签名包 `.akota`；Companion 校验后分段发给
+只经 USB。发布方生成签名包 `.akota`；Companion 校验后分段发给
 键盘；键盘再次验签、检查版本（只升不降），在屏幕上弹出确认框，用户按 K6 后才写入并重启安装。
 开始升级前和写完、重启前各检查一次供电：USB 供电，或电量读数可信且不低于 30%；不满足就报错，不写入、不重启。
-细节见 [`docs/ota.md`](ota.md)。
 
 ## 5. 安全模型概要
 
@@ -180,11 +178,10 @@ Windows 桌面程序，Tauri 2：Rust 后端 + React / TypeScript 界面。
 
 | 路径 | 内容 |
 |---|---|
-| [`firmware/app/`](../firmware/app/) | 产品固件（TuyaOpen，C）、主机单元测试、签名与字体工具 |
-| [`firmware/assets/`](../firmware/assets/) | 固件位图图标的源文件与生成脚本 |
+| [`firmware/app/`](../firmware/app/) | 产品固件（TuyaOpen，C） |
 | [`firmware/bringup/`](../firmware/bringup/) | 硬件上电验证程序 |
 | [`companion/`](../companion/) | 桌面 Companion（Tauri：Rust + React / TypeScript） |
 | [`shared/protocol/protocol.md`](../shared/protocol/protocol.md) | 键盘与 Companion 的协议权威定义 |
-| [`docs/`](./) | 架构（本文）、交互、协议导引、OTA、按键手势规格、版本规范 |
+| [`docs/`](./) | 架构（本文）、用户手册 |
 | [`hardware/pinmap/`](../hardware/pinmap/) | 引脚映射、网表、BOM、元件说明、引脚检查脚本 |
 | [`hardware/exports/`](../hardware/exports/) | 原理图、PCB、BOM、坐标文件等设计导出 |

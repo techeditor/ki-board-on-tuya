@@ -2,8 +2,7 @@
  * @file ak_board_io.h
  * @brief Authoritative IO mapping for the Agentic Keyboard product firmware.
  *
- * Target board: expansion baseboard v0.3 (major refactor; see
- * hardware/expansion-baseboard-v0.3-change-scope.md).
+ * Target board: expansion baseboard v0.3 (major refactor).
  *
  * v0.3 changes vs v0.2 (baseboard silk v1.2):
  *   - Inputs: 5 keys + WS-1002 5-way joystick  ->  6 keys (K1..K6) + EC11
@@ -16,8 +15,7 @@
  *     reaches P7 through a 10k series resistor, so P7 must be configured as a
  *     high-impedance INPUT (never driven).
  *
- * Values mirror hardware/expansion-baseboard-v0.3-change-scope.md and the
- * v0.3 pin map in hardware/pinmap/pinmap-v0.3.md. Do not copy pin
+ * Values mirror the v0.3 pin map in hardware/pinmap/pinmap-v0.3.md. Do not copy pin
  * definitions from reference projects.
  */
 
@@ -31,7 +29,7 @@
 #define AK_UART_RX_PIN         TUYA_IO_PIN_10
 #define AK_UART_TX_PIN         TUYA_IO_PIN_11
 #define AK_UART_BAUDRATE       115200U
-/* 4 KB: an OTA transfer keeps four ~400-byte frames in flight (docs/ota.md);
+/* 4 KB: an OTA transfer keeps four ~400-byte frames in flight;
  * the app loop must not lose them while it erases or redraws. */
 #define AK_UART_RX_BUFFER_SIZE 4096U
 
@@ -106,8 +104,7 @@
 
 /* v0.3.2: WS2812 chain + U2 power switch (P18 -> R10 -> Q3 NPN -> Q2
  * AO3401A gate). High = VDD_LED on. R11 pulls it low while P18 floats.
- * Unconnected on lite / v0.3.1, so one image serves all three boards.
- * See hardware/eda/ws2812-power-reduction-study.md §3.4 / §4. */
+ * Unconnected on lite / v0.3.1, so one image serves all three boards. */
 #define AK_PIN_LED_PWR_EN TUYA_GPIO_NUM_18
 
 #endif /* AK_BOARD_IO_H */

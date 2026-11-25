@@ -217,8 +217,9 @@ bool ak_provision_rebind_resolve(ak_provision_t *p, bool confirm, uint32_t now_m
 bool ak_provision_ble_takeover_allowed(const ak_provision_t *p, bool activated, bool tuya_provisioning)
 {
     /* While a pairing window (or its confirm) is up, BLE stays with Tuya's
-     * netcfg; AK takes it once the window has closed or run out. */
-    return activated && !tuya_provisioning && (p == NULL || p->state == AK_PROV_CLOSED);
+     * netcfg; AK takes it once the window has closed or run out, activated
+     * or not. */
+    return (p == NULL || p->state == AK_PROV_CLOSED) && !(activated && tuya_provisioning);
 }
 
 uint32_t ak_provision_remaining_s(const ak_provision_t *p, uint32_t now_ms)

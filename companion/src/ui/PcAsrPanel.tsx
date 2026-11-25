@@ -91,7 +91,7 @@ export function PcAsrPanel({
     }
   }
 
-  function save(patch: Partial<AsrSettings>) {
+  function save(patch: Partial<AsrSettings> & Record<string, unknown>) {
     if (!view) return;
     void call("asr_set_settings", { settings: { ...view.settings, ...patch } });
   }
@@ -139,6 +139,7 @@ export function PcAsrPanel({
         ))}
       </div>
       <p className="hint">{t(`asr.route.${voiceSource}.hint`)}</p>
+
 
       {voiceSource === "system" && s && view && (
         <>

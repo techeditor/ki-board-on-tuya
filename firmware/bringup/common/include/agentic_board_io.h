@@ -55,7 +55,7 @@
  *
  * NOTE (hardware doc mismatch, pending final confirmation): the v0.3 schematic
  * review (2026-10-01) routes TE to P7 via a 10k series resistor as a GPIO
- * input, while the change-scope pin table leaves FPC TE open/NC. Either way
+ * input, while the v0.3 pin table leaves FPC TE open/NC. Either way
  * bring-up must NOT drive P7 as an output. We define it as an input and do not
  * actively use TE; revisit once the schematic is frozen.
  */
@@ -87,9 +87,8 @@
 /*
  * v0.3.2 WS2812 chain power switch: LED_PWR_EN = P18 (J1.11), high = chain and
  * U2 (SN74LV1T34) powered via Q2 AO3401A; R9 holds it off while P18 floats.
- * See hardware/eda/ws2812-power-reduction-study.md. On lite / v0.3.1 boards P18
- * is not connected (the chain is always powered). Only the led_power bring-up
- * app drives it; no other bring-up app touches P18.
+ * On lite / v0.3.1 boards P18 is not connected (the chain is always powered).
+ * Only the led_power bring-up app drives it; no other bring-up app touches P18.
  */
 #define AK_LED_PWR_EN_PIN TUYA_GPIO_NUM_18
 

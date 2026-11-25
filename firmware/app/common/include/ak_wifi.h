@@ -54,6 +54,19 @@ bool ak_wifi_available(void);
 const char *ak_wifi_current_ssid(void);
 ak_wifi_state_t ak_wifi_current_state(void);
 
+/** Read-only network facts for Settings > Device info and the `device_info`
+ *  frame: station MAC (valid even without a link), and the IP address and
+ *  signal strength (only while linked). Never touches credentials. */
+typedef struct {
+    bool    mac_valid;
+    uint8_t mac[6];
+    bool    ip_valid;
+    char    ip[16];
+    bool    rssi_valid;
+    int8_t  rssi; /* dBm */
+} ak_wifi_net_info_t;
+void ak_wifi_net_info(ak_wifi_net_info_t *out);
+
 /** Apply credentials and start connecting. Reports progress via the status
  *  callback. In the stub this immediately reports AK_WIFI_FAILED. */
 void ak_wifi_connect(const char *ssid, const char *pass);

@@ -17,9 +17,6 @@
 //! * [`ControlRouter`] / [`route_input`] — a **pure**, IO-free mapping from a
 //!   decoded board [`Inbound`] event to a [`ControlAction`]. Table-driven and
 //!   unit-tested on Linux (the tests at the bottom run in `cargo test`).
-//!
-//! Design ref: see git tag `archive/feature-probes`
-//! (`.kiro/specs/feature-probes-kirocrew-local-control/design.md`).
 
 use crate::protocol::{Inbound, KeyAction};
 
@@ -48,7 +45,7 @@ pub enum Chord {
     JumpChat(u8),
     /// Ctrl+N — switch Crew instance N (N = 1..=9). Kiro Crew's "Remote Crews"
     /// shortcuts: Ctrl+1 = Switch to Local, Ctrl+2 = remote crew 1,
-    /// Ctrl+3 = remote crew 2, … Driven by a K1-K3 double-click.
+    /// Ctrl+3 = remote crew 2, … Driven by a K1-K3 long press (500 ms).
     SwitchInstance(u8),
     /// Alt+Left — previous chat.
     PrevChat,
@@ -104,6 +101,30 @@ impl Chord {
 
 // ─────────────────────── Pure ControlRouter (T2) ───────────────────────
 
+/// FR-03 limited shortcuts, index-aligned with `scene::SHORTCUTS`
+/// (`key_enter` .. `key_new_chat`). Only existing Kiro Crew window chords.
+pub const SHORTCUT_CHORDS: [Chord; 14] = [
+    Chord::Enter,
+    Chord::Esc,
+    Chord::Up,
+    Chord::Down,
+    Chord::Left,
+    Chord::Right,
+    Chord::Backspace,
+    Chord::DeleteWord,
+    Chord::ClearInput,
+    Chord::CtrlK,
+    Chord::PrevChat,
+    Chord::NextChat,
+    Chord::FocusInput,
+    Chord::NewChat,
+];
+
+/// Chord of shortcut N (1-based), or `None` out of range.
+pub fn shortcut_chord(n: u8) -> Option<Chord> {
+    SHORTCUT_CHORDS.get((n as usize).checked_sub(1)?).copied()
+}
+
 /// The action the router decided a board event should produce. Consumed by the
 /// (Windows) [`KiroCrewController`]; pure and IO-free so it is fully testable.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,14 +154,39 @@ pub enum ControlAction {
 pub struct ControlCtx {
     /// Chat numbers for K1, K2, K3 (index 0..=2). Configurable by the UI.
     pub jump_chats: Vec<u8>,
+    /// What EC11 rotation does in standby (the current scene's `knob`, FR-03).
+    pub knob: KnobMode,
+}
+
+/// FR-03 scene `knob`: EC11 rotation in standby.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum KnobMode {
+    /// Up / Down arrow per detent (the v0.3 behaviour).
+    #[default]
+    Arrows,
+    /// Previous / next chat (Alt+Left / Alt+Right) per detent.
+    Chats,
+    /// Nothing is injected.
+    Off,
+}
+
+impl KnobMode {
+    /// Scene wire name -> mode; unknown names keep the default.
+    pub fn parse(s: &str) -> KnobMode {
+        match s {
+            "chats" => KnobMode::Chats,
+            "none" => KnobMode::Off,
+            _ => KnobMode::Arrows,
+        }
+    }
 }
 
 impl ControlCtx {
     /// Sensible defaults: K1->chat 1, K2->chat 2, K3->chat 3 (Alt+1/2/3);
-    /// double-click K1->instance 1 (Local), K2->instance 2, K3->instance 3
+    /// long-press K1->instance 1 (Local), K2->instance 2, K3->instance 3
     /// (Ctrl+1/2/3).
     pub fn with_default_jumps() -> Self {
-        Self { jump_chats: vec![1, 2, 3] }
+        Self { jump_chats: vec![1, 2, 3], knob: KnobMode::Arrows }
     }
 
     // Note: chat/instance targets travel on the wire in the gesture's `bind`
@@ -172,19 +218,19 @@ const BOARD_LONG_PRESS_MS: u32 = 800;
 /// | key, other `bind` (e.g. `settings`)  | `None` — local action on the board |
 /// | `enc` `single`, no bind              | `Chord(Enter)` |
 /// | K1-K3 `single`/`long`, no bind       | `None` here — Crew API slot select in the app layer; `long` does nothing |
-/// | voice key `down`/`up`                | `None` — dictation edges, text arrives as `asr`/`macro` |
+/// | voice key `down`/`up`                | `None` — voice edges, text arrives as `asr`/`macro` |
 /// | `encoder { detents>0 }`              | `ChordRepeat(Down, detents)` |
 /// | `encoder { detents<0 }`              | `ChordRepeat(Up, |detents|)` |
 /// | anything else                        | `None` |
-pub fn route_input(ev: &Inbound, _ctx: &ControlCtx) -> ControlAction {
+pub fn route_input(ev: &Inbound, ctx: &ControlCtx) -> ControlAction {
     match ev {
         // Recognized speech text -> type into the chat composer (NO send). Both
-        // the board-side cloud ASR (`asr` frame) and the PC dictation/macro path
+        // the board-side cloud ASR (`asr` frame) and the PC speech/macro path
         // (`macro` frame) land here, so BOTH voice routes behave identically:
         // the text appears in the Kiro Crew composer and the user submits it
         // with K5 (Enter). No auto-send, so a misrecognition can be reviewed.
         Inbound::Asr { payload, .. } => compose_device_text(&payload.text),
-        // K4's recognized dictation → type into the chat composer (no send).
+        // K4's recognized speech → type into the chat composer (no send).
         Inbound::Macro { payload, .. } => compose_device_text(&payload.name),
 
         // Bound gesture: the firmware already resolved (and, for pending-confirm
@@ -199,6 +245,8 @@ pub fn route_input(ev: &Inbound, _ctx: &ControlCtx) -> ControlAction {
             Some(KeyAction::CancelChar) => ControlAction::Chord(Chord::Backspace),
             Some(KeyAction::CancelAll) => ControlAction::Chord(Chord::ClearInput),
             Some(KeyAction::Confirm) => ControlAction::Chord(Chord::Enter),
+            // FR-03 limited shortcut: the firmware only reports it in ① standby.
+            Some(KeyAction::Shortcut(n)) => shortcut_chord(n).map_or(ControlAction::None, ControlAction::Chord),
             _ => ControlAction::None,
         },
 
@@ -212,7 +260,7 @@ pub fn route_input(ev: &Inbound, _ctx: &ControlCtx) -> ControlAction {
         // Everything else is a no-op here: unbound K1-K3 `single` selects the
         // Crew API slot (app layer), an unbound `long` is kept free (sessions
         // are bound from Settings > Bind session), and the voice key's down/up
-        // edges start/stop dictation.
+        // edges start/stop speech input.
 
         // EC11 rotation: scroll by one arrow key per detent. Clockwise
         // (positive) moves down / to the next item; counter-clockwise (negative)
@@ -220,12 +268,17 @@ pub fn route_input(ev: &Inbound, _ctx: &ControlCtx) -> ControlAction {
         // runaway from a malformed frame).
         Inbound::Encoder { payload, .. } => {
             let mag = payload.detents.unsigned_abs().min(16) as u8;
+            let (fwd, back) = match ctx.knob {
+                KnobMode::Arrows => (Chord::Down, Chord::Up),
+                KnobMode::Chats => (Chord::NextChat, Chord::PrevChat),
+                KnobMode::Off => return ControlAction::None,
+            };
             if mag == 0 {
                 ControlAction::None
             } else if payload.detents > 0 {
-                ControlAction::ChordRepeat(Chord::Down, mag)
+                ControlAction::ChordRepeat(fwd, mag)
             } else {
-                ControlAction::ChordRepeat(Chord::Up, mag)
+                ControlAction::ChordRepeat(back, mag)
             }
         }
 
@@ -315,6 +368,26 @@ pub const DEFAULT_TITLE_CANDIDATES: &[&str] = &["Kiro Crew", "Agentic"];
 /// Wait between bringing the Crew window to the front and injecting the
 /// instance-switch Ctrl+N (FR-05, 100-200 ms).
 pub const INSTANCE_SWITCH_SETTLE_MS: u64 = 150;
+
+/// One `[KEY-TIMING]` log line for a K1-K3 press: the path it took and the
+/// milliseconds each stage took, measured from the frame reaching the
+/// Companion (`frame -> ... -> total`). `window` is how long the keyboard held
+/// the gesture back after the release (the double-click window; 0 when the
+/// key has no double binding); `hold` is the press time of a long press, which
+/// is not part of the latency, so it is not added to `total`.
+pub fn timing_line(key: &str, gesture: &str, path: &str, window_ms: u32, hold_ms: Option<u32>, stages: &[(&str, std::time::Duration)]) -> String {
+    let mut out = format!("[KEY-TIMING] {key} {gesture} path={path} window={window_ms}ms");
+    if let Some(hold) = hold_ms {
+        out.push_str(&format!(" hold={hold}ms"));
+    }
+    let mut total = std::time::Duration::ZERO;
+    for (name, d) in stages {
+        total += *d;
+        out.push_str(&format!(" {name}={}ms", d.as_millis()));
+    }
+    out.push_str(&format!(" total={}ms", total.as_millis()));
+    out
+}
 
 // ============================== Windows ==============================
 
@@ -939,22 +1012,51 @@ mod tests {
     fn key(id: &str, action: KeyAction) -> Inbound {
         Inbound::Key {
             seq: Some(1),
-            payload: KeyPayload { id: id.into(), action, held_ms: 0, bind: None, text: None },
+            payload: KeyPayload { id: id.into(), action, held_ms: 0, wait_ms: 0, bind: None, text: None, slot: None },
         }
     }
 
     fn bound(id: &str, gesture: KeyAction, bind: KeyAction) -> Inbound {
         Inbound::Key {
             seq: Some(1),
-            payload: KeyPayload { id: id.into(), action: gesture, held_ms: 0, bind: Some(bind), text: None },
+            payload: KeyPayload { id: id.into(), action: gesture, held_ms: 0, wait_ms: 0, bind: Some(bind), text: None, slot: None },
         }
     }
 
     fn key_held(id: &str, action: KeyAction, held_ms: u32) -> Inbound {
         Inbound::Key {
             seq: Some(1),
-            payload: KeyPayload { id: id.into(), action, held_ms, bind: None, text: None },
+            payload: KeyPayload { id: id.into(), action, held_ms, wait_ms: 0, bind: None, text: None, slot: None },
         }
+    }
+
+    #[test]
+    fn scene_shortcuts_route_to_crew_chords() {
+        assert_eq!(SHORTCUT_CHORDS.len(), crate::scene::SHORTCUTS.len());
+        let r = ControlRouter::default();
+        for (i, name) in crate::scene::SHORTCUTS.iter().enumerate() {
+            let f = crate::protocol::decode_line(&format!(
+                r#"{{"v":1,"seq":2,"type":"key","payload":{{"id":"k2","action":"double","bind":"{name}","held_ms":0}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(r.route(&f), ControlAction::Chord(SHORTCUT_CHORDS[i]), "{name}");
+        }
+        assert_eq!(r.route(&bound("k1", KeyAction::Single, KeyAction::Shortcut(9))), ControlAction::Chord(Chord::ClearInput));
+        assert_eq!(r.route(&bound("k1", KeyAction::Single, KeyAction::Shortcut(15))), ControlAction::None);
+        assert_eq!(r.route(&bound("k1", KeyAction::Single, KeyAction::Shortcut(0))), ControlAction::None);
+        assert_eq!(r.route(&bound("enc", KeyAction::Double, KeyAction::SceneMenu)), ControlAction::None);
+    }
+
+    #[test]
+    fn scene_knob_modes() {
+        let mut r = ControlRouter::default();
+        assert_eq!(r.route(&encoder(2)), ControlAction::ChordRepeat(Chord::Down, 2));
+        r.ctx.knob = KnobMode::parse("chats");
+        assert_eq!(r.route(&encoder(2)), ControlAction::ChordRepeat(Chord::NextChat, 2));
+        assert_eq!(r.route(&encoder(-1)), ControlAction::ChordRepeat(Chord::PrevChat, 1));
+        r.ctx.knob = KnobMode::parse("none");
+        assert_eq!(r.route(&encoder(3)), ControlAction::None);
+        assert_eq!(KnobMode::parse("spin"), KnobMode::Arrows);
     }
 
     fn encoder(detents: i32) -> Inbound {
@@ -1082,7 +1184,7 @@ mod tests {
         let ctx = ControlCtx::with_default_jumps();
         let asr = Inbound::Asr {
             seq: Some(9),
-            payload: crate::protocol::AsrPayload { text: "hello there".into() },
+            payload: crate::protocol::AsrPayload { text: "hello there".into(), slot: None },
         };
         assert_eq!(route_input(&asr, &ctx), ControlAction::Compose("hello there".into()));
     }
@@ -1108,7 +1210,7 @@ mod tests {
         // The asr path is unchanged.
         let asr = Inbound::Asr {
             seq: Some(2),
-            payload: crate::protocol::AsrPayload { text: "still composes".into() },
+            payload: crate::protocol::AsrPayload { text: "still composes".into(), slot: None },
         };
         assert_eq!(route_input(&asr, &ctx), ControlAction::Compose("still composes".into()));
     }
@@ -1197,6 +1299,29 @@ mod tests {
                 "{id} Up should be None"
             );
         }
+    }
+
+    #[test]
+    fn timing_line_sums_the_stages() {
+        use std::time::Duration;
+        let line = timing_line(
+            "k1",
+            "single",
+            "api",
+            0,
+            None,
+            &[("select", Duration::from_micros(800)), ("front", Duration::from_millis(43))],
+        );
+        assert_eq!(line, "[KEY-TIMING] k1 single path=api window=0ms select=0ms front=43ms total=43ms");
+    }
+
+    #[test]
+    fn timing_line_reports_window_and_long_hold() {
+        use std::time::Duration;
+        let single = timing_line("k2", "single", "api", 251, None, &[("select", Duration::from_millis(1))]);
+        assert_eq!(single, "[KEY-TIMING] k2 single path=api window=251ms select=1ms total=1ms");
+        let long = timing_line("k3", "long", "keys", 0, Some(503), &[("focus+keys", Duration::from_millis(190))]);
+        assert_eq!(long, "[KEY-TIMING] k3 long path=keys window=0ms hold=503ms focus+keys=190ms total=190ms");
     }
 
     #[test]
@@ -1312,7 +1437,7 @@ mod tests {
         assert_eq!(route_input(&Inbound::Pong, &ctx), ControlAction::None);
         assert_eq!(
             route_input(
-                &Inbound::Voice { seq: None, payload: VoicePayload { state: VoiceState::Start } },
+                &Inbound::Voice { seq: None, payload: VoicePayload { state: VoiceState::Start, slot: None } },
                 &ctx
             ),
             ControlAction::None

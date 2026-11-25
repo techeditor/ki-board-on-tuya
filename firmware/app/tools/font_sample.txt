@@ -1,5 +1,0 @@
-审批：kiro-cli 想运行 tos.py build。K2 允许一次 K3 总是允许 K4 拒绝
-模型：自动 Auto / Claude Sonnet 4.5 / 通义千问 Qwen3
-设置：音量 60% 亮度 80% 硬件测试 退出
-已修改 ak_gfx.c，新增 ak_font_draw()。请确认 build 0.3.44 能否正常烧录。
-Wi-Fi 已连接，BLE 广播中。字体 ABCxyz 0123456789

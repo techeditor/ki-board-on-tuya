@@ -114,7 +114,7 @@ size_t ak_wifi_store_by_recency(const ak_wifi_store_t *s, uint8_t out[AK_WIFI_ST
     for (uint8_t i = 0U; i < s->count; i++) {
         out[i] = i;
     }
-    /* Insertion sort, descending seq: at most 10 items. */
+    /* Insertion sort, descending seq: at most AK_WIFI_STORE_MAX items. */
     for (uint8_t i = 1U; i < s->count; i++) {
         uint8_t v = out[i];
         uint8_t j = i;
@@ -193,6 +193,15 @@ size_t ak_wifi_store_serialize(const ak_wifi_store_t *s, uint8_t *buf, size_t ca
 
 ak_wifi_blob_result_t ak_wifi_store_parse(ak_wifi_store_t *s, const uint8_t *buf, size_t len)
 {
+    return ak_wifi_store_parse_keep(s, buf, len, NULL);
+}
+
+/* Scratch for a blob written by firmware that allowed AK_WIFI_STORE_LEGACY_MAX records. */
+static ak_wifi_rec_t s_parse_rec[AK_WIFI_STORE_LEGACY_MAX];
+
+ak_wifi_blob_result_t ak_wifi_store_parse_keep(ak_wifi_store_t *s, const uint8_t *buf, size_t len,
+                                               const char *keep_ssid)
+{
     if (s == NULL) {
         return AK_WIFI_BLOB_BAD_FORMAT;
     }
@@ -207,11 +216,12 @@ ak_wifi_blob_result_t ak_wifi_store_parse(ak_wifi_store_t *s, const uint8_t *buf
         return AK_WIFI_BLOB_BAD_VERSION;
     }
     uint8_t count = buf[3];
-    if (count > AK_WIFI_STORE_MAX) {
+    if (count > AK_WIFI_STORE_LEGACY_MAX) {
         return AK_WIFI_BLOB_BAD_FORMAT;
     }
     ak_wifi_store_t tmp;
     ak_wifi_store_init(&tmp);
+    memset(s_parse_rec, 0, sizeof(s_parse_rec));
     tmp.next_seq = get_u32(&buf[4]);
     size_t pos   = 8U;
     size_t end   = len - 4U;
@@ -219,7 +229,7 @@ ak_wifi_blob_result_t ak_wifi_store_parse(ak_wifi_store_t *s, const uint8_t *buf
         if (pos + 7U > end) {
             return AK_WIFI_BLOB_BAD_FORMAT;
         }
-        ak_wifi_rec_t *r  = &tmp.rec[i];
+        ak_wifi_rec_t *r  = &s_parse_rec[i];
         r->seq            = get_u32(&buf[pos]);
         r->sec            = buf[pos + 4U];
         size_t sl         = buf[pos + 5U];
@@ -233,7 +243,7 @@ ak_wifi_blob_result_t ak_wifi_store_parse(ak_wifi_store_t *s, const uint8_t *buf
         memcpy(r->pass, &buf[pos + sl], pl);
         pos += sl + pl;
         for (uint8_t j = 0U; j < i; j++) {
-            if (strcmp(tmp.rec[j].ssid, r->ssid) == 0) {
+            if (strcmp(s_parse_rec[j].ssid, r->ssid) == 0) {
                 return AK_WIFI_BLOB_BAD_FORMAT; /* duplicate SSID */
             }
         }
@@ -241,9 +251,31 @@ ak_wifi_blob_result_t ak_wifi_store_parse(ak_wifi_store_t *s, const uint8_t *buf
     if (pos != end) {
         return AK_WIFI_BLOB_BAD_FORMAT;
     }
-    tmp.count = count;
+    /* Over the limit (older firmware): drop the least recently connected,
+     * but never the network in use. */
+    uint8_t n = count;
+    while (n > AK_WIFI_STORE_MAX) {
+        int drop = -1;
+        for (uint8_t i = 0U; i < n; i++) {
+            if (keep_ssid != NULL && strcmp(s_parse_rec[i].ssid, keep_ssid) == 0) {
+                continue;
+            }
+            if (drop < 0 || s_parse_rec[i].seq < s_parse_rec[drop].seq) {
+                drop = (int)i;
+            }
+        }
+        for (uint8_t i = (uint8_t)drop; (uint8_t)(i + 1U) < n; i++) {
+            s_parse_rec[i] = s_parse_rec[i + 1U];
+        }
+        n--;
+    }
+    for (uint8_t i = 0U; i < n; i++) {
+        tmp.rec[i] = s_parse_rec[i];
+    }
+    memset(s_parse_rec, 0, sizeof(s_parse_rec)); /* passwords do not stay in the scratch */
+    tmp.count = n;
     *s        = tmp;
-    return AK_WIFI_BLOB_OK;
+    return n < count ? AK_WIFI_BLOB_TRIMMED : AK_WIFI_BLOB_OK;
 }
 
 /* ── Reconnect planning ─────────────────────────────────────────────────── */
@@ -309,4 +341,25 @@ uint32_t ak_wifi_roam_backoff_ms(uint8_t round)
 {
     size_t last = sizeof(k_backoff_ms) / sizeof(k_backoff_ms[0]) - 1U;
     return k_backoff_ms[round < last ? round : last];
+}
+
+bool ak_wifi_attempt_down(ak_wifi_attempt_t *a, bool sdk_retrying, uint32_t now_ms)
+{
+    a->armed       = sdk_retrying;
+    a->deadline_ms = now_ms + AK_WIFI_CONNECTING_UI_MS;
+    return sdk_retrying;
+}
+
+void ak_wifi_attempt_clear(ak_wifi_attempt_t *a)
+{
+    a->armed = false;
+}
+
+bool ak_wifi_attempt_expired(ak_wifi_attempt_t *a, uint32_t now_ms)
+{
+    if (!a->armed || (int32_t)(now_ms - a->deadline_ms) < 0) {
+        return false;
+    }
+    a->armed = false;
+    return true;
 }

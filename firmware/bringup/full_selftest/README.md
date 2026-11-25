@@ -54,7 +54,7 @@ Or with the shared driver from `firmware/bringup`:
 ## Flash from Windows
 
 ```powershell
-.\flash.ps1 -Port COM5 -App "firmware/bringup/full_selftest" -Build -Monitor
+tyutool_cli write -d t5ai -p COMx -b 460800 -f <app>_QIO_<version>.bin   # see tyutool_cli --help
 ```
 
 Connect only one Type-C UART bridge at a time.

@@ -23,6 +23,11 @@
 #ifndef AK_FSM_LONG_PRESS_MS
 #define AK_FSM_LONG_PRESS_MS 800U
 #endif
+/* K1-K3: long press = switch Crew instance, so it fires sooner than the other
+ * keys (K4 clear, K6 menu, EC11 settings and the K5 talk key keep 800 ms). */
+#ifndef AK_FSM_LONG_PRESS_K13_MS
+#define AK_FSM_LONG_PRESS_K13_MS 500U
+#endif
 
 typedef enum {
     AK_INPUT_EVENT_NONE = 0,
@@ -37,7 +42,16 @@ typedef struct {
     uint32_t cand_since;
     uint32_t pressed_since;
     bool     long_fired;
+    uint32_t long_ms; /* this input's long-press threshold; 0 = AK_FSM_LONG_PRESS_MS */
 } ak_input_fsm_t;
+
+/** Long-press threshold in ms for a key id: AK_FSM_LONG_PRESS_K13_MS for
+ *  "k1".."k3", AK_FSM_LONG_PRESS_MS for everything else. */
+uint32_t ak_input_long_ms_for_id(const char *id);
+
+/** Override one input's long-press threshold (0 = back to the default).
+ *  Call after ak_input_fsm_init(), which resets it. */
+void ak_input_fsm_set_long_ms(ak_input_fsm_t *fsm, uint32_t long_ms);
 
 /** Initialise from the input's current raw level (no event emitted). */
 void ak_input_fsm_init(ak_input_fsm_t *fsm, bool initial_pressed, uint32_t now_ms);
@@ -90,10 +104,11 @@ bool ak_dclick_feed(ak_dclick_t *dc, ak_input_event_t event, uint32_t now_ms, ui
  * Layered on the FSM event stream. Every physical operation on a key produces
  * exactly ONE gesture; the three are mutually exclusive:
  *
- *   single  pressed and released before AK_FSM_LONG_PRESS_MS, and no second
+ *   single  pressed and released before the key's long threshold, and no second
  *           press starts within AK_GESTURE_DOUBLE_WINDOW_MS of that release.
  *           Reported when the window expires, so it lags the release by the
- *           window.
+ *           window. A key with no double binding (ak_gesture_set_double_bound)
+ *           reports it on the release itself.
  *   double  a second press starts within the window after the first release
  *           and is itself released before the long threshold. Reported on the
  *           second release; no single is reported for that pair.
@@ -124,10 +139,28 @@ typedef struct {
     bool     second_down;    /* a second press started inside the window */
     bool     press_had_long; /* the current press already resolved as long */
     bool     owed_long;      /* long to report on the next tick (after a single) */
+    bool     double_bound;   /* the key has a double binding: single waits out the window */
+    uint32_t first_held_ms;  /* press time of the pending single */
+    uint32_t owed_held_ms;   /* press time of the owed long */
+    uint32_t res_held_ms;    /* press time of the gesture resolved last */
+    uint32_t res_wait_ms;    /* how long that gesture waited after its deciding release */
 } ak_gesture_state_t;
 
 /** Reset a gesture classifier to idle. */
 void ak_gesture_init(ak_gesture_state_t *g);
+
+/**
+ * Tell the classifier whether the key has a double binding in the current
+ * keymap (default true). With no double binding a short release is reported
+ * as single at once, with no wait for the window. Call before each feed(); a
+ * single already waiting out the window is not affected.
+ */
+void ak_gesture_set_double_bound(ak_gesture_state_t *g, bool bound);
+
+/** Of the gesture feed()/tick() resolved last: the press time that decided it
+ *  and how long it waited after that press was released (0 for an immediate
+ *  single, a double or a long). Reported in the key frame. */
+void ak_gesture_last(const ak_gesture_state_t *g, uint32_t *held_ms, uint32_t *wait_ms);
 
 /** Feed one FSM event (DOWN/UP/LONG/NONE); returns a gesture resolved now. */
 ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,

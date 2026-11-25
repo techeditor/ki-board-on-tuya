@@ -4,14 +4,14 @@
  * desaturated accent for large fills, neutral steady-state. Values seeded from
  * the spec prototype.html. */
 [data-theme="kc-dark"] {
-  --bg: #100e16;
-  --surface: #181521;
-  --panel: #1f1b2b;
-  --field: #14111c;
+  --bg: #0b0a11; /* page: the darkest layer */
+  --surface: #1f1b2e; /* cards: clearly lifted off the page */
+  --panel: #282340; /* header, nav, nested wells */
+  --field: #141120; /* inputs and key caps: recessed */
 
   --text: #e6e1f0;
-  --muted: #9d94b0;
-  --subtle: #726981;
+  --muted: #a89fbc;
+  --subtle: #8a8199;
 
   --accent: #7d54c9;
   --accent-hover: #8f66d8;
@@ -25,8 +25,8 @@
   --danger: #d98079;
   --blue: #6f9fd6;
 
-  --border: #2a2539;
-  --border-strong: #3d3552;
+  --border: #3a3454; /* card edge */
+  --border-strong: #54496f; /* control edge */
 
   --radius-sm: 6px;
   --radius-md: 8px;
@@ -34,7 +34,8 @@
   --radius-xl: 16px;
 
   --shadow-sm: 0 1px 2px #0004;
-  --shadow-md: 0 4px 12px #00000055;
+  --shadow-md: 0 4px 14px #00000066;
+  --card-edge: inset 0 1px 0 #ffffff14; /* lit top edge, like Kiro Crew's panels */
   --shadow-lg: 0 12px 28px #00000066;
 
   --font-body: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;

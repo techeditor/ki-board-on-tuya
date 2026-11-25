@@ -2,8 +2,7 @@
  * @file ak_led_power.h
  * @brief WS2812 chain power switch (v0.3.2 LED_PWR_EN = P18) as pure logic.
  *
- * Implements hardware/eda/ws2812-power-reduction-study.md §4 / §7.3
- * (firmware-review FW-05, FW-11):
+ * Sequence (firmware-review FW-05, FW-11):
  *   power on : DIN (P4) idle low -> LED_PWR_EN high -> wait for VDD_LED to
  *              settle (soft start, C15 1 µF ≈ 3.3 ms to 90 %) -> first frame.
  *              The settle wait also gives the chain far more than the 80 µs

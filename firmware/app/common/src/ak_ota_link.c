@@ -1,12 +1,12 @@
 /**
  * @file ak_ota_link.c
- * @brief Local OTA on the device (see ak_ota_link.h, docs/ota.md).
+ * @brief Local OTA on the device (see ak_ota_link.h).
  *
  * Flash layer: the T5AI platform's own OTA bookkeeping (platform/T5AI/
  * tuyaos/tuyaos_adapter/src/system/ota_head.c) decides where the UG package
  * lives in the ota partition and writes the manage block tuyaboot reads at
  * the next boot. tkl_ota.c is not used: it starts writing before the header
- * is checked and cannot retry within one boot (ota-design.md section 2.1).
+ * is checked and cannot retry within one boot.
  * No Tuya cloud service is involved.
  */
 
@@ -331,7 +331,7 @@ static void on_end(void)
     commit_and_reboot();
 }
 
-/* ── debug probes ────────────────────────────────────────────────── */
+/* ── debug probes ────────────────────────────────────────────────────────── */
 
 #if AK_ENABLE_DEBUG_PROBES
 static uint32_t s_probe_baud_until;

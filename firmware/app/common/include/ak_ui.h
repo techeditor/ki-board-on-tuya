@@ -21,7 +21,7 @@
 typedef enum {
     AK_UI_STANDBY = 0, /* ① keymap active */
     AK_UI_VOICE,       /* ② voice input (held / recognising; or a dictated answer) */
-    AK_UI_CONFIRM,     /* ③ input confirm (post-ASR text, or a dictated answer) */
+    AK_UI_CONFIRM,     /* ③ a dictated menu answer awaiting K6 (voice input text lives in the ① strip) */
     AK_UI_MENU,        /* ④ approval / question / reply options */
     AK_UI_MODEL_MENU,  /* ⑤ model / mode menu (opened by the user) */
     AK_UI_SETTINGS,    /* ⑥ settings / hardware test */
@@ -29,11 +29,11 @@ typedef enum {
     AK_UI_STATE_COUNT,
 } ak_ui_state_t;
 
-/* ③ without an answer: the post-ASR text in the PC composer times out. */
+/* ③ without an answer: an unsent dictated answer returns to its menu. */
 #define AK_UI_CONFIRM_TIMEOUT_MS 20000U
 
 typedef enum {
-    AK_UI_VOICE_NONE = 0, /* no recognition (short press, PC dictation finished) */
+    AK_UI_VOICE_NONE = 0, /* no recognition (short press, PC voice input finished) */
     AK_UI_VOICE_TEXT,     /* text recognised */
     AK_UI_VOICE_ERROR,    /* nothing heard / failed / timed out */
 } ak_ui_voice_t;
@@ -46,6 +46,7 @@ typedef struct {
     bool          menu_model;   /* ... that menu is a model / mode menu */
     bool          dictating;    /* ②/③ answer the open menu's voice item */
     bool          pc_wait;      /* ② after the voice key: waiting for the PC ASR text */
+    bool          bar;          /* ① the voice input strip holds text (or a PC fill awaits K6 / K4) */
     uint32_t      confirm_ms;   /* ③ entered at */
 } ak_ui_t;
 
@@ -87,9 +88,13 @@ void ak_ui_voice_end(ak_ui_t *ui, ak_ui_voice_t result, bool chat, uint32_t now_
  *  True when now waiting (② and not a dictated answer). */
 bool ak_ui_pc_wait(ak_ui_t *ui);
 
-/** Companion `input_restore`: ① -> ③ (a direct send failed), or ② -> ③
- *  while waiting for the PC ASR text. Refused (false) in any other state. */
+/** Companion `input_restore`: ends a PC ASR wait in ② (back to ①). True when
+ *  the keyboard is in ① afterwards; the text itself goes to the strip in any
+ *  state, it is the caller's buffer. */
 bool ak_ui_input_restore(ak_ui_t *ui, uint32_t now_ms);
+
+/** The input strip has text (K4 / K6 act on it; K4 gives up its recall hint). */
+void ak_ui_set_bar(ak_ui_t *ui, bool open);
 
 /** Delete the last UTF-8 character of `s` in place (K4 in ③). True when one
  *  was removed. */

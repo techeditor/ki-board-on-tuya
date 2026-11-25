@@ -23,6 +23,43 @@ void ak_settings_init(ak_settings_model_t *model)
      * needed for the first LCD draw), so start from the live value. */
     model->lang            = (uint8_t)ak_lang_get();
     model->font_size       = (uint8_t)ak_text_size_get(); /* restored from KV before this, like the language */
+    model->animation       = true;
+    model->rebind_hidden   = false;
+}
+
+bool ak_settings_item_visible(const ak_settings_model_t *model, ak_settings_item_t item)
+{
+    return !(item == AK_SETTINGS_ITEM_REBIND && model != NULL && model->rebind_hidden);
+}
+
+unsigned ak_settings_visible_count(const ak_settings_model_t *model)
+{
+    return (unsigned)AK_SETTINGS_ITEM_COUNT - (ak_settings_item_visible(model, AK_SETTINGS_ITEM_REBIND) ? 0U : 1U);
+}
+
+unsigned ak_settings_visible_pos(const ak_settings_model_t *model, ak_settings_item_t item)
+{
+    if (!ak_settings_item_visible(model, item)) {
+        return ak_settings_visible_count(model);
+    }
+    unsigned pos = (unsigned)item;
+    if (!ak_settings_item_visible(model, AK_SETTINGS_ITEM_REBIND) && item > AK_SETTINGS_ITEM_REBIND) {
+        pos--;
+    }
+    return pos;
+}
+
+bool ak_settings_set_rebind_hidden(ak_settings_model_t *model, bool hidden)
+{
+    if (model == NULL || model->rebind_hidden == hidden) {
+        return false;
+    }
+    model->rebind_hidden = hidden;
+    if (hidden && model->selected == AK_SETTINGS_ITEM_REBIND) {
+        model->selected = AK_SETTINGS_ITEM_TEST; /* the next listed item */
+        model->editing  = false;
+    }
+    return true;
 }
 
 unsigned ak_settings_first_row(unsigned selected, unsigned rows)
@@ -54,19 +91,20 @@ static bool item_is_value(ak_settings_item_t item)
     return item == AK_SETTINGS_ITEM_VOLUME || item == AK_SETTINGS_ITEM_BRIGHTNESS ||
            item == AK_SETTINGS_ITEM_VOICE_MODE || item == AK_SETTINGS_ITEM_LED_POWER ||
            item == AK_SETTINGS_ITEM_LED_TIMEOUT || item == AK_SETTINGS_ITEM_LANGUAGE ||
-           item == AK_SETTINGS_ITEM_FONT_SIZE;
+           item == AK_SETTINGS_ITEM_FONT_SIZE || item == AK_SETTINGS_ITEM_ANIMATION;
 }
 
 static ak_settings_result_t ak_settings_move(ak_settings_model_t *model, bool forward)
 {
-    if (forward) {
-        model->selected = (ak_settings_item_t)((model->selected + 1U) %
-                                               AK_SETTINGS_ITEM_COUNT);
-    } else {
-        model->selected = model->selected == AK_SETTINGS_ITEM_VOLUME
-                              ? AK_SETTINGS_ITEM_EXIT
-                              : (ak_settings_item_t)(model->selected - 1);
-    }
+    /* Skip an item that is not listed (at most one: Unbind device). */
+    do {
+        if (forward) {
+            model->selected = (ak_settings_item_t)((model->selected + 1U) % AK_SETTINGS_ITEM_COUNT);
+        } else {
+            model->selected = model->selected == AK_SETTINGS_ITEM_VOLUME ? AK_SETTINGS_ITEM_EXIT
+                                                                         : (ak_settings_item_t)(model->selected - 1);
+        }
+    } while (!ak_settings_item_visible(model, model->selected));
     return AK_SETTINGS_RESULT_NONE;
 }
 
@@ -89,6 +127,11 @@ static ak_settings_result_t ak_settings_adjust(ak_settings_model_t *model, bool 
     if (model->selected == AK_SETTINGS_ITEM_FONT_SIZE) {
         /* 12 px -> 16 px, wrapping both ways (ak_text.h lists the sizes). */
         model->font_size = (uint8_t)ak_text_size_next((ak_text_size_t)model->font_size, increase);
+        return AK_SETTINGS_RESULT_CHANGED;
+    }
+    if (model->selected == AK_SETTINGS_ITEM_ANIMATION) {
+        (void)increase; /* two values: any rotation flips on / off */
+        model->animation = !model->animation;
         return AK_SETTINGS_RESULT_CHANGED;
     }
     if (model->selected == AK_SETTINGS_ITEM_LED_POWER) {
@@ -163,14 +206,23 @@ ak_settings_result_t ak_settings_handle(ak_settings_model_t *model,
         if (model->selected == AK_SETTINGS_ITEM_REBIND) {
             return AK_SETTINGS_RESULT_REBIND;
         }
+        if (model->selected == AK_SETTINGS_ITEM_FACTORY_RESET) {
+            return AK_SETTINGS_RESULT_FACTORY_RESET;
+        }
+        if (model->selected == AK_SETTINGS_ITEM_SCENE) {
+            return AK_SETTINGS_RESULT_SCENE;
+        }
         if (model->selected == AK_SETTINGS_ITEM_BIND_SESSION) {
             return AK_SETTINGS_RESULT_BIND_SESSION;
         }
         if (model->selected == AK_SETTINGS_ITEM_WIFI) {
             return AK_SETTINGS_RESULT_WIFI;
         }
-        if (model->selected == AK_SETTINGS_ITEM_CREDENTIALS) {
-            return AK_SETTINGS_RESULT_CREDENTIALS;
+        if (model->selected == AK_SETTINGS_ITEM_DEVICE_INFO) {
+            return AK_SETTINGS_RESULT_DEVICE_INFO;
+        }
+        if (model->selected == AK_SETTINGS_ITEM_BLE_PAIR) {
+            return AK_SETTINGS_RESULT_BLE_PAIR;
         }
         if (item_is_value(model->selected)) {
             /* First click on a value item: enter edit mode. */

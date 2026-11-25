@@ -14,6 +14,20 @@ void ak_input_fsm_init(ak_input_fsm_t *fsm, bool initial_pressed, uint32_t now_m
     fsm->cand_since     = now_ms;
     fsm->pressed_since  = 0;
     fsm->long_fired     = false;
+    fsm->long_ms        = 0;
+}
+
+uint32_t ak_input_long_ms_for_id(const char *id)
+{
+    if (id != NULL && id[0] == 'k' && id[1] >= '1' && id[1] <= '3' && id[2] == '\0') {
+        return AK_FSM_LONG_PRESS_K13_MS;
+    }
+    return AK_FSM_LONG_PRESS_MS;
+}
+
+void ak_input_fsm_set_long_ms(ak_input_fsm_t *fsm, uint32_t long_ms)
+{
+    fsm->long_ms = long_ms;
 }
 
 ak_input_event_t ak_input_fsm_update(ak_input_fsm_t *fsm, bool raw_pressed, uint32_t now_ms, uint32_t *held_ms_out)
@@ -48,7 +62,8 @@ ak_input_event_t ak_input_fsm_update(ak_input_fsm_t *fsm, bool raw_pressed, uint
     }
 
     /* Steady state: emit LONG once when the hold crosses the threshold. */
-    if (fsm->stable_pressed && !fsm->long_fired && (uint32_t)(now_ms - fsm->pressed_since) >= AK_FSM_LONG_PRESS_MS) {
+    uint32_t long_ms = fsm->long_ms != 0U ? fsm->long_ms : AK_FSM_LONG_PRESS_MS;
+    if (fsm->stable_pressed && !fsm->long_fired && (uint32_t)(now_ms - fsm->pressed_since) >= long_ms) {
         fsm->long_fired = true;
         if (held_ms_out != NULL) {
             *held_ms_out = (uint32_t)(now_ms - fsm->pressed_since);
@@ -126,6 +141,28 @@ void ak_gesture_init(ak_gesture_state_t *g)
     g->second_down    = false;
     g->press_had_long = false;
     g->owed_long      = false;
+    g->double_bound   = true;
+    g->first_held_ms  = 0;
+    g->owed_held_ms   = 0;
+    g->res_held_ms    = 0;
+    g->res_wait_ms    = 0;
+}
+
+void ak_gesture_set_double_bound(ak_gesture_state_t *g, bool bound)
+{
+    g->double_bound = bound;
+}
+
+void ak_gesture_last(const ak_gesture_state_t *g, uint32_t *held_ms, uint32_t *wait_ms)
+{
+    *held_ms = g->res_held_ms;
+    *wait_ms = g->res_wait_ms;
+}
+
+static void resolved(ak_gesture_state_t *g, uint32_t held_ms, uint32_t wait_ms)
+{
+    g->res_held_ms = held_ms;
+    g->res_wait_ms = wait_ms;
 }
 
 static bool window_open(const ak_gesture_state_t *g, uint32_t now_ms)
@@ -136,8 +173,6 @@ static bool window_open(const ak_gesture_state_t *g, uint32_t now_ms)
 ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
                              uint32_t now_ms, uint32_t held_ms)
 {
-    (void)held_ms;
-
     switch (event) {
     case AK_INPUT_EVENT_DOWN:
         g->press_had_long = false;
@@ -149,6 +184,7 @@ ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
             /* Window lapsed before tick() saw it: the earlier press was a
              * single, and this press starts a fresh operation. */
             g->pending_single = false;
+            resolved(g, g->first_held_ms, (uint32_t)(now_ms - g->first_up_ms));
             return AK_GESTURE_SINGLE;
         }
         return AK_GESTURE_NONE;
@@ -161,8 +197,11 @@ ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
             g->pending_single = false;
             g->second_down    = false;
             g->owed_long      = true;
+            g->owed_held_ms   = held_ms;
+            resolved(g, g->first_held_ms, (uint32_t)(now_ms - g->first_up_ms));
             return AK_GESTURE_SINGLE;
         }
+        resolved(g, held_ms, 0);
         return AK_GESTURE_LONG;
 
     case AK_INPUT_EVENT_UP:
@@ -173,11 +212,17 @@ ak_gesture_t ak_gesture_feed(ak_gesture_state_t *g, ak_input_event_t event,
         if (g->pending_single && g->second_down) {
             g->pending_single = false;
             g->second_down    = false;
+            resolved(g, held_ms, 0);
             return AK_GESTURE_DOUBLE;
+        }
+        if (!g->double_bound && !g->pending_single) {
+            resolved(g, held_ms, 0); /* nothing to wait for: single on release */
+            return AK_GESTURE_SINGLE;
         }
         g->pending_single = true; /* first short release: open the window */
         g->second_down    = false;
         g->first_up_ms    = now_ms;
+        g->first_held_ms  = held_ms;
         return AK_GESTURE_NONE;
 
     default:
@@ -189,10 +234,12 @@ ak_gesture_t ak_gesture_tick(ak_gesture_state_t *g, uint32_t now_ms)
 {
     if (g->owed_long) {
         g->owed_long = false;
+        resolved(g, g->owed_held_ms, 0);
         return AK_GESTURE_LONG;
     }
     if (g->pending_single && !g->second_down && !window_open(g, now_ms)) {
         g->pending_single = false;
+        resolved(g, g->first_held_ms, (uint32_t)(now_ms - g->first_up_ms));
         return AK_GESTURE_SINGLE;
     }
     return AK_GESTURE_NONE;

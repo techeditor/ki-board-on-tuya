@@ -239,7 +239,13 @@ bool ak_menu_owns_keys(const ak_menu_t *m)
 
 bool ak_menu_is_model(const ak_menu_t *m)
 {
-    return m->pg[0].kind == AK_MENU_KIND_MODEL || m->pg[0].kind == AK_MENU_KIND_MODE || ak_menu_is_bind(m);
+    return m->pg[0].kind == AK_MENU_KIND_MODEL || m->pg[0].kind == AK_MENU_KIND_MODE || ak_menu_is_bind(m) ||
+           ak_menu_is_scene(m);
+}
+
+bool ak_menu_is_scene(const ak_menu_t *m)
+{
+    return m->state != AK_MENU_IDLE && m->pg[0].kind == AK_MENU_KIND_SCENE;
 }
 
 bool ak_menu_is_bind(const ak_menu_t *m)
@@ -451,7 +457,7 @@ static void arm(ak_menu_t *m, int key, uint8_t page, uint8_t idx, uint32_t now_m
     out->redraw    = true;
 }
 
-/* Single select: answer, start a dictation, or arm the double confirm. */
+/* Single select: answer, start a voice answer, or arm the double confirm. */
 static void choose(ak_menu_t *m, int key, uint8_t page, uint8_t idx, uint32_t now_ms, ak_menu_out_t *out)
 {
     const ak_menu_item_t *it = item_at(m, page, idx);
@@ -691,7 +697,7 @@ ak_light_t ak_menu_role_light(uint8_t role)
     case AK_MENU_ROLE_VOICE:
         return AK_LIGHT_PURPLE;
     default:
-        return AK_LIGHT_BLUE; /* a selectable option (user decision 2026-11-17) */
+        return AK_LIGHT_BLUE; /* a selectable option */
     }
 }
 

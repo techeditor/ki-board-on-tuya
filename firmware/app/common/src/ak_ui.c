@@ -120,8 +120,9 @@ void ak_ui_voice_end(ak_ui_t *ui, ak_ui_voice_t result, bool chat, uint32_t now_
         return;
     }
     ui->pc_wait = false;
-    if (result == AK_UI_VOICE_TEXT && (!chat || ui->dictating)) {
-        ui->base       = AK_UI_CONFIRM;
+    (void)chat; /* the strip is the firmware's choice: Chat mode never sends text here */
+    if (result == AK_UI_VOICE_TEXT && ui->dictating) {
+        ui->base       = AK_UI_CONFIRM; /* a dictated answer is confirmed on its own page */
         ui->confirm_ms = now_ms;
         return;
     }
@@ -142,15 +143,22 @@ bool ak_ui_pc_wait(ak_ui_t *ui)
 
 bool ak_ui_input_restore(ak_ui_t *ui, uint32_t now_ms)
 {
-    ak_ui_state_t s = ak_ui_state(ui);
-    bool          ok = (s == AK_UI_STANDBY && !ui->dictating) || (s == AK_UI_VOICE && ui->pc_wait);
-    if (!ok) {
+    (void)now_ms;
+    if (ui->dictating) {
         return false;
     }
-    ui->pc_wait    = false;
-    ui->base       = AK_UI_CONFIRM;
-    ui->confirm_ms = now_ms;
-    return true;
+    if (ui->base == AK_UI_VOICE && ui->pc_wait) {
+        ui->pc_wait = false;
+        ui->base    = AK_UI_STANDBY;
+        (void)ak_ui_pump(ui);
+        return true;
+    }
+    return ui->base == AK_UI_STANDBY;
+}
+
+void ak_ui_set_bar(ak_ui_t *ui, bool open)
+{
+    ui->bar = open;
 }
 
 bool ak_utf8_pop_last(char *s)
@@ -203,10 +211,10 @@ bool ak_ui_tick(ak_ui_t *ui, uint32_t now_ms)
 bool ak_ui_k4_waiting(const ak_ui_t *ui, uint8_t parked)
 {
     ak_ui_state_t s = ak_ui_state(ui);
-    return (s == AK_UI_STANDBY || s == AK_UI_VOICE) && (ui->menu_waiting || parked > 0U);
+    return (s == AK_UI_STANDBY || s == AK_UI_VOICE) && !ui->bar && (ui->menu_waiting || parked > 0U);
 }
 
 bool ak_ui_k4_recalls(const ak_ui_t *ui, uint8_t parked)
 {
-    return ak_ui_state(ui) == AK_UI_STANDBY && !ui->menu_waiting && parked > 0U;
+    return ak_ui_state(ui) == AK_UI_STANDBY && !ui->bar && !ui->menu_waiting && parked > 0U;
 }

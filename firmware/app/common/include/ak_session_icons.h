@@ -1,6 +1,6 @@
 /**
  * @file ak_session_icons.h
- * @brief 32x32 1-bpp session icon generated from session_icon.svg.
+ * @brief 32x32 1-bpp session icon.
  *
  * Row-major, MSB-first, 4 bytes per row. Set pixels use the session
  * status foreground color; clear pixels reveal the slot background.

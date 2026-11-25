@@ -41,8 +41,8 @@ pub struct HookStatus {
     pub any_installed: bool,
 }
 
-/// Resolve Kiro Crew's configuration directory. `KIRO_HOME` points at the Kiro
-/// root containing `agents` and `crew`.
+/// Resolve Kiro Crew's configuration directory. `KIRO_HOME` points at the Kiro Crew
+/// install root containing `agents` and `crew`.
 pub fn hooks_dir() -> Option<PathBuf> {
     if let Ok(kiro_home) = std::env::var("KIRO_HOME") {
         let value = kiro_home.trim();

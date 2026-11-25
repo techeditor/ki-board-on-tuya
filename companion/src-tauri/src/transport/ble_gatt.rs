@@ -3,7 +3,8 @@
 //! Real implementation over the cross-platform [`btleplug`] crate. Mirrors the
 //! working FP-2 firmware GATT contract exactly:
 //!
-//! * device advertises local name `AK-KB`;
+//! * device advertises local name `Ki-board-XXXXXX` (older firmware:
+//!   `Agentic Keyboard-XXXXXX`, the FP-2 probe: `AK-KB`);
 //! * 16-bit service `0x1910`  (128-bit `00001910-0000-1000-8000-00805f9b34fb`);
 //! * NOTIFY characteristic `0x2B10` (`00002b10-…`) carries board→PC JSONL
 //!   (protocol-v1) lines — the **same** newline-delimited framing as the UART
@@ -37,6 +38,7 @@
 //! Linux (btleplug's BlueZ/DBus backend) and builds on Windows (WinRT backend).
 
 use super::{BoardTransport, LineSender, TransportKind};
+use crate::ble_pair::Pairing;
 use crate::ble_sec::{self, Session, KEY_LEN, NONCE_LEN};
 use crate::diagnostics;
 use crate::protocol::{self, LineAccumulator};
@@ -83,7 +85,9 @@ pub const WRITE_UUID_V2: Uuid = Uuid::from_u128(0x0000_0001_0000_1001_8001_0080_
 /// Legacy advertised local name used by early firmware and feature probes.
 pub const DEVICE_NAME: &str = "AK-KB";
 /// Prefix used by current product firmware; the suffix is six MAC-derived hex digits.
-pub const DEVICE_NAME_PREFIX: &str = "Agentic Keyboard-";
+pub const DEVICE_NAME_PREFIX: &str = "Ki-board-";
+/// Prefix of product firmware before the Ki-board rename (still accepted).
+pub const LEGACY_DEVICE_NAME_PREFIX: &str = "Agentic Keyboard-";
 
 /// Match only names emitted by supported AK firmware. Service UUID matching
 /// remains a fallback for advertisements whose scan response has not arrived.
@@ -92,8 +96,10 @@ fn matches_device_name(name: &str) -> bool {
         return true;
     }
 
-    name.strip_prefix(DEVICE_NAME_PREFIX).is_some_and(|suffix| {
-        suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    [DEVICE_NAME_PREFIX, LEGACY_DEVICE_NAME_PREFIX].iter().any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
     })
 }
 
@@ -407,8 +413,168 @@ async fn handshake(
                 }
             }
             _ = &mut deadline => {
-                return Err("keyboard did not accept this PC's BLE pairing (pair again over USB)".into());
+                // Also what a keyboard after Settings > Reset system answers:
+                // it no longer knows the key this PC kept.
+                return Err("keyboard did not accept this PC's BLE pairing (it may have been reset): pair again with Pair over Bluetooth (keyboard Settings > BLE pairing) or over USB".into());
             }
+        }
+    }
+}
+
+/// How long the keyboard has to answer each step of an over-the-air pairing.
+const PAIR_STEP_SECS: u64 = 10;
+/// How long the user has to compare the code (the keyboard allows 30 s).
+const PAIR_CONFIRM_SECS: u64 = 32;
+
+/// Next complete line from the NOTIFY characteristic, or an error after `secs`.
+async fn next_line(
+    notifications: &mut (impl futures::Stream<Item = btleplug::api::ValueNotification> + Unpin),
+    notify_char: &Characteristic,
+    acc: &mut LineAccumulator,
+    pending: &mut std::collections::VecDeque<String>,
+    secs: u64,
+    timeout_msg: &str,
+) -> Result<String, String> {
+    if let Some(line) = pending.pop_front() {
+        return Ok(line);
+    }
+    let deadline = tokio::time::sleep(Duration::from_secs(secs));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            note = notifications.next() => {
+                let note = note.ok_or("BLE link closed during pairing")?;
+                if note.uuid != notify_char.uuid {
+                    continue;
+                }
+                pending.extend(acc.push(&note.value));
+                if let Some(line) = pending.pop_front() {
+                    return Ok(line);
+                }
+            }
+            _ = &mut deadline => return Err(timeout_msg.to_string()),
+        }
+    }
+}
+
+/// Drop every answer already queued; returns how many there were. Called just
+/// before the code is shown (ProtoShield R5).
+fn discard_early_answers(answers: &std_mpsc::Receiver<bool>) -> usize {
+    let mut n = 0;
+    while answers.try_recv().is_ok() {
+        n += 1;
+    }
+    n
+}
+
+/// Over-the-air pairing (no USB): run the `sec_pair_*` exchange with the
+/// keyboard `device_id`, whose Settings > BLE pairing window must be open.
+/// `on_code` gets the 6-digit code to show; `answers` then carries the user's
+/// choice (true = the codes match). Returns the pairing key and its id once
+/// the keyboard confirmed with K6 too. Blocking; runs its own runtime.
+pub fn pair_over_air(
+    device_id: &str,
+    on_code: impl FnOnce(u32),
+    answers: std_mpsc::Receiver<bool>,
+) -> Result<([u8; KEY_LEN], String), String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("tokio runtime build failed: {err}"))?;
+    rt.block_on(pair_async(device_id, on_code, answers))
+}
+
+async fn pair_async(
+    device_id: &str,
+    on_code: impl FnOnce(u32),
+    answers: std_mpsc::Receiver<bool>,
+) -> Result<([u8; KEY_LEN], String), String> {
+    let (peripheral, notify_char, write_char) = connect_peripheral(device_id).await?;
+    let result = pair_exchange(&peripheral, &notify_char, &write_char, on_code, answers).await;
+    let _ = peripheral.unsubscribe(&notify_char).await;
+    let _ = peripheral.disconnect().await;
+    diagnostics::record(
+        if result.is_ok() { "INFO" } else { "WARN" },
+        "ble-pair",
+        match &result {
+            Ok(_) => "paired over the air",
+            Err(err) => err,
+        },
+    );
+    result
+}
+
+async fn pair_exchange(
+    peripheral: &Peripheral,
+    notify_char: &Characteristic,
+    write_char: &Characteristic,
+    on_code: impl FnOnce(u32),
+    answers: std_mpsc::Receiver<bool>,
+) -> Result<([u8; KEY_LEN], String), String> {
+    peripheral
+        .subscribe(notify_char)
+        .await
+        .map_err(|err| format!("subscribe to notify char failed: {err}"))?;
+    let mut notes = peripheral
+        .notifications()
+        .await
+        .map_err(|err| format!("open notification stream failed: {err}"))?;
+    let mut acc = LineAccumulator::new();
+    let mut pending = std::collections::VecDeque::new();
+    let mut pairing = Pairing::new()?;
+
+    write_frame(peripheral, write_char, pairing.request_line().as_bytes()).await?;
+    let no_window = "the keyboard did not answer: open Settings > BLE pairing on the keyboard first";
+    let rsp = next_line(&mut notes, notify_char, &mut acc, &mut pending, PAIR_STEP_SECS, no_window).await?;
+    let nonce = pairing.on_response(&rsp)?;
+    write_frame(peripheral, write_char, nonce.as_bytes()).await?;
+    let line = next_line(&mut notes, notify_char, &mut acc, &mut pending, PAIR_STEP_SECS, "keyboard did not answer")
+        .await?;
+    let code = pairing.on_board_nonce(&line)?;
+    // An answer sent before the code was on screen cannot be a comparison:
+    // drop it, so only a choice made while the code is shown reaches the board.
+    let early = discard_early_answers(&answers);
+    if early > 0 {
+        diagnostics::record("WARN", "ble-pair", &format!("ignored {early} answer(s) sent before the code was shown"));
+    }
+    on_code(code);
+
+    // The user compares the codes here; the keyboard waits for K6 meanwhile
+    // and may end the attempt (K1, its own time-out) at any moment.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(PAIR_CONFIRM_SECS);
+    let mut confirmed = false;
+    loop {
+        if !confirmed {
+            match answers.try_recv() {
+                Ok(true) => {
+                    write_frame(peripheral, write_char, Pairing::confirm_line().as_bytes()).await?;
+                    confirmed = true;
+                }
+                Ok(false) | Err(std_mpsc::TryRecvError::Disconnected) => {
+                    let _ = write_frame(peripheral, write_char, Pairing::cancel_line().as_bytes()).await;
+                    return Err("pairing cancelled on this PC".into());
+                }
+                Err(std_mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            let _ = write_frame(peripheral, write_char, Pairing::cancel_line().as_bytes()).await;
+            return Err("pairing timed out (press K6 on the keyboard within 30 s)".into());
+        }
+        if let Some(line) = pending.pop_front() {
+            return pairing.on_done(&line);
+        }
+        // Poll the UI answer and the link every 100 ms.
+        let wait = left.min(Duration::from_millis(100));
+        tokio::select! {
+            note = notes.next() => {
+                let note = note.ok_or("BLE link closed during pairing")?;
+                if note.uuid == notify_char.uuid {
+                    pending.extend(acc.push(&note.value));
+                }
+            }
+            _ = tokio::time::sleep(wait) => {}
         }
     }
 }
@@ -526,7 +692,8 @@ async fn write_frame(
 }
 
 /// Scan ~4s and return every peripheral whose advertised local name is either
-/// legacy `AK-KB` or current `Agentic Keyboard-XXXXXX`, or that advertises a
+/// current `Ki-board-XXXXXX`, older `Agentic Keyboard-XXXXXX` or legacy `AK-KB`,
+/// or that advertises a
 /// supported command service. Cross-platform.
 ///
 /// This is a blocking helper (spins up its own current-thread runtime) so the
@@ -629,6 +796,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn answers_sent_before_the_code_are_dropped() {
+        let (tx, rx) = std_mpsc::channel::<bool>();
+        tx.send(true).unwrap();
+        tx.send(true).unwrap();
+        assert_eq!(discard_early_answers(&rx), 2, "early confirms are discarded");
+        assert!(rx.try_recv().is_err(), "nothing is left to be read as a confirm");
+        // An answer given after the code is shown still arrives.
+        tx.send(true).unwrap();
+        assert_eq!(rx.try_recv(), Ok(true));
+        assert_eq!(discard_early_answers(&rx), 0);
+    }
+
+    #[test]
     fn uuids_match_the_shared_contract() {
         // 16-bit → 128-bit base-UUID expansion, verified against the firmware
         // FP-2 GATT contract.
@@ -666,6 +846,9 @@ mod tests {
 
     #[test]
     fn device_name_matching_accepts_legacy_and_unique_product_names() {
+        assert!(matches_device_name("Ki-board-D3E4F5"));
+        assert!(matches_device_name("Ki-board-000001"));
+        assert!(matches_device_name("Ki-board-abcdef"));
         assert!(matches_device_name("AK-KB"));
         assert!(matches_device_name("Agentic Keyboard-A1B2C3"));
         assert!(matches_device_name("Agentic Keyboard-000001"));
@@ -680,5 +863,12 @@ mod tests {
         assert!(!matches_device_name("Agentic Keyboard-A1B2C3D"));
         assert!(!matches_device_name("Agentic Keyboard-A1B2G3"));
         assert!(!matches_device_name("AK-KB-HID"));
+        assert!(!matches_device_name("Ki-board"));
+        assert!(!matches_device_name("Ki-board-"));
+        assert!(!matches_device_name("Ki-board-D3E4F"));
+        assert!(!matches_device_name("Ki-board-D3E4F56"));
+        assert!(!matches_device_name("Ki-board-D3E4G5"));
+        assert!(!matches_device_name("ki-board-D3E4F5"));
+        assert!(!matches_device_name("Ki-board D3E4F5"));
     }
 }

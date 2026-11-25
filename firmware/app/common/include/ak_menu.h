@@ -52,8 +52,8 @@
 #define AK_MENU_CLOSE_MSG_MS   2000U /* menu_close msg in the status bar */
 #define AK_MENU_NOTICE_MS      3000U /* notice in the status bar */
 
-/* User decision 2026-11-17: approval menus answer only through the key of
- * the item ("Approve once" ...); K6 / EC11 click do nothing there. */
+/* Approval menus answer only through the key of the item ("Approve once"
+ * ...); K6 / EC11 click do nothing there. */
 #define AK_MENU_APPROVAL_ENTER 0
 
 #define AK_MENU_KEY_COUNT 7
@@ -67,6 +67,7 @@ typedef enum {
     AK_MENU_KIND_MODE,
     AK_MENU_KIND_INSTANCE, /* Bind session: pick the Crew instance (user-opened, like model) */
     AK_MENU_KIND_SESSION,  /* Bind session: pick the session (user-opened, like model) */
+    AK_MENU_KIND_SCENE,    /* FR-03 scene picker: built on the keyboard, never on the wire */
 } ak_menu_kind_t;
 
 typedef enum {
@@ -206,6 +207,9 @@ bool ak_menu_is_model(const ak_menu_t *m);
 /** True for the Bind session pickers (kind instance / session). */
 bool ak_menu_is_bind(const ak_menu_t *m);
 
+/** True when the open menu is the keyboard-local FR-03 scene picker. */
+bool ak_menu_is_scene(const ak_menu_t *m);
+
 /** Global index of (page, idx), or -1 while an earlier page is missing. */
 int ak_menu_global_index(const ak_menu_t *m, uint8_t page, uint8_t idx);
 
@@ -231,7 +235,7 @@ void ak_menu_drop_keys(ak_menu_t *m, uint8_t mask);
 /** Dictated answer confirmed with K6: menu_result for the voice item + text. */
 void ak_menu_dictated(ak_menu_t *m, const char *text, uint32_t now_ms, ak_menu_out_t *out);
 
-/** Dictation abandoned (K1): the menu is shown again. */
+/** Voice answer abandoned (K1): the menu is shown again. */
 void ak_menu_dictate_cancel(ak_menu_t *m);
 
 /** Timers: local timeout, double-confirm window, WAIT expiry. */

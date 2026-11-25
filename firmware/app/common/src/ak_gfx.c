@@ -9,6 +9,7 @@
 
 #include "ak_font.h"
 #include "ak_font8x8.h"
+#include "ak_layout.h"
 #include "ak_text.h"
 #include "tdl_display_draw.h"
 
@@ -229,17 +230,10 @@ void ak_gfx_text_thin(uint16_t x, uint16_t y, const char *s, uint16_t fg,
     }
 }
 
-void ak_gfx_icon(uint16_t x, uint16_t y, const uint8_t *bitmap, uint16_t w, uint16_t h,
-                 uint16_t fg, uint16_t bg)
+/* Set bits of a 1-bpp bitmap in `color`, one fill per row run. */
+static void ak_gfx_bit_runs(uint16_t x, uint16_t y, const uint8_t *bitmap, uint16_t w, uint16_t h, uint16_t color)
 {
-    if (s_fb == NULL || bitmap == NULL || w == 0 || h == 0) {
-        return;
-    }
-
     const uint16_t stride = (uint16_t)((w + 7U) / 8U);
-
-    /* Paint the clear bits in one operation, then draw foreground row runs. */
-    ak_gfx_fill_rect(x, y, w, h, bg);
     for (uint16_t row = 0; row < h; row++) {
         uint16_t run_start = w;
         for (uint16_t col = 0; col <= w; col++) {
@@ -251,10 +245,121 @@ void ak_gfx_icon(uint16_t x, uint16_t y, const uint8_t *bitmap, uint16_t w, uint
             if (on && run_start == w) {
                 run_start = col;
             } else if (!on && run_start != w) {
-                ak_gfx_fill_rect((uint16_t)(x + run_start), (uint16_t)(y + row),
-                                 (uint16_t)(col - run_start), 1U, fg);
+                ak_gfx_fill_rect((uint16_t)(x + run_start), (uint16_t)(y + row), (uint16_t)(col - run_start), 1U,
+                                 color);
                 run_start = w;
             }
         }
     }
+}
+
+void ak_gfx_icon(uint16_t x, uint16_t y, const uint8_t *bitmap, uint16_t w, uint16_t h, uint16_t fg, uint16_t bg)
+{
+    if (s_fb == NULL || bitmap == NULL || w == 0 || h == 0) {
+        return;
+    }
+    /* Paint the clear bits in one operation, then draw foreground row runs. */
+    ak_gfx_fill_rect(x, y, w, h, bg);
+    ak_gfx_bit_runs(x, y, bitmap, w, h, fg);
+}
+
+void ak_gfx_icon_shape(uint16_t x, uint16_t y, const uint8_t *bitmap, const uint8_t *shape, uint16_t w, uint16_t h,
+                       uint16_t fg, uint16_t hole, uint16_t bg)
+{
+    if (s_fb == NULL || bitmap == NULL || shape == NULL || w == 0 || h == 0) {
+        return;
+    }
+    ak_gfx_fill_rect(x, y, w, h, bg);
+    ak_gfx_bit_runs(x, y, shape, w, h, hole);
+    ak_gfx_bit_runs(x, y, bitmap, w, h, fg);
+}
+
+static uint8_t ak_gfx_pal4_index(const uint8_t *line, uint16_t col)
+{
+    uint8_t byte = line[col / 2U];
+    return (col & 1U) ? (uint8_t)(byte & 0x0FU) : (uint8_t)(byte >> 4);
+}
+
+void ak_gfx_pal4(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint16_t palette[16],
+                 const uint8_t *data)
+{
+    if (s_fb == NULL || palette == NULL || data == NULL || w == 0 || h == 0) {
+        return;
+    }
+
+    const uint16_t stride = (uint16_t)((w + 1U) / 2U);
+    for (uint16_t row = 0; row < h; row++) {
+        const uint8_t *line      = data + (uint32_t)row * stride;
+        uint16_t       run_start = 0;
+        uint8_t        run_idx   = ak_gfx_pal4_index(line, 0);
+
+        for (uint16_t col = 1; col <= w; col++) {
+            uint8_t idx = (col < w) ? ak_gfx_pal4_index(line, col) : (uint8_t)(run_idx ^ 0x10U);
+            if (idx == run_idx) {
+                continue;
+            }
+            ak_gfx_fill_rect((uint16_t)(x + run_start), (uint16_t)(y + row),
+                             (uint16_t)(col - run_start), 1U, palette[run_idx]);
+            run_start = col;
+            run_idx   = idx;
+        }
+    }
+}
+
+/* ---- LCD style primitives (ak_layout.h) ---------------------------------- */
+
+void ak_gfx_round_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t r, uint16_t color)
+{
+    if (w == 0U || h == 0U) {
+        return;
+    }
+    if (r > w / 2U) {
+        r = (uint16_t)(w / 2U);
+    }
+    if (r > h / 2U) {
+        r = (uint16_t)(h / 2U);
+    }
+    /* Corner rows one span each, the middle as one block: at most 2r + 1 fills. */
+    for (uint16_t j = 0U; j < r; j++) {
+        uint16_t d = lcd_round_inset(r, j);
+        ak_gfx_fill_rect((uint16_t)(x + d), (uint16_t)(y + j), (uint16_t)(w - 2U * d), 1U, color);
+        ak_gfx_fill_rect((uint16_t)(x + d), (uint16_t)(y + h - 1U - j), (uint16_t)(w - 2U * d), 1U, color);
+    }
+    if (h > 2U * r) {
+        ak_gfx_fill_rect(x, (uint16_t)(y + r), w, (uint16_t)(h - 2U * r), color);
+    }
+}
+
+void ak_gfx_round_frame(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t r, uint16_t t, uint16_t color,
+                        uint16_t fill)
+{
+    ak_gfx_round_rect(x, y, w, h, r, color);
+    if (w > 2U * t && h > 2U * t) {
+        ak_gfx_round_rect((uint16_t)(x + t), (uint16_t)(y + t), (uint16_t)(w - 2U * t), (uint16_t)(h - 2U * t),
+                          r > t ? (uint16_t)(r - t) : 0U, fill);
+    }
+}
+
+uint16_t ak_gfx_text_box(uint16_t x, uint16_t by, uint16_t bh, const char *s, uint16_t fg, uint16_t bg)
+{
+    if (s == NULL) {
+        return x;
+    }
+    ak_gfx_text(x, (uint16_t)(ak_text_vtop(by, bh) + ak_text_dy()), s, fg, bg, 1);
+    return (uint16_t)(x + ak_text_width(s));
+}
+
+uint16_t ak_gfx_text_right(uint16_t xr, uint16_t by, uint16_t bh, const char *s, uint16_t fg, uint16_t bg)
+{
+    uint16_t w = s != NULL ? ak_text_width(s) : 0U;
+    uint16_t x = xr > w ? (uint16_t)(xr - w) : 0U;
+    (void)ak_gfx_text_box(x, by, bh, s, fg, bg);
+    return x;
+}
+
+uint16_t ak_gfx_text_center(uint16_t bx, uint16_t by, uint16_t bw, uint16_t bh, const char *s, uint16_t fg, uint16_t bg)
+{
+    uint16_t w = s != NULL ? ak_text_width(s) : 0U;
+    uint16_t x = (uint16_t)(bx + (bw > w ? (bw - w) / 2U : 0U));
+    return ak_gfx_text_box(x, by, bh, s, fg, bg);
 }

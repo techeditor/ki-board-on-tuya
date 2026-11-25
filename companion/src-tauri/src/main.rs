@@ -4,7 +4,7 @@
 use agentic_keyboard_companion_lib::{diagnostics, status_sink};
 
 fn main() {
-    // FP-4b Decision 2: the Kiro agent hook is a MODE of this same binary,
+    // The Kiro Crew agent hook is a MODE of this same binary,
     // `companion --hook`, not a separate shell script. When invoked that way we
     // read the hook JSON from STDIN, forward it to the running status sink, and
     // exit(0) fast WITHOUT starting the GUI. Cross-platform (reqwest blocking),

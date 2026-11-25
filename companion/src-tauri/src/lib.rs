@@ -3,10 +3,10 @@
 //! Layering:
 //! * [`protocol`] — pure v1 wire codec (no IO, unit-tested on any host).
 //! * [`transport`] — `serialport`-based UART backend + a stable transport trait.
-//! * [`inject`] / [`asr`] — Windows-only key injection and system dictation,
+//! * [`inject`] / [`asr`] — Windows-only key injection and system speech input,
 //!   each a trait with a real `#[cfg(windows)]` impl and a non-Windows stub.
 //! * [`status_sink`] — FP-4b STATUS ("the eyes"): a pure `map_hook_event` (T5)
-//!   plus a cross-platform `tiny_http` localhost sink (T6) that ingests Kiro
+//!   plus a cross-platform `tiny_http` localhost sink (T6) that ingests Kiro Crew
 //!   agent-hook events (delivered by this same binary's `--hook` mode) and a
 //!   `{port, token}` handoff file the `--hook` mode reads. Only the callback
 //!   that emits a `display` frame is `#[cfg(windows)]` (in the app module).
@@ -26,14 +26,20 @@ pub mod bind_store;
 pub mod crew_api;
 pub mod crew_identity;
 pub mod crew_menus;
+pub mod handshake;
 pub mod lcd_text;
 pub mod hook_install;
 pub mod pc_asr;
 pub mod protocol;
+pub mod scene;
+pub mod scene_store;
+pub mod scene_sync;
 pub mod secrets;
 pub mod stream_asr;
 pub mod ble_sec;
+pub mod ble_pair;
 pub mod ble_pairing;
+pub mod connection_prefs;
 pub mod ota;
 pub mod status_sink;
 pub mod transport;
@@ -89,6 +95,9 @@ pub fn describe_inbound(frame: &Inbound) -> String {
         Inbound::LicenseStatus { seq, payload } => {
             format!("license_status {}{}", payload.state, seq_suffix(*seq))
         }
+        Inbound::PidStatus { seq, payload } => {
+            format!("pid_status {} {}{}", payload.state, payload.reason, seq_suffix(*seq))
+        }
         Inbound::ProvStatus { seq, payload } => format!(
             "prov_status {} {}s{}{}",
             payload.state,
@@ -119,6 +128,17 @@ pub fn describe_inbound(frame: &Inbound) -> String {
             payload.license,
             seq_suffix(*seq)
         ),
+        Inbound::DeviceInfo { seq, payload } => format!(
+            // No SSID, IP or MAC in the log line: it is shown in the Logs view and copied into reports.
+            "device_info fw={} companion={} handshake={} cloud={} wifi={} ble_paired={}{}",
+            payload.fw,
+            payload.companion,
+            flag(payload.handshake),
+            payload.cloud,
+            if payload.wifi_ssid.is_empty() { "off" } else { "on" },
+            flag(payload.ble_paired),
+            seq_suffix(*seq)
+        ),
         Inbound::DeviceSettings { seq, payload } => format!(
             "device_settings volume={} brightness={}{}",
             payload.volume,
@@ -133,6 +153,14 @@ pub fn describe_inbound(frame: &Inbound) -> String {
             seq_suffix(*seq)
         ),
         Inbound::BindSession { seq, payload } => format!("bind_session slot={}{}", payload.slot, seq_suffix(*seq)),
+        Inbound::SceneState { seq, payload } => format!(
+            "scene_state active={}{}{}{}",
+            payload.active,
+            if payload.dirty { " dirty" } else { "" },
+            payload.error.as_deref().map(|e| format!(" error={e}")).unwrap_or_default(),
+            seq_suffix(*seq)
+        ),
+        Inbound::SceneData { seq, payload } => format!("scene_data slot={} id={}{}", payload.slot, payload.id, seq_suffix(*seq)),
         Inbound::OtaStatus(p) => format!("ota_status {} {} v={} fw={}", p.state, p.reason, p.version, p.fw),
         Inbound::OtaAck(p) => format!("ota_ack next={}", p.next),
         Inbound::HelloAck(ack) => format!(
@@ -151,6 +179,15 @@ fn seq_suffix(seq: Option<u64>) -> String {
     match seq {
         Some(n) => format!(" seq={n}"),
         None => String::new(),
+    }
+}
+
+/// A flag a frame may leave out: "yes" / "no" / "?".
+fn flag(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "?",
     }
 }
 
@@ -232,6 +269,9 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
         Inbound::LicenseStatus { seq, payload } => json!({
             "kind": "license_status", "seq": seq, "state": payload.state
         }),
+        Inbound::PidStatus { seq, payload } => json!({
+            "kind": "pid_status", "seq": seq, "state": payload.state, "reason": payload.reason
+        }),
         Inbound::ProvStatus { seq, payload } => json!({
             "kind": "prov_status", "seq": seq, "state": payload.state,
             "remaining_s": payload.remaining_s, "rejected": payload.rejected,
@@ -249,12 +289,21 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
             "ble_name": payload.ble_name, "ble_state": payload.ble_state,
             "cloud": payload.cloud, "license": payload.license
         }),
+        Inbound::DeviceInfo { seq, payload } => json!({
+            "kind": "device_info", "seq": seq,
+            "fw": payload.fw, "companion": payload.companion, "handshake": payload.handshake,
+            "cloud": payload.cloud,
+            "wifi_ssid": payload.wifi_ssid, "wifi_ip": payload.wifi_ip,
+            "wifi_rssi": payload.wifi_rssi, "wifi_mac": payload.wifi_mac,
+            "ble_mac": payload.ble_mac, "ble_name": payload.ble_name, "ble_paired": payload.ble_paired,
+            "pid": payload.pid, "uuid": payload.uuid, "authkey": payload.authkey, "license": payload.license
+        }),
         Inbound::DeviceSettings { seq, payload } => json!({
             "kind": "device_settings", "seq": seq,
             "volume": payload.volume, "brightness": payload.brightness,
             "language": payload.language, "voice_mode": payload.voice_mode,
             "led_power": payload.led_power, "led_auto_off_s": payload.led_auto_off_s,
-            "font_size": payload.font_size,
+            "font_size": payload.font_size, "animation": payload.animation,
             "license": payload.license, "ble_paired": payload.ble_paired
         }),
         Inbound::MenuResult { seq, payload } => json!({
@@ -264,6 +313,8 @@ pub fn inbound_to_json(frame: &Inbound) -> serde_json::Value {
             "dictated": !payload.text.is_empty()
         }),
         Inbound::BindSession { seq, payload } => json!({ "kind": "bind_session", "seq": seq, "slot": payload.slot }),
+        Inbound::SceneState { seq, payload } => json!({ "kind": "scene_state", "seq": seq, "state": payload }),
+        Inbound::SceneData { seq, payload } => json!({ "kind": "scene_data", "seq": seq, "scene": payload }),
         Inbound::OtaStatus(p) => json!({
             "kind": "ota_status", "state": p.state, "reason": p.reason, "version": p.version, "fw": p.fw
         }),
@@ -294,7 +345,9 @@ pub fn run() {
 
 #[cfg(target_os = "windows")]
 mod app {
+    use crate::ble_pair;
     use crate::ble_pairing;
+    use crate::ble_sec;
     use crate::diagnostics;
     use crate::crew_api::{
         slot_display_status, CrewApiClient, CrewConnection, CrewEvent, CrewRealtime, CrewSlot,
@@ -325,6 +378,7 @@ mod app {
     use std::thread;
     use std::time::{Duration, Instant};
     use tauri::{AppHandle, Emitter, Manager, State};
+
 
     struct Inner {
         // NOTE: the board transport is NOT here — it lives in
@@ -359,12 +413,12 @@ mod app {
         /// The sink's token, cached so `status_token()` can return it without
         /// re-reading the handoff file. Empty when no sink is running.
         status_token: String,
-        /// Last mapped status per Kiro `session_id` (design: keep last-status
+        /// Last mapped status per Kiro Crew `session_id` (design: keep last-status
         /// per session, emit a `display` frame for it, push to the UI).
         kc_status: HashMap<String, StatusDisplay>,
         /// FP-4b Route STATUS — persisted "watched chat" filter. `None` = follow
         /// every session (only the UI live-list keys them apart). `Some(id)` = pin ONE
-        /// Kiro `session_id`: only that session's status is forwarded as a
+        /// Kiro Crew `session_id`: only that session's status is forwarded as a
         /// `display` frame to the board, so a background chat's activity no
         /// longer clobbers the LCD. The `kc-status` UI event is ALWAYS pushed
         /// (pinned or not) so the picker can list every active session and the
@@ -399,7 +453,7 @@ mod app {
         /// The last Crew connection attempt failed the gateway identity check
         /// (CP-09); the keyboard is told once per failure streak.
         crew_identity_failed: bool,
-        /// Local OTA (docs/ota.md): the verified package the user picked, the
+        /// Local OTA over USB: the verified package the user picked, the
         /// running transfer, and the key the keyboard reported after hello
         /// (empty = firmware without OTA).
         ota_package: Option<crate::ota::Package>,
@@ -419,11 +473,33 @@ mod app {
         /// Why the last keyboard utterance failed before the voice key was
         /// released (sent when `voice:stop` arrives).
         pc_asr_failed: Option<&'static str>,
+        /// PC mode: the Crew input box was filled; K6 / K4 / K1 act on it until
+        /// this time (`voice_send::PC_FILL_WINDOW`).
+        pc_fill_until: Option<Instant>,
+        /// FR-03 scenes: the store and the keyboard's slots (scene_sync.rs).
+        scenes: crate::scene_sync::SceneManager,
+        /// Whether the keyboard answered this connection's `hello` in time.
+        handshake: crate::handshake::HandshakeWatch,
+    }
+
+    impl Inner {
+        /// The `bindings` frame: aliases, session names and each slot's voice
+        /// input mode (`voice_pc`).
+        fn bindings_frame(&self) -> Value {
+            let b = &self.kc_binds;
+            protocol::bindings_payload(&b.aliases, &b.names, b.voice_pc(self.control_enabled))
+        }
+
+        fn pc_fill_active(&self) -> bool {
+            self.pc_fill_until.is_some_and(|t| t > Instant::now())
+        }
     }
 
     /// One PC ASR utterance: the voice key held (or the settings-page test).
     struct PcAsrRun {
         id: u64,
+        /// The chat slot (1..=3) the keyboard named in `voice:start`; 0 = none.
+        slot: u8,
         /// Set right after registration (the run exists first so an instant
         /// failure still finds it).
         session: Option<Session>,
@@ -449,6 +525,8 @@ mod app {
         controller: Mutex<KiroCrewController>,
         /// Set while a `connect_device` call is opening a transport (CP-05).
         connecting: std::sync::atomic::AtomicBool,
+        /// Auto-connect preferences and the manual-disconnect latch.
+        link: Mutex<crate::connection_prefs::LinkState>,
     }
 
     type Shared = Arc<AppState>;
@@ -471,7 +549,9 @@ mod app {
         crew_api_slots: usize,
         focus_on_select: bool,
         show_workers: bool,
-        voice_inject: bool,
+        voice_force_keyboard: bool,
+        /// Connected, but `hello` got no `hello_ack` within the timeout.
+        handshake_missing: bool,
     }
 
     fn log_line(app: &AppHandle, message: impl Into<String>) {
@@ -604,7 +684,8 @@ mod app {
     }
 
     /// Scan ~4s for BLE peripherals matching the board's advertisement
-    /// (local name `AK-KB` or service `0x1910`) and return their id/name.
+    /// (local name `Ki-board-XXXXXX`, older `Agentic Keyboard-XXXXXX` / `AK-KB`, or
+    /// a supported service) and return their id/name.
     #[tauri::command]
     fn scan_ble() -> Result<Vec<BleDeviceInfo>, String> {
         ble_gatt::scan()
@@ -626,11 +707,15 @@ mod app {
     /// never drives the local Kiro Crew window.
     #[tauri::command]
     fn set_control_enabled(app: AppHandle, state: State<Shared>, enabled: bool) -> Result<(), String> {
-        state
-            .inner
-            .lock()
-            .map_err(|_| "state lock poisoned")?
-            .control_enabled = enabled;
+        let frame = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.control_enabled = enabled;
+            if !enabled {
+                inner.pc_fill_until = None;
+            }
+            inner.bindings_frame() // PC mode needs the keyboard to control the PC
+        };
+        let _ = write_board(state.inner(), &frame);
         log_line(
             &app,
             format!("[KC-CTL] board control {}", if enabled { "ENABLED" } else { "disabled" }),
@@ -666,19 +751,24 @@ mod app {
         Ok(())
     }
 
-    /// Voice input target after K6: `false` = direct Crew API send (default),
-    /// `true` = type into the Crew composer. Persisted in binds.json.
+    /// Voice input: `true` = keyboard mode for every slot (text on the
+    /// keyboard's input strip, K6 sends through the Crew API); `false` =
+    /// automatic, a slot with an Alt+N number uses PC mode. Persisted in
+    /// binds.json.
     #[tauri::command]
-    fn set_voice_inject(app: AppHandle, state: State<Shared>, enabled: bool) -> Result<(), String> {
-        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        let mut next = inner.kc_binds.clone();
-        next.voice_inject = enabled;
-        next.save()?;
-        inner.kc_binds = next;
-        drop(inner);
+    fn set_voice_force_keyboard(app: AppHandle, state: State<Shared>, enabled: bool) -> Result<(), String> {
+        let frame = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            let mut next = inner.kc_binds.clone();
+            next.voice_force_keyboard = enabled;
+            next.save()?;
+            inner.kc_binds = next;
+            inner.bindings_frame()
+        };
+        let _ = write_board(state.inner(), &frame);
         log_line(
             &app,
-            format!("[VOICE] voice input goes {}", if enabled { "into the Crew composer (inject)" } else { "straight to the chat (API)" }),
+            format!("[VOICE] voice input: {}", if enabled { "keyboard mode for every slot" } else { "automatic (Alt+N slots use PC mode)" }),
         );
         Ok(())
     }
@@ -706,11 +796,12 @@ mod app {
             control_enabled: inner.control_enabled,
             focus_on_select: inner.kc_binds.focus_on_select,
             show_workers: inner.kc_binds.show_workers,
-            voice_inject: inner.kc_binds.voice_inject,
+            voice_force_keyboard: inner.kc_binds.voice_force_keyboard,
             crew_api_connected: inner.crew_api_connected,
             crew_api_base_url: inner.crew_api_base_url.clone(),
             crew_api_last_error: inner.crew_api_last_error.clone(),
             crew_api_slots: inner.crew_api_slots.len(),
+            handshake_missing: device_connected && inner.handshake.missing(inner.connection_id),
         })
     }
 
@@ -818,14 +909,26 @@ mod app {
         transport: Option<String>,
         port_name: Option<String>,
     ) -> Result<(), String> {
-        let transport_kind = transport.as_deref().unwrap_or("usb");
+        // A user Connect re-enables auto-reconnect after a manual Disconnect.
+        if let Ok(mut link) = state.link.lock() {
+            link.manual_disconnect = false;
+        }
+        connect_transport(app, state.inner(), transport.as_deref().unwrap_or("usb"), port_name)
+    }
 
+    /// Open the transport and bring the board link up. Used by the Connect
+    /// command and by the reconnect supervisor.
+    fn connect_transport(
+        app: AppHandle,
+        shared: &Shared,
+        transport_kind: &str,
+        port_name: Option<String>,
+    ) -> Result<(), String> {
         diagnostics::record(
             "INFO",
             "connect",
             &format!("begin transport={transport_kind}"),
         );
-        let shared = state.inner();
         // One connect at a time (CP-05): the presence check below and the
         // install after opening the port are separate lock holds, so without
         // this claim two calls could both pass the check and open the same
@@ -867,7 +970,7 @@ mod app {
                     .filter(|s| !s.is_empty())
                     .ok_or("BLE connect requires a device id (scan and pick one)")?;
                 let key = ble_pairing::load().ok_or(
-                    "This PC is not paired with the keyboard for BLE. Connect over USB, open the pairing window on the keyboard, then pair.",
+                    "This PC is not paired with the keyboard for BLE. Open Settings > BLE pairing on the keyboard and use Pair over Bluetooth, or connect over USB and pair.",
                 )?;
                 let transport =
                     BleGattTransport::connect(device_id, line_tx, key).map_err(|err| {
@@ -904,7 +1007,10 @@ mod app {
             inner.last_error.clear();
             inner.device_settings_synced = false;
             inner.connection_id = inner.connection_id.wrapping_add(1);
-            inner.connection_id
+            // Armed before the reader starts, so an instant ack is not missed.
+            let id = inner.connection_id;
+            inner.handshake.begin(id, Instant::now());
+            id
         };
 
         // Start the reader BEFORE greeting so the board's hello_ack is not
@@ -913,7 +1019,10 @@ mod app {
         // `BleGattTransport::connect`, so it is likewise safe to greet now
         // (BLE, unlike USB, is not greet-immediately at the wire level — the
         // greeting deliberately waits until after notify-subscription).
+        // The Device info shown for the previous keyboard must not outlive its connection.
+        let _ = app.emit("board-info-reset", ());
         spawn_board_reader(app.clone(), shared.clone(), line_rx, connection_id);
+        spawn_handshake_timer(app.clone(), shared.clone(), connection_id);
         write_board(shared, &protocol::hello_payload())?;
         let (aliases, status_payloads) = {
             let inner = shared.inner.lock().map_err(|_| "state lock poisoned")?;
@@ -939,7 +1048,7 @@ mod app {
                     }
                 })
                 .collect::<Vec<_>>();
-            (protocol::bindings_payload(&aliases, &inner.kc_binds.names), status_payloads)
+            (inner.bindings_frame(), status_payloads)
         };
         if let Err(err) = write_board(shared, &aliases) {
             log_line(&app, format!("[WARN] binding alias sync failed: {err}"));
@@ -951,6 +1060,9 @@ mod app {
                 log_line(&app, format!("[WARN] status replay failed: {err}"));
             }
         }
+        if transport_kind == "ble" {
+            remember_ble_device(shared, port_name.clone());
+        }
         log_line(
             &app,
             format!("[INFO] connected transport={kind:?} endpoint={endpoint}"),
@@ -959,9 +1071,155 @@ mod app {
         Ok(())
     }
 
+    /// Remember the BLE device this PC connected to, so auto mode can return to it.
+    fn remember_ble_device(shared: &Shared, device_id: Option<String>) {
+        let Some(device_id) = device_id.filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let snapshot = match shared.link.lock() {
+            Ok(mut link) => {
+                link.prefs.ble_device = device_id;
+                link.prefs.clone()
+            }
+            Err(_) => return,
+        };
+        if let Err(err) = crate::connection_prefs::save(&snapshot) {
+            diagnostics::record("WARN", "connect", &format!("save BLE device failed: {err}"));
+        }
+    }
+
+    /// One timer per connection: when `hello` is still unanswered after
+    /// `HELLO_ACK_TIMEOUT`, send it once more (a keyboard still on its boot
+    /// splash answers late); when that one is unanswered too, log it once.
+    /// The UI reads the flag from `get_status`.
+    fn spawn_handshake_timer(app: AppHandle, state: Shared, connection_id: u64) {
+        thread::spawn(move || {
+            thread::sleep(crate::handshake::HELLO_ACK_TIMEOUT);
+            let resend = state
+                .inner
+                .lock()
+                .map(|mut inner| inner.handshake.resend(connection_id, Instant::now()))
+                .unwrap_or(false);
+            if !resend {
+                return;
+            }
+            diagnostics::record("INFO", "connect", "no hello_ack within 3 s; hello sent again");
+            if let Err(err) = write_board(&state, &protocol::hello_payload()) {
+                log_line(&app, format!("[WARN] hello resend failed: {err}"));
+            }
+            thread::sleep(crate::handshake::HELLO_ACK_TIMEOUT);
+            let overdue = state
+                .inner
+                .lock()
+                .map(|mut inner| inner.handshake.poll(connection_id, Instant::now()))
+                .unwrap_or(false);
+            if overdue {
+                log_line(
+                    &app,
+                    "[WARN] keyboard did not answer hello within 6 s (sent twice); menus and PC recognition are unavailable".to_string(),
+                );
+                diagnostics::record("WARN", "connect", "no hello_ack within 6 s");
+            }
+        });
+    }
+
+    /// The board's line channel closed while this connection was still current:
+    /// the cable came out or the BLE link dropped. Clear the transport so the UI
+    /// shows offline and the reconnect supervisor takes over.
+    // shortcut: the "still current" check and the clear are two lock holds, so a
+    // connect that lands between them could be cleared. Upgrade to one lock if
+    // reconnect races show up in the Windows logs.
+    fn drop_lost_link(app: &AppHandle, state: &Shared, connection_id: u64) {
+        let current = state
+            .inner
+            .lock()
+            .map(|inner| inner.connection_id == connection_id)
+            .unwrap_or(false);
+        if !current {
+            return;
+        }
+        let taken = state.transport.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(mut transport) = taken {
+            transport.disconnect();
+        }
+        if let Ok(mut inner) = state.inner.lock() {
+            inner.kind = TransportKind::None;
+            inner.endpoint.clear();
+            inner.device_settings_synced = false;
+            inner.connection_id = inner.connection_id.wrapping_add(1);
+        }
+        log_line(app, "[WARN] board link lost; reconnecting when a device is available".to_string());
+        diagnostics::record("WARN", "connect", "link lost");
+    }
+
+    /// Auto-reconnect. While the link is down and auto-connect is on, try the
+    /// preferred device on the backoff schedule in `connection_prefs`. Ports are
+    /// enumerated only when an attempt is due.
+    fn spawn_reconnect_supervisor(app: AppHandle, state: Shared) {
+        use crate::connection_prefs::{Reconnect, Step, Target};
+        thread::spawn(move || {
+            let mut policy = Reconnect::default();
+            loop {
+                thread::sleep(std::time::Duration::from_secs(1));
+                let (enabled, prefs) = match state.link.lock() {
+                    Ok(link) => (link.auto_enabled(), link.prefs.clone()),
+                    Err(_) => continue,
+                };
+                let connected = state.transport.lock().map(|t| t.is_some()).unwrap_or(false);
+                let now = std::time::Instant::now();
+                let due = !connected && enabled && policy.due(now);
+                let (ports, ble_paired) = if due {
+                    (crate::transport::usb_serial::scan_ports(), crate::ble_pairing::load().is_some())
+                } else {
+                    (Vec::new(), false)
+                };
+                match policy.step(now, connected, enabled, &prefs, &ports, ble_paired) {
+                    Step::Wait => {}
+                    Step::Attempt(target) => {
+                        let result = match target {
+                            Target::Usb(port) => connect_transport(app.clone(), &state, "usb", port),
+                            Target::Ble(id) => connect_transport(app.clone(), &state, "ble", Some(id)),
+                        };
+                        // On success the next tick sees the link up and resets the backoff.
+                        if let Err(err) = result {
+                            log_line(&app, format!("[INFO] auto-reconnect failed: {err}"));
+                            policy.failed(std::time::Instant::now());
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[tauri::command]
+    fn get_connection_prefs(state: State<Shared>) -> Result<crate::connection_prefs::Prefs, String> {
+        state
+            .link
+            .lock()
+            .map(|link| link.prefs.clone())
+            .map_err(|_| "link lock poisoned".to_string())
+    }
+
+    #[tauri::command]
+    fn set_connection_prefs(
+        state: State<Shared>,
+        prefs: crate::connection_prefs::Prefs,
+    ) -> Result<(), String> {
+        let prefs = prefs.normalized();
+        crate::connection_prefs::save(&prefs)?;
+        let mut link = state.link.lock().map_err(|_| "link lock poisoned")?;
+        link.prefs = prefs;
+        Ok(())
+    }
+
     #[tauri::command]
     fn disconnect_device(state: State<Shared>) -> Result<(), String> {
         diagnostics::record("INFO", "disconnect", "begin");
+        // A user Disconnect stops auto-reconnect until the user connects again
+        // or the program restarts.
+        if let Ok(mut link) = state.link.lock() {
+            link.manual_disconnect = true;
+        }
         // Take the transport out under its OWN lock, then say bye and close it
         // with no lock held: the closing flush can block 0.3-2 s on Windows
         // CH34x drivers and must not stall other board writers (CP-04).
@@ -990,7 +1248,9 @@ mod app {
             inner.connection_id = inner.connection_id.wrapping_add(1);
             inner.menu_capable = false;
             inner.board_pc_wait = false;
+            inner.pc_fill_until = None;
             inner.menus.reset_display();
+            inner.scenes.on_disconnect();
         }
         diagnostics::record("INFO", "disconnect", "complete");
         Ok(())
@@ -1176,7 +1436,20 @@ mod app {
         )
     }
 
-    // ── Local firmware update over USB (docs/ota.md) ───────────────────────
+    /// Write the Tuya product ID once. USB only. The keyboard accepts it only
+    /// while it has no PID (never replaces or clears one), and applies it after
+    /// a restart; the answer arrives as the 'pid-status' event. The PID is not
+    /// kept by the Companion and not logged.
+    #[tauri::command]
+    fn send_pid(state: State<Shared>, pid: String) -> Result<(), String> {
+        let pid = pid.trim();
+        if !protocol::pid_is_valid(pid) {
+            return Err("PID must be 16 characters of a-z and 0-9".to_string());
+        }
+        write_board_usb_only(state.inner(), &protocol::pid_payload(pid))
+    }
+
+    // ── Local firmware update over USB ───────────────────────
 
     /// Push transfer state to the UI when the state or the percent changes.
     fn emit_ota(app: &AppHandle, state: &Shared, progress: &crate::ota::Progress) {
@@ -1344,6 +1617,77 @@ mod app {
         ble_pairing::status()
     }
 
+    /// The UI's answer channel of the over-the-air pairing in progress.
+    static AIR_PAIR_ANSWER: std::sync::Mutex<Option<std::sync::mpsc::Sender<bool>>> = std::sync::Mutex::new(None);
+
+    /// Over-the-air BLE pairing (no USB): run the exchange with `device_id`
+    /// (Settings > BLE pairing must be open on the keyboard). Progress arrives
+    /// as `ble-air-pair` events: `{state:"code", code}`, then `{state:"done",
+    /// key_id}` or `{state:"failed", reason}`. The key never reaches the UI.
+    #[tauri::command]
+    fn ble_pair_air(app: AppHandle, device_id: String) -> Result<(), String> {
+        if device_id.trim().is_empty() {
+            return Err("scan and pick the keyboard first".into());
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        {
+            let mut slot = AIR_PAIR_ANSWER.lock().map_err(|_| "pairing state poisoned")?;
+            if slot.is_some() {
+                return Err("a Bluetooth pairing is already running".into());
+            }
+            *slot = Some(tx);
+        }
+        std::thread::Builder::new()
+            .name("ble-air-pair".into())
+            .spawn(move || {
+                let code_app = app.clone();
+                let result = ble_gatt::pair_over_air(
+                    &device_id,
+                    move |code| {
+                        let _ = code_app.emit(
+                            "ble-air-pair",
+                            serde_json::json!({"state": "code", "code": ble_pair::format_code(code)}),
+                        );
+                    },
+                    rx,
+                )
+                .and_then(|(key, key_id)| {
+                    let saved = ble_pairing::save(&ble_sec::hex(&key), &key_id);
+                    let mut key = key;
+                    key.fill(0);
+                    saved
+                });
+                if let Ok(mut slot) = AIR_PAIR_ANSWER.lock() {
+                    *slot = None;
+                }
+                match result {
+                    Ok(status) => {
+                        log_line(&app, format!("[BLE] paired over Bluetooth with keyboard key {}", status.key_id));
+                        let _ = app.emit("ble-air-pair", serde_json::json!({"state": "done", "key_id": status.key_id}));
+                        let _ = app.emit("ble-pairing", status);
+                    }
+                    Err(reason) => {
+                        log_line(&app, format!("[BLE] pairing over Bluetooth failed: {reason}"));
+                        let _ = app.emit("ble-air-pair", serde_json::json!({"state": "failed", "reason": reason}));
+                    }
+                }
+            })
+            .map_err(|err| {
+                if let Ok(mut slot) = AIR_PAIR_ANSWER.lock() {
+                    *slot = None;
+                }
+                format!("spawn pairing thread failed: {err}")
+            })?;
+        Ok(())
+    }
+
+    /// The user's answer to the code shown during `ble_pair_air`.
+    #[tauri::command]
+    fn ble_pair_air_answer(confirm: bool) -> Result<(), String> {
+        let slot = AIR_PAIR_ANSWER.lock().map_err(|_| "pairing state poisoned")?;
+        slot.as_ref().ok_or("no Bluetooth pairing is running")?.send(confirm).map_err(|_| "pairing already ended".into())
+    }
+
     /// Forget the key on this PC. The keyboard keeps its copy until it is
     /// cleared on the device (Settings > Credentials).
     #[tauri::command]
@@ -1354,7 +1698,7 @@ mod app {
     }
 
     /// FP-5: choose which ASR handles a board voice event. `cloud` = board mic +
-    /// Tuya cloud ASR (FP-3); `system` = activate the PC's own dictation here.
+    /// Tuya cloud ASR (FP-3); `system` = activate the PC's own speech input here.
     /// Mirrors the choice to the board via the config frame so the LCD can show it.
     #[tauri::command]
     fn set_voice_source(state: State<Shared>, source: String) -> Result<(), String> {
@@ -1464,8 +1808,7 @@ mod app {
             let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
             inner.kc_binds.set_alias(slot, &alias)?;
             inner.kc_binds.save()?;
-            let b = &inner.kc_binds;
-            (b.aliases.clone(), protocol::bindings_payload(&b.aliases, &b.names))
+            (inner.kc_binds.aliases.clone(), inner.bindings_frame())
         };
         let _ = write_board(state.inner(), &frame);
         Ok(aliases)
@@ -1480,11 +1823,15 @@ mod app {
         if number > 9 {
             return Err(format!("chat number must be 0..=9 (got {number})"));
         }
-        let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
-        inner.kc_binds.set(slot, number);
-        inner.kc_binds.save()?;
-        // Keep the live router context in sync with the persisted numbers.
-        inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
+        let frame = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            inner.kc_binds.set(slot, number);
+            inner.kc_binds.save()?;
+            // Keep the live router context in sync with the persisted numbers.
+            inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
+            inner.bindings_frame() // a slot's voice input mode follows its Alt+N number
+        };
+        let _ = write_board(state.inner(), &frame);
         Ok(())
     }
 
@@ -1510,7 +1857,7 @@ mod app {
             inner.kc_binds.set(slot, number);
             inner.kc_binds.save()?;
             inner.kc_router.ctx.jump_chats = inner.kc_binds.chats.clone();
-            protocol::bindings_payload(&inner.kc_binds.aliases, &inner.kc_binds.names)
+            inner.bindings_frame()
         };
         let _ = write_board(state.inner(), &frame);
         Ok(())
@@ -1525,10 +1872,9 @@ mod app {
             inner.kc_binds.clear_session(slot)?;
             inner.kc_binds.save()?;
             // Alias for the now-unbound slot (empty falls back to A/B/C on AK).
-            let b = &inner.kc_binds;
             (
-                b.aliases.get((slot as usize).saturating_sub(1)).cloned().unwrap_or_default(),
-                protocol::bindings_payload(&b.aliases, &b.names),
+                inner.kc_binds.aliases.get((slot as usize).saturating_sub(1)).cloned().unwrap_or_default(),
+                inner.bindings_frame(),
             )
         };
         let _ = write_board(state.inner(), &frame);
@@ -2106,7 +2452,7 @@ mod app {
             } else {
                 protocol::display_payload(slot, &alias, "idle", "")
             };
-            vec![protocol::bindings_payload(&b.aliases, &b.names), display]
+            vec![inner.bindings_frame(), display]
         });
         write_frames(state, &frames.unwrap_or_default());
         let _ = app.emit("kc-binds-changed", slot);
@@ -2536,6 +2882,7 @@ mod app {
                 }
             }
             diagnostics::record("INFO", "board-reader", "channel closed");
+            drop_lost_link(&app, &state, connection_id);
         });
     }
 
@@ -2549,7 +2896,23 @@ mod app {
     /// API-first board control. Returns true when the frame was consumed by the
     /// stable-slot REST path. False means the caller should use the legacy
     /// focus/SendInput route as fallback.
-    fn route_board_via_crew_api(app: &AppHandle, state: &Shared, frame: &Inbound) -> bool {
+    /// `(key, gesture)` of a K1-K3 gesture frame, for `[KEY-TIMING]`.
+    fn slot_key_gesture(frame: &Inbound) -> Option<(&str, &'static str, u32, Option<u32>)> {
+        let Inbound::Key { payload, .. } = frame else { return None };
+        if !matches!(payload.id.as_str(), "k1" | "k2" | "k3") {
+            return None;
+        }
+        let g = match payload.action {
+            KeyAction::Single => "single",
+            KeyAction::Double => "double",
+            KeyAction::Long => "long",
+            _ => return None,
+        };
+        let hold = (payload.action == KeyAction::Long).then_some(payload.held_ms);
+        Some((payload.id.as_str(), g, payload.wait_ms, hold))
+    }
+
+    fn route_board_via_crew_api(app: &AppHandle, state: &Shared, frame: &Inbound, received: Instant) -> bool {
         let api_ready = state
             .inner
             .lock()
@@ -2593,6 +2956,7 @@ mod app {
                     Some((key, jump, inner.kc_binds.focus_on_select))
                 });
                 if let Some((slot, jump, focus_on_select)) = selected {
+                    let selected_at = Instant::now();
                     let _ = app.emit("crew-api-active-slot", slot.clone());
                     log_line(app, format!("[CREW-API] selected stable slot {slot}"));
                     // The scope changed (current chat); ESC'd requests stay
@@ -2602,6 +2966,7 @@ mod app {
                     for s in fetch {
                         fetch_questions(app, state, s);
                     }
+                    let menus_at = Instant::now();
                     // Bonus: if the user set an Alt+N for this slot, ALSO jump the
                     // Kiro Crew view there (focus the window + inject Alt+N). When
                     // unset (0) nothing is injected — selection only.
@@ -2622,6 +2987,24 @@ mod app {
                         if let Err(e) = fronted {
                             log_line(app, format!("[CREW-API] bring Crew window to front failed: {e}"));
                         }
+                    }
+                    // Selecting a slot is local: no Crew API request is made.
+                    if let Some((key, gesture, window, hold)) = slot_key_gesture(frame) {
+                        log_line(
+                            app,
+                            crate::kirocrew_control::timing_line(
+                                key,
+                                gesture,
+                                "api",
+                                window,
+                                hold,
+                                &[
+                                    ("select", selected_at - received),
+                                    ("menus", menus_at - selected_at),
+                                    ("front", menus_at.elapsed()),
+                                ],
+                            ),
+                        );
                     }
                     return true;
                 }
@@ -2711,7 +3094,171 @@ mod app {
         }
     }
 
+    // ── FR-03 scenes (scene_sync.rs owns the logic) ──────────────────────
+
+    /// Write scene frames to the keyboard; a failed write is logged (the next
+    /// hello resyncs).
+    fn scene_write(app: &AppHandle, state: &Shared, frames: &[Value]) {
+        for f in frames {
+            if let Err(e) = write_board(state, f) {
+                log_line(app, format!("[SCENE] {} not sent: {e}", payload_kind(f)));
+                break;
+            }
+        }
+    }
+
+    /// Push the scene view to the UI and keep the router's knob mode on the
+    /// current scene.
+    fn scene_emit(app: &AppHandle, state: &Shared) {
+        let view = state.inner.lock().ok().map(|mut inner| {
+            let knob = crate::kirocrew_control::KnobMode::parse(&inner.scenes.knob());
+            inner.kc_router.ctx.knob = knob;
+            inner.scenes.view()
+        });
+        if let Some(view) = view {
+            let _ = app.emit("scenes-changed", view);
+        }
+    }
+
+    fn scene_react(app: &AppHandle, state: &Shared, r: crate::scene_sync::Reaction) {
+        scene_write(app, state, &r.frames);
+        if let Some(msg) = &r.message {
+            log_line(app, format!("[SCENE] {msg}"));
+            let _ = app.emit("scene-notice", msg.clone());
+        }
+        if let Some(ms) = r.retry_after_ms {
+            // The keyboard was busy (not in standby): ask again later. A new
+            // hello or a cancel drops the pending switch, so retry() is empty.
+            let app = app.clone();
+            let state = state.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(ms));
+                let frames = state.inner.lock().map(|mut inner| inner.scenes.retry()).unwrap_or_default();
+                scene_write(&app, &state, &frames);
+            });
+        }
+        if r.changed || r.message.is_some() {
+            scene_emit(app, state);
+        }
+    }
+
+    /// Run a scene edit, write its frames, push the view.
+    fn scene_cmd<T>(
+        app: &AppHandle,
+        state: &Shared,
+        f: impl FnOnce(&mut crate::scene_sync::SceneManager) -> Result<(T, Vec<Value>), String>,
+    ) -> Result<T, String> {
+        let (out, frames) = {
+            let mut inner = state.inner.lock().map_err(|_| "state lock poisoned")?;
+            f(&mut inner.scenes)?
+        };
+        scene_write(app, state, &frames);
+        scene_emit(app, state);
+        Ok(out)
+    }
+
+    #[tauri::command]
+    fn scenes_list(state: State<Shared>) -> Result<crate::scene_sync::SceneView, String> {
+        Ok(state.inner.lock().map_err(|_| "state lock poisoned")?.scenes.view())
+    }
+
+    #[tauri::command]
+    fn scene_create(app: AppHandle, state: State<Shared>, scene: crate::scene::Scene) -> Result<String, String> {
+        scene_cmd(&app, state.inner(), |m| m.create(scene))
+    }
+
+    #[tauri::command]
+    fn scene_duplicate(app: AppHandle, state: State<Shared>, id: String) -> Result<String, String> {
+        scene_cmd(&app, state.inner(), |m| m.duplicate(&id))
+    }
+
+    #[tauri::command]
+    fn scene_update(app: AppHandle, state: State<Shared>, id: String, scene: crate::scene::Scene) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| m.update(&id, scene).map(|f| ((), f)))
+    }
+
+    #[tauri::command]
+    fn scene_rename(app: AppHandle, state: State<Shared>, id: String, name: String) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| m.rename(&id, &name).map(|f| ((), f)))
+    }
+
+    #[tauri::command]
+    fn scene_delete(app: AppHandle, state: State<Shared>, id: String) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| m.delete(&id).map(|f| ((), f)))
+    }
+
+    #[tauri::command]
+    fn scene_set_favorites(app: AppHandle, state: State<Shared>, ids: Vec<String>) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| m.set_favorites(&ids).map(|f| ((), f)))
+    }
+
+    /// Import a scene file's text (the UI reads the file the user picked).
+    /// All or nothing; returns the new ids.
+    #[tauri::command]
+    fn scene_import(app: AppHandle, state: State<Shared>, text: String) -> Result<Vec<String>, String> {
+        scene_cmd(&app, state.inner(), |m| m.import(text.as_bytes()).map(|ids| (ids, Vec::new())))
+    }
+
+    /// Export scenes as file text (the UI saves it where the user chooses).
+    #[tauri::command]
+    fn scene_export(state: State<Shared>, ids: Vec<String>) -> Result<String, String> {
+        state.inner.lock().map_err(|_| "state lock poisoned")?.scenes.export(&ids)
+    }
+
+    /// Export scenes to `~/.ak-companion/scene-exports/scenes-<time>.json`,
+    /// open that folder in Explorer, and return the file path.
+    #[tauri::command]
+    fn scene_export_file(state: State<Shared>, ids: Vec<String>) -> Result<String, String> {
+        let text = state.inner.lock().map_err(|_| "state lock poisoned")?.scenes.export(&ids)?;
+        let dir = crate::app_dirs::companion_file("scene-exports");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        let path = dir.join(format!("scenes-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+        std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+        let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+        Ok(path.display().to_string())
+    }
+
+    #[tauri::command]
+    fn scene_switch(app: AppHandle, state: State<Shared>, id: String) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| m.switch(&id).map(|f| ((), f)))
+    }
+
+    #[tauri::command]
+    fn scene_cancel_switch(app: AppHandle, state: State<Shared>) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| {
+            m.cancel_switch();
+            Ok(((), Vec::new()))
+        })
+    }
+
+    /// Apply the current scene again (drop changes made on the keyboard).
+    #[tauri::command]
+    fn scene_restore(app: AppHandle, state: State<Shared>) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| m.restore().map(|f| ((), f)))
+    }
+
+    /// Keep the keyboard's current voice mode / LED power in the current scene.
+    #[tauri::command]
+    fn scene_save_live(app: AppHandle, state: State<Shared>) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| m.save_live().map(|f| ((), f)))
+    }
+
+    /// Copy a keyboard slot made on another computer into this Companion.
+    #[tauri::command]
+    fn scene_import_from_board(app: AppHandle, state: State<Shared>, slot: u8) -> Result<(), String> {
+        scene_cmd(&app, state.inner(), |m| m.import_from_board(slot).map(|f| ((), f)))
+    }
+
     fn handle_frame(app: &AppHandle, state: &Shared, frame: Inbound) {
+        let received = Instant::now(); // [KEY-TIMING] stage origin
+        // Key and encoder frames reach the UI the moment they are read. They
+        // used to be published at the end of this function, after the PC action
+        // they trigger (window focus + keystrokes: tens to hundreds of ms on
+        // this reader thread), so the live key view lagged behind the keyboard.
+        let ui_early = matches!(frame, Inbound::Key { .. } | Inbound::Encoder { .. });
+        if ui_early {
+            publish_rx(app, &frame);
+        }
         // Firmware update frames: only from the USB link, never logged per ack.
         if matches!(frame, Inbound::OtaStatus(_) | Inbound::OtaAck(_)) {
             let usb = state.inner.lock().map(|inner| inner.kind == TransportKind::Usb).unwrap_or(false);
@@ -2726,16 +3273,24 @@ mod app {
                 let _ = write_board(state, &protocol::pong_payload());
             }
             Inbound::HelloAck(ack) => {
+                let mut late_ack = false;
                 if let Ok(mut inner) = state.inner.lock() {
+                    let id = inner.connection_id;
+                    late_ack = inner.handshake.ack(id);
                     inner.firmware = ack.fw.clone();
                     inner.menu_capable = ack.capabilities.iter().any(|c| c == "menu");
                     inner.board_pc_wait = ack.capabilities.iter().any(|c| c == "pc_asr_wait");
+                    inner.scenes.on_hello(&ack.capabilities);
                     inner.menus.reset_display();
                     // A (re)connected keyboard has no Bind session flow open.
                     inner.bind_flow = None;
                     inner.menus.set_hold(false);
                 }
                 refresh_menus(app, state);
+                if late_ack {
+                    log_line(app, "[INFO] hello_ack arrived late; menus and PC recognition are available again".to_string());
+                    diagnostics::record("INFO", "connect", "hello_ack arrived late");
+                }
             }
             Inbound::SystemInfo { payload, .. } => {
                 if let Ok(mut inner) = state.inner.lock() {
@@ -2753,9 +3308,12 @@ mod app {
         | Inbound::ActivationStatus { seq: Some(seq), .. }
         | Inbound::LicenseInfo { seq: Some(seq), .. }
         | Inbound::SystemInfo { seq: Some(seq), .. }
+        | Inbound::DeviceInfo { seq: Some(seq), .. }
         | Inbound::DeviceSettings { seq: Some(seq), .. }
         | Inbound::MenuResult { seq: Some(seq), .. }
-        | Inbound::BindSession { seq: Some(seq), .. } = &frame
+        | Inbound::BindSession { seq: Some(seq), .. }
+        | Inbound::SceneState { seq: Some(seq), .. }
+        | Inbound::SceneData { seq: Some(seq), .. } = &frame
         {
             let _ = write_board(state, &protocol::ack_payload(*seq));
         }
@@ -2840,6 +3398,12 @@ mod app {
             log_line(app, format!("[LICENSE] {}", payload.state));
         }
 
+        // Product ID write result -> UI. The PID itself never comes back.
+        if let Inbound::PidStatus { payload, .. } = &frame {
+            let _ = app.emit("pid-status", payload.clone());
+            log_line(app, format!("[PID] {} {}", payload.state, payload.reason));
+        }
+
         // Explicit USB-only diagnostic: UUID is visible, AuthKey remains masked.
         if let Inbound::LicenseInfo { payload, .. } = &frame {
             let _ = app.emit("license-info", payload.clone());
@@ -2874,31 +3438,67 @@ mod app {
             );
         }
 
+        // FR-03 scenes: slot reports, slot data, and a settings report that
+        // may have made the current scene dirty.
+        match &frame {
+            Inbound::SceneState { payload, .. } => {
+                let reaction = state.inner.lock().map(|mut inner| inner.scenes.on_state(payload)).unwrap_or_default();
+                scene_react(app, state, reaction);
+            }
+            Inbound::SceneData { payload, .. } => {
+                let reaction = state.inner.lock().map(|mut inner| inner.scenes.on_data(payload)).unwrap_or_default();
+                scene_react(app, state, reaction);
+            }
+            Inbound::DeviceSettings { payload, .. } => {
+                let frames =
+                    state.inner.lock().map(|mut inner| inner.scenes.on_device_settings(payload)).unwrap_or_default();
+                scene_write(app, state, &frames);
+            }
+            _ => {}
+        }
+
         // LCD menu answers, dictated menu answers and the K6 model actions.
         // Gated on `control_enabled` like every other board-driven PC action.
         let control_enabled = state.inner.lock().map(|inner| inner.control_enabled).unwrap_or(false);
         let menu_frame = matches!(frame, Inbound::MenuResult { .. } | Inbound::BindSession { .. });
         if (control_enabled && handle_menu_frame(app, state, &frame)) || (!control_enabled && menu_frame) {
-            log_line(app, format!("[RX] {}", describe_inbound(&frame)));
-            let _ = app.emit("board-event", inbound_to_json(&frame));
+            if !ui_early {
+                publish_rx(app, &frame);
+            }
             return;
         }
 
-        // Voice input ③, direct-send mode (default): the keyboard keeps and
-        // edits the text, K6 posts it through the Crew API; nothing is typed.
-        // `voice_inject` keeps the old composer-injection path below.
-        let direct = state
+        // Voice input (see `voice_send`): keyboard mode keeps and edits the text
+        // on the keyboard, K6 posts it through the Crew API; PC mode fills the
+        // Crew input box. Nothing the keyboard sends is typed otherwise.
+        if voice_send::ends_pc_fill(&frame) {
+            if let Ok(mut inner) = state.inner.lock() {
+                inner.pc_fill_until = None;
+            }
+        }
+        let decision = state
             .inner
             .lock()
             .ok()
-            .filter(|inner| inner.control_enabled && !inner.kc_binds.voice_inject)
-            .map(|inner| voice_send::classify(&frame, inner.crew_api_active_slot.as_deref()));
-        if let Some(decision) = direct.filter(|d| *d != VoiceDirect::NotMine) {
+            .filter(|inner| inner.control_enabled)
+            .map(|inner| {
+                let b = &inner.kc_binds;
+                let ctx = voice_send::VoiceCtx {
+                    slot_keys: [0, 1, 2].map(|i| b.local_key(i)),
+                    active_slot: inner.crew_api_active_slot.as_deref(),
+                    pc: b.voice_pc(true),
+                    pc_fill: inner.pc_fill_active(),
+                };
+                voice_send::classify(&frame, &ctx)
+            });
+        if let Some(decision) = decision.filter(|d| *d != VoiceDirect::NotMine) {
             handle_voice_direct(app, state, decision);
-            log_line(app, format!("[RX] {}", describe_inbound(&frame)));
-            let _ = app.emit("board-event", inbound_to_json(&frame));
+            if !ui_early {
+                publish_rx(app, &frame);
+            }
             return;
         }
+
 
         // PC ASR: when the keyboard's voice route is `system`, the voice key's
         // `voice:start` / `voice:stop` frame the utterance; the Companion
@@ -2913,7 +3513,7 @@ mod app {
                 .unwrap_or((false, VoiceSource::Cloud));
             if enabled && source == VoiceSource::System {
                 match payload.state {
-                    VoiceState::Start => pc_asr_begin(app, state, true),
+                    VoiceState::Start => pc_asr_begin(app, state, true, payload.slot.unwrap_or(0)),
                     VoiceState::Stop => pc_asr_end(app, state),
                     VoiceState::Cancel => {
                         pc_asr_cancel(state);
@@ -2921,13 +3521,23 @@ mod app {
                     }
                     VoiceState::Unknown => {}
                 }
+            } else if !enabled && source == VoiceSource::System {
+                // The keyboard waits for an answer; without keyboard control the
+                // microphone stays off, so say why instead of timing out.
+                match payload.state {
+                    VoiceState::Start => {
+                        pc_asr_report_failure(app, state, crate::lcd_text::lcd("Voice needs keyboard control"))
+                    }
+                    VoiceState::Stop => pc_asr_end(app, state),
+                    VoiceState::Cancel | VoiceState::Unknown => {}
+                }
             }
         }
 
         // Primary route: stable Crew slot REST control. When API is connected
         // and Chat A/B/C has an API slot binding, consume the frame without
         // focusing a window. Otherwise preserve the legacy SendInput behavior.
-        let api_consumed = route_board_via_crew_api(app, state, &frame);
+        let api_consumed = route_board_via_crew_api(app, state, &frame, received);
         if !api_consumed {
             let (enabled, action) = state
                 .inner
@@ -2937,7 +3547,22 @@ mod app {
                 .unwrap_or((false, ControlAction::None));
             if enabled && action != ControlAction::None {
                 let desc = describe_control_action(&action);
+                let routed = received.elapsed();
+                let started = Instant::now();
                 let result = exec_control_action(app, state, &action);
+                if let Some((key, gesture, window, hold)) = slot_key_gesture(&frame) {
+                    log_line(
+                        app,
+                        crate::kirocrew_control::timing_line(
+                            key,
+                            gesture,
+                            "keys",
+                            window,
+                            hold,
+                            &[("route", routed), ("focus+keys", started.elapsed())],
+                        ),
+                    );
+                }
                 match result {
                     Ok(()) => log_line(app, format!("[KC-CTL] fallback {desc}")),
                     Err(e) => {
@@ -2956,16 +3581,93 @@ mod app {
             }
         }
 
-        log_line(app, format!("[RX] {}", describe_inbound(&frame)));
-        let _ = app.emit("board-event", inbound_to_json(&frame));
+        if !ui_early {
+            publish_rx(app, &frame);
+        }
     }
 
-    /// Direct send of a confirmed voice input (see `voice_send`). Runs the
-    /// HTTP call off the board-reader thread. On any failure the text goes
-    /// back to the keyboard's input confirm with a short reason; it is never
-    /// typed into a window as a fallback.
+    /// Log a received frame and hand it to the UI event stream.
+    fn publish_rx(app: &AppHandle, frame: &Inbound) {
+        log_line(app, format!("[RX] {}", describe_inbound(frame)));
+        let _ = app.emit("board-event", inbound_to_json(frame));
+    }
+
+    /// How long after Alt+N the Crew window gets to show the chat before the
+    /// text is typed (PC mode).
+    const PC_FILL_SETTLE: Duration = Duration::from_millis(150);
+
+    /// PC mode: Alt+N to the slot's chat, then type `text` into the Crew input
+    /// box without sending. Runs on the board-reader thread so a K6 that
+    /// follows is handled after it. On failure (keyboard control off, the
+    /// Crew window check, typing) the text goes to the keyboard's input strip.
+    fn pc_fill(app: &AppHandle, state: &Shared, slot: u8, text: &str) {
+        let jump = state
+            .inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.kc_binds.chats.get(slot as usize - 1).copied())
+            .filter(|n| (1..=9).contains(n));
+        let result = jump.ok_or_else(|| "no Alt+N number".to_string()).and_then(|n| {
+            exec_control_action(app, state, &ControlAction::Chord(Chord::JumpChat(n)))?;
+            thread::sleep(PC_FILL_SETTLE);
+            exec_control_action(app, state, &ControlAction::Compose(text.to_string()))
+        });
+        match result {
+            Ok(()) => {
+                if let Ok(mut inner) = state.inner.lock() {
+                    inner.pc_fill_until = Some(Instant::now() + voice_send::PC_FILL_WINDOW);
+                }
+                log_line(app, format!("[VOICE] filled the Crew input box of slot {slot} ({} chars)", text.chars().count()));
+                write_menu_frames(app, state, vec![voice_send::pc_filled_payload("")]);
+            }
+            Err(e) => {
+                log_line(app, format!("[VOICE] PC fill failed, text kept on the keyboard: {e}"));
+                if let Ok(mut inner) = state.inner.lock() {
+                    inner.pc_fill_until = None;
+                }
+                let why = if e.contains("window") { "Crew window not in front" } else { "Typing failed" };
+                write_menu_frames(
+                    app,
+                    state,
+                    vec![voice_send::input_restore_payload(text, crate::lcd_text::lcd(why), voice_send::SRC_PC)],
+                );
+            }
+        }
+    }
+
+    /// PC mode: K6 / K4 / K1 on the filled Crew input box.
+    fn pc_key(app: &AppHandle, state: &Shared, key: voice_send::PcKey) {
+        use voice_send::PcKey;
+        let chord = match key {
+            PcKey::Enter => Chord::Enter,
+            PcKey::Backspace => Chord::Backspace,
+            PcKey::Clear => Chord::ClearInput,
+        };
+        let result = exec_control_action(app, state, &ControlAction::Chord(chord));
+        if let Ok(mut inner) = state.inner.lock() {
+            inner.pc_fill_until = match (&result, key) {
+                (Ok(()), PcKey::Backspace) => Some(Instant::now() + voice_send::PC_FILL_WINDOW),
+                (Ok(()), _) => None, // sent or cleared: the box is no longer ours
+                (Err(_), _) => inner.pc_fill_until,
+            };
+        }
+        if let Err(e) = result {
+            log_line(app, format!("[VOICE] {key:?} on the Crew input box failed: {e}"));
+            write_menu_frames(
+                app,
+                state,
+                vec![notice_payload(crate::lcd_text::lcd("Crew window not in front"), NoticeLevel::Error)],
+            );
+        }
+    }
+
+    /// Act on a classified voice-input frame (see `voice_send`). The Crew API
+    /// call runs off the board-reader thread. On any failure the text goes
+    /// back to the keyboard's input strip with a short reason; it is never
+    /// typed into a window as a fallback to a failed send.
     fn handle_voice_direct(app: &AppHandle, state: &Shared, decision: VoiceDirect) {
-        let fail = |app: &AppHandle, state: &Shared, reason: &str, text: Option<String>| {
+        let fail = |app: &AppHandle, state: &Shared, reason: &'static str, text: Option<String>| {
+            let reason = crate::lcd_text::lcd(reason);
             let mut frames = vec![notice_payload(reason, NoticeLevel::Error)];
             if let Some(text) = text {
                 frames.push(voice_send::input_restore_payload(&text, reason, voice_send::SRC_RETRY));
@@ -2974,6 +3676,8 @@ mod app {
         };
         match decision {
             VoiceDirect::NotMine | VoiceDirect::Consumed => {}
+            VoiceDirect::PcFill { slot, text } => pc_fill(app, state, slot, &text),
+            VoiceDirect::PcKey(key) => pc_key(app, state, key),
             VoiceDirect::Fail { reason, text } => {
                 log_line(app, format!("[VOICE] not sent: {reason}"));
                 fail(app, state, reason, text);
@@ -3041,7 +3745,7 @@ mod app {
     }
 
     /// Voice key down (or the test button): record and stream.
-    fn pc_asr_begin(app: &AppHandle, state: &Shared, to_keyboard: bool) {
+    fn pc_asr_begin(app: &AppHandle, state: &Shared, to_keyboard: bool, slot: u8) {
         // A new press replaces an utterance that is still finishing.
         pc_asr_cancel(state);
         let Ok((settings, id)) = state.inner.lock().map(|mut inner| {
@@ -3065,7 +3769,7 @@ mod app {
         // Register the run before the session can report (a missing key
         // fails at once).
         if let Ok(mut inner) = state.inner.lock() {
-            inner.pc_asr = Some(PcAsrRun { id, session: None, capture: None, to_keyboard, fell_back: false });
+            inner.pc_asr = Some(PcAsrRun { id, slot, session: None, capture: None, to_keyboard, fell_back: false });
         }
         let session = Session::start(engine, fallback, opts, factory, output, Duration::from_secs(8));
         let feeder = session.feeder();
@@ -3156,13 +3860,13 @@ mod app {
             if matches!(out, SessionOutput::FellBack { .. }) {
                 current.fell_back = true;
             }
-            let info = (current.to_keyboard, current.fell_back);
+            let info = (current.to_keyboard, current.fell_back, current.slot);
             if finished {
                 inner.pc_asr = None;
             }
             Some(info)
         });
-        let Some((to_keyboard, fell_back)) = run else { return };
+        let Some((to_keyboard, fell_back, slot)) = run else { return };
         match out {
             SessionOutput::Partial { engine, text } => emit_pc_asr(app, id, "partial", engine, &text, ""),
             SessionOutput::FellBack { from, to, reason } => {
@@ -3182,7 +3886,7 @@ mod app {
                 log_line(app, format!("[PC-ASR] {} recognised {} chars", engine.as_str(), text.chars().count()));
                 emit_pc_asr(app, id, "final", engine, &text, "");
                 if to_keyboard {
-                    deliver_pc_asr_text(app, state, &text, pc_asr_label(engine, fell_back));
+                    deliver_pc_asr_text(app, state, &text, pc_asr_label(engine, fell_back), slot);
                 }
             }
         }
@@ -3198,22 +3902,23 @@ mod app {
         crate::lcd_text::lcd(en)
     }
 
-    /// Same path as text from the keyboard's own ASR: the text lands in the
-    /// keyboard's input confirm ③ (`input_restore`); K6 sends it. In the
-    /// optional inject mode it is also typed into the composer, as an `asr`
-    /// frame would be.
-    fn deliver_pc_asr_text(app: &AppHandle, state: &Shared, text: &str, label: &str) {
+    /// Same path as text from the keyboard's own ASR: in keyboard mode the text
+    /// lands on the keyboard's input strip (`input_restore`; K6 sends it), in
+    /// PC mode (the slot's chat has an Alt+N number) it is typed into the
+    /// Crew input box.
+    fn deliver_pc_asr_text(app: &AppHandle, state: &Shared, text: &str, label: &str, slot: u8) {
         let Some(text) = crate::kirocrew_control::sanitize_device_text(text) else {
             release_board_wait(app, state, crate::lcd_text::lcd("Didn't catch that"));
             return;
         };
-        let inject = state.inner.lock().ok().filter(|inner| inner.kc_binds.voice_inject).map(|inner| {
-            inner.kc_router.route(&Inbound::Asr { seq: None, payload: protocol::AsrPayload { text: text.clone() } })
-        });
-        if let Some(action) = inject.filter(|a| *a != ControlAction::None) {
-            if let Err(e) = exec_control_action(app, state, &action) {
-                log_line(app, format!("[PC-ASR] typing into the composer failed: {e}"));
-            }
+        let pc = state
+            .inner
+            .lock()
+            .map(|inner| inner.kc_binds.voice_pc(inner.control_enabled))
+            .unwrap_or([false; 3]);
+        if (1..=3).contains(&slot) && pc[slot as usize - 1] {
+            pc_fill(app, state, slot, &text);
+            return;
         }
         write_menu_frames(app, state, vec![voice_send::input_restore_payload(&text, label, voice_send::SRC_PC)]);
     }
@@ -3339,7 +4044,7 @@ mod app {
     /// Settings-page test with the PC microphone; the text stays in the UI.
     #[tauri::command]
     fn asr_test_start(app: AppHandle, state: State<Shared>) -> Result<(), String> {
-        pc_asr_begin(&app, state.inner(), false);
+        pc_asr_begin(&app, state.inner(), false, 0);
         Ok(())
     }
 
@@ -3362,6 +4067,8 @@ mod app {
         );
         menus.set_last_models(kc_binds.last_models_by_status_id());
         let jump_chats = kc_binds.chats.clone();
+        let scenes = crate::scene_sync::SceneManager::load();
+        let knob = crate::kirocrew_control::KnobMode::parse(&scenes.knob());
         let kc_pinned_session = (!kc_binds.pinned_session.is_empty()).then(|| kc_binds.pinned_status_id());
         let crew_api = match CrewApiClient::from_env() {
             Ok(client) => Some(client),
@@ -3384,6 +4091,7 @@ mod app {
             transport: Mutex::new(None),
             controller: Mutex::new(KiroCrewController::new(None)),
             connecting: std::sync::atomic::AtomicBool::new(false),
+            link: Mutex::new(crate::connection_prefs::LinkState::load()),
             inner: Mutex::new(Inner {
                 kind: TransportKind::None,
                 endpoint: String::new(),
@@ -3397,6 +4105,7 @@ mod app {
                 device_settings_synced: false,
                 kc_router: ControlRouter::new(crate::kirocrew_control::ControlCtx {
                     jump_chats,
+                    knob,
                 }),
                 control_enabled: true,
                 status_sink: None,
@@ -3426,6 +4135,9 @@ mod app {
                 asr_download: None,
                 board_pc_wait: false,
                 pc_asr_failed: None,
+                pc_fill_until: None,
+                scenes,
+                handshake: crate::handshake::HandshakeWatch::default(),
             }),
         });
         spawn_state_watchdog(state.clone());
@@ -3434,6 +4146,7 @@ mod app {
         tauri::Builder::default()
             .manage(state)
             .setup(|app| {
+                spawn_reconnect_supervisor(app.handle().clone(), app.state::<Shared>().inner().clone());
                 let app_handle = app.handle().clone();
                 let shared = app.state::<Shared>().inner().clone();
                 spawn_remote_status_poll(&app_handle, &shared);
@@ -3456,7 +4169,9 @@ mod app {
                 set_control_enabled,
                 set_focus_on_select,
                 set_show_workers,
-                set_voice_inject,
+                set_voice_force_keyboard,
+                get_connection_prefs,
+                set_connection_prefs,
                 asr_get_settings,
                 asr_set_settings,
                 asr_set_key,
@@ -3483,11 +4198,27 @@ mod app {
                 keyboard_open_pairing,
                 keyboard_ble_unpair,
                 set_keymap,
+                scenes_list,
+                scene_create,
+                scene_duplicate,
+                scene_update,
+                scene_rename,
+                scene_delete,
+                scene_set_favorites,
+                scene_import,
+                scene_export,
+                scene_export_file,
+                scene_switch,
+                scene_cancel_switch,
+                scene_restore,
+                scene_save_live,
+                scene_import_from_board,
                 send_wifi,
                 wifi_saved_list,
                 wifi_saved_forget,
                 wifi_saved_clear,
                 send_license,
+                send_pid,
                 read_license,
                 enter_pairing,
                 ble_pair,
@@ -3496,6 +4227,8 @@ mod app {
                 ota_cancel,
                 ble_pairing_status,
                 ble_forget,
+                ble_pair_air,
+                ble_pair_air_answer,
                 set_voice_source,
                 kc_bind_window,
                 kc_send_text,
@@ -3539,8 +4272,10 @@ mod tests {
                 id: "k2".into(),
                 action: KeyAction::Long,
                 held_ms: 820,
+                wait_ms: 0,
                 bind: None,
                 text: None,
+                slot: None,
             },
         };
         assert_eq!(describe_inbound(&key), "key k2 Long (820ms) seq=7");
@@ -3574,6 +4309,7 @@ mod tests {
             seq: Some(3),
             payload: VoicePayload {
                 state: VoiceState::Start,
+                slot: None,
             },
         };
         let json = inbound_to_json(&voice);
@@ -3595,6 +4331,39 @@ mod tests {
                 ensure_usb_provisioning_transport(connected, kind).unwrap_err(),
                 "WiFi and UUID/AuthKey settings require an active USB connection"
             );
+        }
+    }
+
+    #[test]
+    fn device_info_reaches_the_ui_with_its_real_fields_and_no_extras() {
+        // The firmware report's example frame, plus a field the Companion does not know:
+        // only the declared fields are forwarded, so an unexpected value never reaches the UI or the log.
+        let line = r#"{"v":1,"seq":9,"type":"device_info","payload":{"fw":"0.3.98","companion":"usb","handshake":true,"cloud":"active","wifi_ssid":"Office-5G","wifi_ip":"192.168.10.23","wifi_rssi":-61,"wifi_mac":"A0:B1:C2:D3:E4:F5","ble_mac":"A0:B1:C2:D3:E4:F6","ble_name":"Ki-board-D3E4F5","ble_paired":true,"pid":true,"uuid":true,"authkey":true,"license":true,"authkey_value":"SECRET-VALUE-123"}}"#;
+        let frame = protocol::decode_line(line).unwrap();
+        let json = inbound_to_json(&frame);
+        assert_eq!(json["kind"], "device_info");
+        assert_eq!(json["wifi_ip"], "192.168.10.23");
+        assert_eq!(json["wifi_rssi"], -61);
+        assert_eq!(json["wifi_mac"], "A0:B1:C2:D3:E4:F5");
+        assert_eq!(json["ble_mac"], "A0:B1:C2:D3:E4:F6");
+        assert_eq!(json["ble_paired"], true);
+        assert_eq!(json["license"], true);
+        assert!(!json.to_string().contains("SECRET-VALUE-123"));
+        assert!(!describe_inbound(&frame).contains("SECRET-VALUE-123"));
+
+        // A missing rssi is null (shown as "--"), not 0.
+        let off = protocol::decode_line(r#"{"v":1,"type":"device_info","payload":{"fw":"0.3.98","wifi_ssid":""}}"#).unwrap();
+        assert!(inbound_to_json(&off)["wifi_rssi"].is_null());
+        assert!(inbound_to_json(&off)["pid"].is_null());
+    }
+
+    #[test]
+    fn device_info_log_line_has_no_network_identifiers() {
+        let line = r#"{"v":1,"seq":9,"type":"device_info","payload":{"fw":"0.3.98","companion":"usb","handshake":true,"cloud":"active","wifi_ssid":"Office-5G","wifi_ip":"192.168.10.23","wifi_rssi":-61,"wifi_mac":"A0:B1:C2:D3:E4:F5","ble_mac":"A0:B1:C2:D3:E4:F6","ble_name":"Ki-board-D3E4F5","ble_paired":true,"pid":true,"uuid":true,"authkey":true,"license":true}}"#;
+        let text = describe_inbound(&protocol::decode_line(line).unwrap());
+        assert_eq!(text, "device_info fw=0.3.98 companion=usb handshake=yes cloud=active wifi=on ble_paired=yes seq=9");
+        for private in ["Office-5G", "192.168", "A0:B1", "D3E4F5"] {
+            assert!(!text.contains(private), "{private} must not be logged");
         }
     }
 

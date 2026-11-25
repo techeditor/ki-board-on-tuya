@@ -1,15 +1,16 @@
 [package]
 name = "agentic-keyboard-companion"
-version = "0.3.4"
+version = "0.3.27"
 description = "Companion app for the T5AI-Core agentic keyboard"
-authors = ["Kiro"]
+authors = ["Ki-board"]
 edition = "2021"
 
 [lib]
 name = "agentic_keyboard_companion_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[target.'cfg(target_os = "windows")'.build-dependencies]
+
+[build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
@@ -62,7 +63,8 @@ sha2 = "0.10"
 base64 = "0.22"
 # Local OTA (docs/ota.md): verify the ECDSA P-256 package signature on the PC
 # before sending it (the keyboard verifies again). RustCrypto, verify only.
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+# Over-the-air BLE pairing (ble_pair.rs) uses ECDH P-256 from the same crate.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh", "std"] }
 # PC streaming ASR (docs/pc-asr.md). The local engine loads the sherpa-onnx
 # C API at run time from DLLs downloaded with the model, so nothing native is
 # linked or bundled (ISC).
